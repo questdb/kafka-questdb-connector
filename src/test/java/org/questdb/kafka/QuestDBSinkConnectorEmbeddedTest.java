@@ -193,7 +193,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testDecimalTypeNotSupported() {
-        String topicName = "testExplicitTableName";
+        String topicName = "mytopic";
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
@@ -215,6 +215,81 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
         assertConnectorTaskFailedEventually();
+    }
+
+    @Test
+    public void testNestedStructInValue() {
+        String topicName = "mytopic";
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+
+        Schema nameSchema = SchemaBuilder.struct().name("com.example.Name")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .build();
+
+        Schema personSchema = SchemaBuilder.struct().name("com.example.Person")
+                .field("name", nameSchema)
+                .build();
+
+        Struct person = new Struct(personSchema)
+                .put("name", new Struct(nameSchema)
+                        .put("firstname", "John")
+                        .put("lastname", "Doe")
+                );
+
+        String value = new String(converter.fromConnectData(topicName, personSchema, person));
+        connect.kafka().produce(topicName, "key", value);
+
+        assertSqlEventually(questDBContainer, "\"name_firstname\",\"name_lastname\"\r\n"
+                        + "\"John\",\"Doe\"\r\n",
+                "select name_firstname, name_lastname from " + topicName);
+    }
+
+    @Test
+    public void testMultiLevelNestedStructInValue() {
+        String topicName = "mytopic";
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+
+        Schema nameSchema = SchemaBuilder.struct().name("com.example.Name")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .build();
+
+        Schema personSchema = SchemaBuilder.struct().name("com.example.Person")
+                .field("name", nameSchema)
+                .build();
+
+        Schema coupleSchema = SchemaBuilder.struct().name("com.example.Couple")
+                .field("partner1", personSchema)
+                .field("partner2", personSchema)
+                .build();
+
+        Struct couple = new Struct(coupleSchema)
+                .put("partner1", new Struct(personSchema)
+                        .put("name", new Struct(nameSchema)
+                                .put("firstname", "John")
+                                .put("lastname", "Doe")
+                        ))
+                .put("partner2", new Struct(personSchema)
+                        .put("name", new Struct(nameSchema)
+                                .put("firstname", "Jane")
+                                .put("lastname", "Doe")
+                        ));
+
+        String value = new String(converter.fromConnectData(topicName, coupleSchema, couple));
+        connect.kafka().produce(topicName, "key", value);
+
+        assertSqlEventually(questDBContainer, "\"partner1_name_firstname\",\"partner1_name_lastname\",\"partner2_name_firstname\",\"partner2_name_lastname\"\r\n"
+                        + "\"John\",\"Doe\",\"Jane\",\"Doe\"\r\n",
+                "select partner1_name_firstname, partner1_name_lastname, partner2_name_firstname, partner2_name_lastname from " + topicName);
     }
 
     private void assertConnectorTaskRunningEventually() {

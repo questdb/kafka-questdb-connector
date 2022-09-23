@@ -22,6 +22,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 public final class QuestDBSinkTask extends SinkTask {
+    private static final char STRUCT_FIELD_SEPARATOR = '_';
     private static final Logger log = LoggerFactory.getLogger(QuestDBSinkTask.class);
     private Sender sender;
     private QuestDBSinkConnectorConfig config;
@@ -43,75 +44,101 @@ public final class QuestDBSinkTask extends SinkTask {
         //todo: add support for event time
         String explicitTable = config.getTable();
         for (SinkRecord record : collection) {
-            String tableName = explicitTable == null ? record.topic() : explicitTable;
-            sender.table(tableName);
-            Struct recordValue = (Struct) record.value();
-            Schema valueSchema = record.valueSchema();
-            List<Field> valueFields = valueSchema.fields();
-            for (Field field : valueFields) {
-                String fieldName = field.name();
-                Schema fieldSchema = field.schema();
-                Object fieldValue = recordValue.get(fieldName);
-
-                // try logical types first
-                if (fieldSchema.name() != null) {
-                    switch (fieldSchema.name()) {
-                        case Timestamp.LOGICAL_NAME:
-                        case Date.LOGICAL_NAME:
-                            long epochMillis = ((java.util.Date) fieldValue).getTime();
-                            sender.timestampColumn(fieldName, TimeUnit.MILLISECONDS.toMicros(epochMillis));
-                            continue;
-                        case Time.LOGICAL_NAME:
-                            long dayMillis = ((java.util.Date) fieldValue).getTime();
-                            sender.longColumn(fieldName, dayMillis);
-                            continue;
-                        case Decimal.LOGICAL_NAME:
-                            throw new ConnectException("Unsupported logical type " + fieldSchema.name());
-                    }
-                }
-
-                // ok, not a known logical try, try primitive types
-                Schema.Type type = fieldSchema.type();
-                switch (type) {
-                    case INT8:
-                    case INT16:
-                    case INT32:
-                    case INT64:
-                        if (fieldValue != null) {
-                            Number l = (Number) fieldValue;
-                            sender.longColumn(fieldName, l.longValue());
-                        }
-                        break;
-                    case FLOAT32:
-                    case FLOAT64:
-                        if (fieldValue != null) {
-                            Number d = (Number) recordValue.get(field);
-                            sender.doubleColumn(fieldName, d.doubleValue());
-                        }
-                        break;
-                    case BOOLEAN:
-                        if (fieldValue != null) {
-                            Boolean b = (Boolean) recordValue.get(field);
-                            sender.boolColumn(fieldName, b);
-                        }
-                        break;
-                    case STRING:
-                        if (fieldValue != null) {
-                            String s = (String) recordValue.get(field);
-                            sender.stringColumn(fieldName, s);
-                        }
-                        break;
-                    case BYTES:
-                    case ARRAY:
-                    case MAP:
-                    case STRUCT:
-                    default:
-                        throw new ConnectException("Unsupported type " + type);
-                }
-            }
-            sender.atNow();
+            handleSingleRecord(explicitTable, record);
         }
         sender.flush();
+    }
+
+    private void handleSingleRecord(String explicitTable, SinkRecord record) {
+        String tableName = explicitTable == null ? record.topic() : explicitTable;
+        sender.table(tableName);
+        Schema valueSchema = record.valueSchema();
+        Object value = record.value();
+        handleObject("", valueSchema, value);
+        sender.atNow();
+    }
+
+    private void handleStruct(String parentName, Struct value, Schema schema) {
+        List<Field> valueFields = schema.fields();
+        for (Field field : valueFields) {
+            String fieldName = field.name();
+            Schema fieldSchema = field.schema();
+            Object fieldValue = value.get(fieldName);
+
+            String name = parentName.isEmpty() ? fieldName : parentName + STRUCT_FIELD_SEPARATOR + fieldName;
+            handleObject(name, fieldSchema, fieldValue);
+        }
+    }
+
+    private void handleObject(String name, Schema schema, Object value) {
+        if (tryWriteLogicalType(name, schema, value)) {
+            return;
+        }
+        // ok, not a known logical try, try primitive types
+        writePhysicalType(name, schema, value);
+    }
+
+    private void writePhysicalType(String name, Schema schema, Object value) {
+        Schema.Type type = schema.type();
+        switch (type) {
+            case INT8:
+            case INT16:
+            case INT32:
+            case INT64:
+                if (value != null) {
+                    Number l = (Number) value;
+                    sender.longColumn(name, l.longValue());
+                }
+                break;
+            case FLOAT32:
+            case FLOAT64:
+                if (value != null) {
+                    Number d = (Number) value;
+                    sender.doubleColumn(name, d.doubleValue());
+                }
+                break;
+            case BOOLEAN:
+                if (value != null) {
+                    Boolean b = (Boolean) value;
+                    sender.boolColumn(name, b);
+                }
+                break;
+            case STRING:
+                if (value != null) {
+                    String s = (String) value;
+                    sender.stringColumn(name, s);
+                }
+                break;
+            case STRUCT:
+                handleStruct(name, (Struct) value, schema);
+                break;
+            case BYTES:
+            case ARRAY:
+            case MAP:
+            default:
+                throw new ConnectException("Unsupported type " + type);
+        }
+    }
+
+    private boolean tryWriteLogicalType(String name, Schema schema, Object value) {
+        if (schema.name() != null) {
+            switch (schema.name()) {
+                case Timestamp.LOGICAL_NAME:
+                case Date.LOGICAL_NAME:
+                    java.util.Date d = (java.util.Date) value;
+                    long epochMillis = d.getTime();
+                    sender.timestampColumn(name, TimeUnit.MILLISECONDS.toMicros(epochMillis));
+                    return true;
+                case Time.LOGICAL_NAME:
+                    d = (java.util.Date) value;
+                    long dayMillis = d.getTime();
+                    sender.longColumn(name, dayMillis);
+                    return true;
+                case Decimal.LOGICAL_NAME:
+                    throw new ConnectException("Unsupported logical type " + schema.name());
+            }
+        }
+        return false;
     }
 
     @Override
