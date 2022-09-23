@@ -115,6 +115,85 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @Test
+    public void testPrimitiveKey() {
+        String topicName = "mytopic";
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .field("age", Schema.INT8_SCHEMA)
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe")
+                .put("age", (byte) 42);
+
+        connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
+
+        assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\",\"key\"\r\n"
+                        + "\"John\",\"Doe\",42,\"key\"\r\n",
+                "select firstname, lastname, age, key from " + topicName);
+    }
+
+    @Test
+    public void testStructKey() {
+        String topicName = "mytopic";
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        //overrider the convertor from String to Json
+        props.put(KEY_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe");
+
+        String json = new String(converter.fromConnectData(topicName, schema, struct));
+        connect.kafka().produce(topicName, json, json);
+
+        assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"key_firstname\",\"key_lastname\"\r\n"
+                        + "\"John\",\"Doe\",\"John\",\"Doe\"\r\n",
+                "select firstname, lastname, key_firstname, key_lastname from " + topicName);
+    }
+
+    @Test
+    public void testStructKeyAndPrimitiveValue() {
+        String topicName = "mytopic";
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        //overrider the convertor from String to Json
+        props.put(KEY_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe");
+
+        String json = new String(converter.fromConnectData(topicName, schema, struct));
+        connect.kafka().produce(topicName, json, "foo");
+
+        assertSqlEventually(questDBContainer, "\"key_firstname\",\"key_lastname\",\"value\"\r\n"
+                        + "\"John\",\"Doe\",\"foo\"\r\n",
+                "select key_firstname, key_lastname, value from " + topicName);
+    }
+
+
+    @Test
     public void testExplicitTableName() {
         String tableName = "explicitTableName";
         String topicName = "testExplicitTableName";

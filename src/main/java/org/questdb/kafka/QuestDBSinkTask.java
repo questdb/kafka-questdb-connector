@@ -40,21 +40,21 @@ public final class QuestDBSinkTask extends SinkTask {
 
     @Override
     public void put(Collection<SinkRecord> collection) {
-        //todo: do something with keys
         //todo: add support for event time
-        String explicitTable = config.getTable();
         for (SinkRecord record : collection) {
-            handleSingleRecord(explicitTable, record);
+            handleSingleRecord(record);
         }
         sender.flush();
     }
 
-    private void handleSingleRecord(String explicitTable, SinkRecord record) {
+    private void handleSingleRecord(SinkRecord record) {
+        String explicitTable = config.getTable();
         String tableName = explicitTable == null ? record.topic() : explicitTable;
         sender.table(tableName);
-        Schema valueSchema = record.valueSchema();
-        Object value = record.value();
-        handleObject("", valueSchema, value);
+
+        handleObject("key", record.keySchema(), record.key(), "key");
+        handleObject("", record.valueSchema(), record.value(), "value");
+
         sender.atNow();
     }
 
@@ -66,20 +66,22 @@ public final class QuestDBSinkTask extends SinkTask {
             Object fieldValue = value.get(fieldName);
 
             String name = parentName.isEmpty() ? fieldName : parentName + STRUCT_FIELD_SEPARATOR + fieldName;
-            handleObject(name, fieldSchema, fieldValue);
+            handleObject(name, fieldSchema, fieldValue, "");
         }
     }
 
-    private void handleObject(String name, Schema schema, Object value) {
-        if (tryWriteLogicalType(name, schema, value)) {
+    private void handleObject(String name, Schema schema, Object value, String fallbackName) {
+        assert !name.isEmpty() || !fallbackName.isEmpty();
+        if (tryWriteLogicalType(name.isEmpty() ? fallbackName : name, schema, value)) {
             return;
         }
         // ok, not a known logical try, try primitive types
-        writePhysicalType(name, schema, value);
+        writePhysicalType(name, schema, value, fallbackName);
     }
 
-    private void writePhysicalType(String name, Schema schema, Object value) {
+    private void writePhysicalType(String name, Schema schema, Object value, String fallbackName) {
         Schema.Type type = schema.type();
+        String primitiveTypesName = name.isEmpty() ? fallbackName : name;
         switch (type) {
             case INT8:
             case INT16:
@@ -87,26 +89,26 @@ public final class QuestDBSinkTask extends SinkTask {
             case INT64:
                 if (value != null) {
                     Number l = (Number) value;
-                    sender.longColumn(name, l.longValue());
+                    sender.longColumn(primitiveTypesName, l.longValue());
                 }
                 break;
             case FLOAT32:
             case FLOAT64:
                 if (value != null) {
                     Number d = (Number) value;
-                    sender.doubleColumn(name, d.doubleValue());
+                    sender.doubleColumn(primitiveTypesName, d.doubleValue());
                 }
                 break;
             case BOOLEAN:
                 if (value != null) {
                     Boolean b = (Boolean) value;
-                    sender.boolColumn(name, b);
+                    sender.boolColumn(primitiveTypesName, b);
                 }
                 break;
             case STRING:
                 if (value != null) {
                     String s = (String) value;
-                    sender.stringColumn(name, s);
+                    sender.stringColumn(primitiveTypesName, s);
                 }
                 break;
             case STRUCT:
