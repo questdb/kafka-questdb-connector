@@ -1,9 +1,14 @@
 package org.questdb.kafka;
 
+import org.apache.kafka.connect.data.Date;
+import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.data.Time;
+import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.json.JsonConverter;
+import org.apache.kafka.connect.runtime.AbstractStatus;
 import org.apache.kafka.connect.runtime.ConnectorConfig;
 import org.apache.kafka.connect.runtime.rest.entities.ConnectorStateInfo;
 import org.apache.kafka.connect.storage.Converter;
@@ -19,13 +24,17 @@ import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
 
+import java.math.BigDecimal;
+import java.util.Calendar;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.TimeZone;
 
 import static java.util.Collections.singletonMap;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.apache.kafka.connect.runtime.AbstractStatus.State.RUNNING;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.KEY_CONVERTER_CLASS_CONFIG;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.VALUE_CONVERTER_CLASS_CONFIG;
 import static org.awaitility.Awaitility.await;
@@ -39,7 +48,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     private EmbeddedConnectCluster connect;
     private Converter converter;
 
-    private static final GenericContainer questDBContainer = new GenericContainer("questdb/questdb:6.5.2")
+    private final GenericContainer questDBContainer = new GenericContainer("questdb/questdb:6.5.2")
             .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT, QuestDBUtils.QUESTDB_ILP_PORT)
             .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
             .withEnv("QDB_CAIRO_COMMIT_LAG", "100")
@@ -47,11 +56,12 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @BeforeAll
     public static void beforeAll() {
-        questDBContainer.start();
+
     }
 
     @BeforeEach
     public void setUp() {
+        questDBContainer.start();
         JsonConverter jsonConverter = new JsonConverter();
         jsonConverter.configure(singletonMap(ConverterConfig.TYPE_CONFIG, ConverterType.VALUE.getName()));
         converter = jsonConverter;
@@ -66,6 +76,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @AfterEach
     public void tearDown() {
         connect.stop();
+        questDBContainer.stop();
     }
 
     private Map<String, String> baseConnectorProps(String topicName) {
@@ -84,7 +95,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorStartsEventually();
+        assertConnectorTaskRunningEventually();
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -111,7 +122,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         Map<String, String> props = baseConnectorProps(topicName);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, tableName);
         connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorStartsEventually();
+        assertConnectorTaskRunningEventually();
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -130,15 +141,107 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 "select firstname,lastname,age from " + tableName);
     }
 
-    private void assertConnectorStartsEventually() {
-        await().atMost(CONNECTOR_START_TIMEOUT_MS, MILLISECONDS).untilAsserted(() -> assertConnectorRunning(CONNECTOR_NAME));
+    @Test
+    public void testLogicalTypes() {
+        String topicName = "mytopic";
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .field("age", Schema.INT8_SCHEMA)
+                .field("col_timestamp", Timestamp.SCHEMA)
+                .field("col_date", Date.SCHEMA)
+                .field("col_time", Time.SCHEMA)
+                .build();
+
+        // both time and date
+        java.util.Date timestamp = new Calendar.Builder()
+                .setTimeZone(TimeZone.getTimeZone("UTC"))
+                .setDate(2022, 9, 23)
+                .setTimeOfDay(13, 53, 59, 123)
+                .build().getTime();
+
+        // date has no time
+        java.util.Date date = new Calendar.Builder()
+                .setTimeZone(TimeZone.getTimeZone("UTC"))
+                .setDate(2022, 9, 23)
+                .build().getTime();
+
+        // 13:53:59.123 UTC, no date
+        // QuestDB does not support time type, so we send it as long - number of millis since midnight
+        java.util.Date time = new java.util.Date(50039123);
+
+        Struct struct = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe")
+                .put("age", (byte) 42)
+                .put("col_timestamp", timestamp)
+                .put("col_date", date)
+                .put("col_time", time);
+
+
+        connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
+
+        assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\",\"col_timestamp\",\"col_date\",\"col_time\"\r\n"
+                        + "\"John\",\"Doe\",42,\"2022-10-23T13:53:59.123000Z\",\"2022-10-23T00:00:00.000000Z\",50039123\r\n",
+                "select firstname,lastname,age, col_timestamp, col_date, col_time from " + topicName);
     }
 
-    private void assertConnectorRunning(String connectorName) {
+    @Test
+    public void testDecimalTypeNotSupported() {
+        String topicName = "testExplicitTableName";
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .field("age", Schema.INT8_SCHEMA)
+                .field("col_decimal", Decimal.schema(2))
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe")
+                .put("age", (byte) 42)
+                .put("col_decimal", new BigDecimal("123.45"));
+
+        connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
+
+        assertConnectorTaskFailedEventually();
+    }
+
+    private void assertConnectorTaskRunningEventually() {
+        assertConnectorTaskStateEventually(AbstractStatus.State.RUNNING);
+    }
+
+    private void assertConnectorTaskFailedEventually() {
+        assertConnectorTaskStateEventually(AbstractStatus.State.FAILED);
+    }
+
+    private void assertConnectorTaskStateEventually(AbstractStatus.State expectedState) {
+        await().atMost(CONNECTOR_START_TIMEOUT_MS, MILLISECONDS).untilAsserted(() -> assertConnectorTaskState(CONNECTOR_NAME, expectedState));
+    }
+
+    private void assertConnectorTaskState(String connectorName, AbstractStatus.State expectedState) {
         ConnectorStateInfo info = connect.connectorStatus(connectorName);
-        if (info == null || !info.connector().state().equals(RUNNING.toString())
-                || info.tasks().stream().anyMatch(s -> !s.state().equals(RUNNING.toString()))) {
-            fail("Connector " + connectorName + " or its tasks are not in RUNNING state. Connector info: " + info);
+        if (info == null) {
+            fail("Connector " + connectorName + " not found");
+        }
+        List<ConnectorStateInfo.TaskState> taskStates = info.tasks();
+        if (taskStates.size() == 0) {
+            fail("No tasks found for connector " + connectorName);
+        }
+        for (ConnectorStateInfo.TaskState taskState : taskStates) {
+            if (!Objects.equals(taskState.state(), expectedState.toString())) {
+                fail("Task " + taskState.id() + " for connector " + connectorName + " is in state " + taskState.state() + " but expected " + expectedState);
+            }
         }
     }
 }
