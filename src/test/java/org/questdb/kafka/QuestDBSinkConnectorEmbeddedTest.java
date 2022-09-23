@@ -160,6 +160,32 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @Test
+    public void testSkipUnsupportedType_Bytes() {
+        String topicName = "testsmoke";
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put(QuestDBSinkConnectorConfig.SKIP_UNSUPPORTED_TYPES_CONFIG, "true");
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .field("age", Schema.BYTES_SCHEMA)
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe")
+                .put("age", new byte[]{1, 2, 3});
+
+        connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
+
+        assertSqlEventually(questDBContainer, "\"key\",\"firstname\",\"lastname\"\r\n"
+                        + "\"key\",\"John\",\"Doe\"\r\n",
+                "select key, firstname, lastname from " + topicName);
+    }
+
+    @Test
     public void testDefaultPrefixWithPrimitiveKeyAndValues() {
         String topicName = "mytopic";
         connect.kafka().createTopic(topicName, 1);

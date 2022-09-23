@@ -122,27 +122,36 @@ public final class QuestDBSinkTask extends SinkTask {
             case ARRAY:
             case MAP:
             default:
-                throw new ConnectException("Unsupported type " + type);
+                onSupportedType(name, type);
+        }
+    }
+
+    private void onSupportedType(String name, Object type) {
+        if (config.isSkipUnsupportedTypes()) {
+            log.debug("Skipping unsupported type: {}, name: {}", type, name);
+        } else {
+            throw new ConnectException("Unsupported type: " + type + ", name: " + name);
         }
     }
 
     private boolean tryWriteLogicalType(String name, Schema schema, Object value) {
-        if (schema.name() != null) {
-            switch (schema.name()) {
-                case Timestamp.LOGICAL_NAME:
-                case Date.LOGICAL_NAME:
-                    java.util.Date d = (java.util.Date) value;
-                    long epochMillis = d.getTime();
-                    sender.timestampColumn(name, TimeUnit.MILLISECONDS.toMicros(epochMillis));
-                    return true;
-                case Time.LOGICAL_NAME:
-                    d = (java.util.Date) value;
-                    long dayMillis = d.getTime();
-                    sender.longColumn(name, dayMillis);
-                    return true;
-                case Decimal.LOGICAL_NAME:
-                    throw new ConnectException("Unsupported logical type " + schema.name());
-            }
+        if (schema.name() == null) {
+            return false;
+        }
+        switch (schema.name()) {
+            case Timestamp.LOGICAL_NAME:
+            case Date.LOGICAL_NAME:
+                java.util.Date d = (java.util.Date) value;
+                long epochMillis = d.getTime();
+                sender.timestampColumn(name, TimeUnit.MILLISECONDS.toMicros(epochMillis));
+                return true;
+            case Time.LOGICAL_NAME:
+                d = (java.util.Date) value;
+                long dayMillis = d.getTime();
+                sender.longColumn(name, dayMillis);
+                return true;
+            case Decimal.LOGICAL_NAME:
+                onSupportedType(name, schema.name());
         }
         return false;
     }

@@ -20,6 +20,9 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String VALUE_PREFIX_CONFIG = "value.prefix";
     private static final String VALUE_PREFIX_DOC = "Prefix for value fields";
 
+    public static final String SKIP_UNSUPPORTED_TYPES_CONFIG = "skip.unsupported.types";
+    private static final String SKIP_UNSUPPORTED_TYPES_DOC = "Skip unsupported types";
+
     public QuestDBSinkConnectorConfig(ConfigDef config, Map<String, String> parsedConfig) {
         super(config, parsedConfig);
     }
@@ -33,7 +36,8 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(HOST_CONFIG, Type.STRING, Importance.HIGH, HOST_DOC)
                 .define(TABLE_CONFIG, Type.STRING, null, Importance.HIGH, TABLE_DOC)
                 .define(KEY_PREFIX_CONFIG, Type.STRING, "key", Importance.MEDIUM, KEY_PREFIX_DOC)
-                .define(VALUE_PREFIX_CONFIG, Type.STRING, "", Importance.MEDIUM, VALUE_PREFIX_DOC);
+                .define(VALUE_PREFIX_CONFIG, Type.STRING, "", Importance.MEDIUM, VALUE_PREFIX_DOC)
+                .define(SKIP_UNSUPPORTED_TYPES_CONFIG, Type.BOOLEAN, false, Importance.MEDIUM, SKIP_UNSUPPORTED_TYPES_DOC);
     }
 
     public String getHost() {
@@ -50,5 +54,9 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public String getValuePrefix() {
         return getString(VALUE_PREFIX_CONFIG);
+    }
+
+    public boolean isSkipUnsupportedTypes() {
+        return getBoolean(SKIP_UNSUPPORTED_TYPES_CONFIG);
     }
 }
