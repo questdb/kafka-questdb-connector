@@ -82,6 +82,7 @@ public class QuestDBSinkConnectorIT {
 
     @Test
     public void test() throws Exception {
+        String topicName = "mytopic";
         Properties props = new Properties();
 
         props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaContainer.getBootstrapServers());
@@ -90,40 +91,24 @@ public class QuestDBSinkConnectorIT {
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         try (Producer<String, String> producer = new KafkaProducer<>(props)) {
-            RecordMetadata recordMetadata = producer.send(new ProducerRecord<>("test-topic", "key", "value")).get();
+            RecordMetadata recordMetadata = producer.send(new ProducerRecord<>(topicName, "foo", "bar")).get();
             System.out.println(recordMetadata);
         }
 
         ConnectorConfiguration connector = ConnectorConfiguration.create()
                 .with("connector.class", "org.questdb.kafka.QuestDBSinkConnector")
                 .with("tasks.max", "1")
-//                .with("key.converter", "org.apache.kafka.connect.storage.StringConverter")
-//                .with("value.converter", "org.apache.kafka.connect.storage.StringConverter")
-                .with("topics", "test")
+                .with("key.converter", "org.apache.kafka.connect.storage.StringConverter")
+                .with("value.converter", "org.apache.kafka.connect.storage.StringConverter")
+                .with("topics", topicName)
                 .with("auto.offset.reset", "earliest")
-                .with(QuestDBSinkConnectorConfig.TABLE_CONFIG, "whatever")
-                .with("host", questDBContainer.getNetworkAliases().get(0) + ":" + QuestDBUtils.QUESTDB_ILP_PORT)
-                .with("my.setting", questDBContainer.getNetworkAliases().get(0) + ":9009");
+                .with("host", questDBContainer.getNetworkAliases().get(0) + ":" + QuestDBUtils.QUESTDB_ILP_PORT);
 
         connectContainer.registerConnector("my-connector", connector);
-//        connectContainer.ensureConnectorTaskState("my-connector", 0, Connector.State.RUNNING);
 
-        final Request request = new Request.Builder()
-                .url("http://" + questDBContainer.getHost() + ":" + questDBContainer.getFirstMappedPort() + "/exec?query=select * from whatever")
-                .build();
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"key\",\"value\"\r\n"
+                + "\"foo\",\"bar\"\r\n", "select key, value from " + topicName);
 
-        for (;;) {
-            try (Response response = CLIENT.newCall(request).execute()) {
-                int code = response.code();
-                if (code == 200) {
-                    System.out.println(response.body().string());
-                    break;
-                } else {
-                    System.out.println("Waiting for QuestDB to start");
-                    Thread.sleep(1000);
-                }
-            }
-        }
     }
 
     private static void createConnectorJar() throws IOException {
