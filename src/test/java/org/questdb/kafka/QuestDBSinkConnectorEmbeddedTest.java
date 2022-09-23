@@ -140,6 +140,44 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @Test
+    public void testCustomPrefixWithPrimitiveKeyAndValues() {
+        String topicName = "mytopic";
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put(KEY_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
+        props.put(QuestDBSinkConnectorConfig.KEY_PREFIX_CONFIG, "col_key");
+        props.put(QuestDBSinkConnectorConfig.VALUE_PREFIX_CONFIG, "col_value");
+
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+
+        connect.kafka().produce(topicName, "foo", "bar");
+
+        assertSqlEventually(questDBContainer, "\"col_key\",\"col_value\"\r\n"
+                        + "\"foo\",\"bar\"\r\n",
+                "select col_key, col_value from " + topicName);
+    }
+
+    @Test
+    public void testDefaultPrefixWithPrimitiveKeyAndValues() {
+        String topicName = "mytopic";
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put(KEY_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
+
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+
+        connect.kafka().produce(topicName, "foo", "bar");
+
+        assertSqlEventually(questDBContainer, "\"key\",\"value\"\r\n"
+                        + "\"foo\",\"bar\"\r\n",
+                "select key, value from " + topicName);
+    }
+
+    @Test
     public void testStructKey() {
         String topicName = "mytopic";
         connect.kafka().createTopic(topicName, 1);
@@ -163,6 +201,34 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"key_firstname\",\"key_lastname\"\r\n"
                         + "\"John\",\"Doe\",\"John\",\"Doe\"\r\n",
                 "select firstname, lastname, key_firstname, key_lastname from " + topicName);
+    }
+
+    @Test
+    public void testStructKeyWithNoPrefix() {
+        String topicName = "mytopic";
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        //overrider the convertor from String to Json
+        props.put(KEY_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
+        props.put(QuestDBSinkConnectorConfig.KEY_PREFIX_CONFIG, "");
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe");
+
+        String json = new String(converter.fromConnectData(topicName, schema, struct));
+        connect.kafka().produce(topicName, json, "foo");
+
+        assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"value\"\r\n"
+                        + "\"John\",\"Doe\",\"foo\"\r\n",
+                "select firstname, lastname, value from " + topicName);
     }
 
     @Test

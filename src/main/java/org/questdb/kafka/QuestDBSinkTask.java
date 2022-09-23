@@ -23,6 +23,9 @@ import java.util.concurrent.TimeUnit;
 
 public final class QuestDBSinkTask extends SinkTask {
     private static final char STRUCT_FIELD_SEPARATOR = '_';
+    private static final String PRIMITIVE_KEY_FALLBACK_NAME = "key";
+    private static final String PRIMITIVE_VALUE_FALLBACK_NAME = "value";
+
     private static final Logger log = LoggerFactory.getLogger(QuestDBSinkTask.class);
     private Sender sender;
     private QuestDBSinkConnectorConfig config;
@@ -40,7 +43,6 @@ public final class QuestDBSinkTask extends SinkTask {
 
     @Override
     public void put(Collection<SinkRecord> collection) {
-        //todo: add support for event time
         for (SinkRecord record : collection) {
             handleSingleRecord(record);
         }
@@ -52,9 +54,11 @@ public final class QuestDBSinkTask extends SinkTask {
         String tableName = explicitTable == null ? record.topic() : explicitTable;
         sender.table(tableName);
 
-        handleObject("key", record.keySchema(), record.key(), "key");
-        handleObject("", record.valueSchema(), record.value(), "value");
+        //todo: deal with duplicated columns
+        handleObject(config.getKeyPrefix(), record.keySchema(), record.key(), PRIMITIVE_KEY_FALLBACK_NAME);
+        handleObject(config.getValuePrefix(), record.valueSchema(), record.value(), PRIMITIVE_VALUE_FALLBACK_NAME);
 
+        //todo: add support for event time, it should probably be extracted from a timestamp field in the value?
         sender.atNow();
     }
 
