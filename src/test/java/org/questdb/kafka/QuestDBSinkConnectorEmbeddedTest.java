@@ -115,6 +115,34 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @Test
+    public void testJsonNoSchema() {
+        String topicName = "mytopic";
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put("value.converter.schemas.enable", "false");
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+        connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
+
+        assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+                        + "\"John\",\"Doe\",42\r\n",
+                "select firstname,lastname,age from " + topicName);
+    }
+
+    @Test
+    public void testJsonNoSchema_ArrayNotSupported() {
+        String topicName = "mytopic";
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put("value.converter.schemas.enable", "false");
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+        connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"array\":[1,2,3]}");
+
+        assertConnectorTaskFailedEventually();
+    }
+
+    @Test
     public void testPrimitiveKey() {
         String topicName = "mytopic";
         connect.kafka().createTopic(topicName, 1);

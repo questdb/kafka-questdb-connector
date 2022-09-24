@@ -80,10 +80,46 @@ public final class QuestDBSinkTask extends SinkTask {
             return;
         }
         // ok, not a known logical try, try primitive types
-        writePhysicalType(name, schema, value, fallbackName);
+        if (tryWritePhysicalTypeFromSchema(name, schema, value, fallbackName)) {
+            return;
+        }
+        writePhysicalTypeWithoutSchema(name, value, fallbackName);
     }
 
-    private void writePhysicalType(String name, Schema schema, Object value, String fallbackName) {
+    private void writePhysicalTypeWithoutSchema(String name, Object value, String fallbackName) {
+        if (value == null) {
+            return;
+        }
+        String actualName = name.isEmpty() ? fallbackName : name;
+        if (value instanceof String) {
+            sender.stringColumn(actualName, (String) value);
+        } else if (value instanceof Long) {
+            sender.longColumn(actualName, (Long) value);
+        } else if (value instanceof Integer) {
+            sender.longColumn(actualName, (Integer) value);
+        } else if (value instanceof Boolean) {
+            sender.boolColumn(actualName, (Boolean) value);
+        } else if (value instanceof Double) {
+            sender.doubleColumn(actualName, (Double) value);
+        } else if (value instanceof Map) {
+            for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+                Object mapKey = entry.getKey();
+                if (!(mapKey instanceof String)) {
+                    throw new ConnectException("Map keys must be strings");
+                }
+                String mapKeyName = (String) mapKey;
+                String entryName = name.isEmpty() ? mapKeyName : name + STRUCT_FIELD_SEPARATOR + mapKeyName;
+                handleObject(entryName, null, entry.getValue(), fallbackName);
+            }
+        } else {
+            onUnsupportedType(actualName, value.getClass().getName());
+        }
+    }
+
+    private boolean tryWritePhysicalTypeFromSchema(String name, Schema schema, Object value, String fallbackName) {
+        if (schema == null) {
+            return false;
+        }
         Schema.Type type = schema.type();
         String primitiveTypesName = name.isEmpty() ? fallbackName : name;
         switch (type) {
@@ -122,11 +158,12 @@ public final class QuestDBSinkTask extends SinkTask {
             case ARRAY:
             case MAP:
             default:
-                onSupportedType(name, type);
+                onUnsupportedType(name, type);
         }
+        return true;
     }
 
-    private void onSupportedType(String name, Object type) {
+    private void onUnsupportedType(String name, Object type) {
         if (config.isSkipUnsupportedTypes()) {
             log.debug("Skipping unsupported type: {}, name: {}", type, name);
         } else {
@@ -135,7 +172,7 @@ public final class QuestDBSinkTask extends SinkTask {
     }
 
     private boolean tryWriteLogicalType(String name, Schema schema, Object value) {
-        if (schema.name() == null) {
+        if (schema == null || schema.name() == null) {
             return false;
         }
         switch (schema.name()) {
@@ -151,7 +188,7 @@ public final class QuestDBSinkTask extends SinkTask {
                 sender.longColumn(name, dayMillis);
                 return true;
             case Decimal.LOGICAL_NAME:
-                onSupportedType(name, schema.name());
+                onUnsupportedType(name, schema.name());
         }
         return false;
     }
