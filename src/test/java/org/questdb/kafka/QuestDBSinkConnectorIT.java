@@ -1,12 +1,7 @@
 package org.questdb.kafka;
 
-import io.debezium.testing.testcontainers.Connector;
 import io.debezium.testing.testcontainers.ConnectorConfiguration;
 import io.debezium.testing.testcontainers.DebeziumContainer;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.RequestBody;
-import okhttp3.Response;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
@@ -15,7 +10,6 @@ import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.KafkaContainer;
@@ -31,7 +25,6 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.time.Duration;
 import java.util.Properties;
 import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
@@ -42,35 +35,42 @@ import java.util.stream.Stream;
 import static java.time.Duration.ofMinutes;
 
 public class QuestDBSinkConnectorIT {
-    private static final OkHttpClient CLIENT = new OkHttpClient();
-
     private static Network network = Network.newNetwork();
 
-    private static KafkaContainer kafkaContainer = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.2.0"))
+    private static final KafkaContainer kafkaContainer = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.2.0"))
             .withNetwork(network);
-//            .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("kafka")));
 
-    private static GenericContainer questDBContainer = new GenericContainer("questdb/questdb:6.5.2")
+    private static final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:6.5.2")
             .withNetwork(network)
             .withExposedPorts(9000)
             .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
             .withEnv("QDB_CAIRO_COMMIT_LAG", "100")
             .withEnv("JAVA_OPTS", "-Djava.locale.providers=JRE,SPI");
 
-    public static DebeziumContainer connectContainer = new DebeziumContainer("debezium/connect-base:1.9.5.Final")
-            .withFileSystemBind("target/questdb-connector", "/kafka/connect/questdb-connector")
-            .withCopyToContainer(MountableFile.forHostPath("target/questdb-connector/questdb-connector.jar"), "/kafka/connect/questdb-connector/questdb-connector.jar")
-            .withCopyToContainer(MountableFile.forHostPath("target/questdb-connector/questdb-6.5.2-jdk8.jar"), "/kafka/connect/questdb-connector/questdb-6.5.2-jdk8.jar")
+    private static final DebeziumContainer connectContainer = new DebeziumContainer("confluentinc/cp-kafka-connect:7.2.1")
+            .withEnv("CONNECT_BOOTSTRAP_SERVERS", kafkaContainer.getNetworkAliases().get(0) + ":9092")
+            .withEnv("CONNECT_GROUP_ID", "test")
+            .withEnv("CONNECT_OFFSET_STORAGE_TOPIC", "connect-storage-topic")
+            .withEnv("CONNECT_CONFIG_STORAGE_TOPIC", "connect-config-topic")
+            .withEnv("CONNECT_STATUS_STORAGE_TOPIC", "connect-status-topic")
+            .withEnv("CONNECT_KEY_CONVERTER", "org.apache.kafka.connect.storage.StringConverter")
+            .withEnv("CONNECT_VALUE_CONVERTER", "org.apache.kafka.connect.json.JsonConverter")
+            .withEnv("CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE", "false")
+            .withEnv("CONNECT_REST_ADVERTISED_HOST_NAME", "connect")
+            .withEnv("CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR", "1")
+            .withEnv("CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR", "1")
+            .withEnv("CONNECT_STATUS_STORAGE_REPLICATION_FACTOR", "1")
+            .withCopyToContainer(MountableFile.forHostPath("target/questdb-connector/questdb-connector.jar"), "/usr/share/java/kafka/questdb-connector.jar")
+            .withCopyToContainer(MountableFile.forHostPath("target/questdb-connector/questdb-6.5.2-jdk8.jar"), "/usr/share/java/kafka/questdb-6.5.2-jdk8.jar")
             .withNetwork(network)
-            .withKafka(kafkaContainer)
-            .dependsOn(kafkaContainer)
-            .dependsOn(questDBContainer)
+            .withExposedPorts(8083)
+            .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("connect")))
+            .dependsOn(kafkaContainer, questDBContainer)
             .waitingFor(new HttpWaitStrategy()
                     .forPath("/connectors")
+                    .forStatusCode(200)
                     .forPort(8083)
-                    .withStartupTimeout(ofMinutes(4))
-            )
-            .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("connect")));
+                    .withStartupTimeout(ofMinutes(5)));
 
     @BeforeAll
     public static void startContainers() throws Exception {

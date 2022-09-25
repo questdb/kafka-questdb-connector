@@ -90,7 +90,7 @@ public final class QuestDBSinkTask extends SinkTask {
         if (value == null) {
             return;
         }
-        String actualName = name.isEmpty() ? fallbackName : name;
+        String actualName = name.isEmpty() ? fallbackName : sanitizeName(name);
         if (value instanceof String) {
             sender.stringColumn(actualName, (String) value);
         } else if (value instanceof Long) {
@@ -116,12 +116,18 @@ public final class QuestDBSinkTask extends SinkTask {
         }
     }
 
+    private static String sanitizeName(String name) {
+        // todo: proper implementation
+        return name.replace('.', '_');
+    }
+
     private boolean tryWritePhysicalTypeFromSchema(String name, Schema schema, Object value, String fallbackName) {
         if (schema == null) {
             return false;
         }
         Schema.Type type = schema.type();
         String primitiveTypesName = name.isEmpty() ? fallbackName : name;
+        String sanitizedName = sanitizeName(primitiveTypesName);
         switch (type) {
             case INT8:
             case INT16:
@@ -129,26 +135,26 @@ public final class QuestDBSinkTask extends SinkTask {
             case INT64:
                 if (value != null) {
                     Number l = (Number) value;
-                    sender.longColumn(primitiveTypesName, l.longValue());
+                    sender.longColumn(sanitizedName, l.longValue());
                 }
                 break;
             case FLOAT32:
             case FLOAT64:
                 if (value != null) {
                     Number d = (Number) value;
-                    sender.doubleColumn(primitiveTypesName, d.doubleValue());
+                    sender.doubleColumn(sanitizedName, d.doubleValue());
                 }
                 break;
             case BOOLEAN:
                 if (value != null) {
                     Boolean b = (Boolean) value;
-                    sender.boolColumn(primitiveTypesName, b);
+                    sender.boolColumn(sanitizedName, b);
                 }
                 break;
             case STRING:
                 if (value != null) {
                     String s = (String) value;
-                    sender.stringColumn(primitiveTypesName, s);
+                    sender.stringColumn(sanitizedName, s);
                 }
                 break;
             case STRUCT:
