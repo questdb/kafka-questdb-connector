@@ -7,21 +7,20 @@ import org.junit.jupiter.api.extension.ExtensionContext;
 
 import java.io.BufferedInputStream;
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Comparator;
+import java.util.Objects;
 import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
 
 public final class JarResolverExtension implements Extension, AfterAllCallback {
-    private Class<?> clazz;
+    private final Class<?> clazz;
     private Path tempDir;
 
     private JarResolverExtension(Class<?> clazz) {
@@ -48,7 +47,7 @@ public final class JarResolverExtension implements Extension, AfterAllCallback {
 
     private static String getPathToJarWithClass(Class<?> clazz) {
         URL resource = Sender.class.getClassLoader().getResource(clazz.getName().replace(".", "/") + ".class");
-        String stringPath = resource.getPath();
+        String stringPath = Objects.requireNonNull(resource, "class " + clazz + " not found").getPath();
         stringPath = stringPath.substring("file:".length(), stringPath.indexOf("!"));
         Path path = Paths.get(stringPath);
         return path.toString();
@@ -72,9 +71,9 @@ public final class JarResolverExtension implements Extension, AfterAllCallback {
         Manifest manifest = new Manifest();
         manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
         File output = new File(tempDir.toFile(), clazz.getSimpleName() + ".jar");
-        JarOutputStream target = null;
+        JarOutputStream target;
         try {
-            target = new JarOutputStream(new FileOutputStream(output), manifest);
+            target = new JarOutputStream(Files.newOutputStream(output.toPath()), manifest);
             add(basePath, new File(basePath), target);
             target.close();
         } catch (IOException e) {
@@ -97,7 +96,7 @@ public final class JarResolverExtension implements Extension, AfterAllCallback {
             entry.setTime(source.lastModified());
             target.putNextEntry(entry);
             target.closeEntry();
-            for (File nestedFile : source.listFiles()) {
+            for (File nestedFile : Objects.requireNonNull(source.listFiles())) {
                 add(basePath, nestedFile, target);
             }
         }
@@ -105,7 +104,7 @@ public final class JarResolverExtension implements Extension, AfterAllCallback {
             JarEntry entry = new JarEntry(name);
             entry.setTime(source.lastModified());
             target.putNextEntry(entry);
-            try (BufferedInputStream in = new BufferedInputStream(new FileInputStream(source))) {
+            try (BufferedInputStream in = new BufferedInputStream(Files.newInputStream(source.toPath()))) {
                 byte[] buffer = new byte[1024];
                 while (true) {
                     int count = in.read(buffer);
