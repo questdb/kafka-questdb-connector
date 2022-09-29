@@ -1,4 +1,4 @@
-package org.questdb.kafka;
+package io.questdb.kafka;
 
 import io.questdb.client.Sender;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;

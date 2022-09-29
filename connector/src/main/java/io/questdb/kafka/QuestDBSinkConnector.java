@@ -1,4 +1,4 @@
-package org.questdb.kafka;
+package io.questdb.kafka;
 
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.connect.connector.Task;

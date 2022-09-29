@@ -1,4 +1,4 @@
-package org.questdb.kafka;
+package io.questdb.kafka;
 
 final class VersionUtil {
     static String getVersion() {

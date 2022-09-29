@@ -1,4 +1,4 @@
-package org.questdb.kafka;
+package io.questdb.kafka;
 
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.ConfigDef;

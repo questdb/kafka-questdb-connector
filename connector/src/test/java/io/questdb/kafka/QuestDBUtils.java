@@ -1,4 +1,4 @@
-package org.questdb.kafka;
+package io.questdb.kafka;
 
 import okhttp3.OkHttpClient;
 import okhttp3.Request;

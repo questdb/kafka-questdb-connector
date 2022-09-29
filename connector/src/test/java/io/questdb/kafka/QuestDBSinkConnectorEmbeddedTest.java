@@ -1,4 +1,4 @@
-package org.questdb.kafka;
+package io.questdb.kafka;
 
 import org.apache.kafka.connect.data.Date;
 import org.apache.kafka.connect.data.Decimal;
@@ -16,8 +16,9 @@ import org.apache.kafka.connect.storage.ConverterConfig;
 import org.apache.kafka.connect.storage.ConverterType;
 import org.apache.kafka.connect.storage.StringConverter;
 import org.apache.kafka.connect.util.clusters.EmbeddedConnectCluster;
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
@@ -37,9 +38,6 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.KEY_CONVERTER_CLASS_CONFIG;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.VALUE_CONVERTER_CLASS_CONFIG;
-import static org.awaitility.Awaitility.await;
-import static org.junit.jupiter.api.Assertions.fail;
-import static org.questdb.kafka.QuestDBUtils.assertSqlEventually;
 
 public final class QuestDBSinkConnectorEmbeddedTest {
     private static final String CONNECTOR_NAME = "questdb-sink-connector";
@@ -53,11 +51,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
             .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
             .withEnv("QDB_CAIRO_COMMIT_LAG", "100")
             .withEnv("JAVA_OPTS", "-Djava.locale.providers=JRE,SPI");
-
-    @BeforeAll
-    public static void beforeAll() {
-
-    }
 
     @BeforeEach
     public void setUp() {
@@ -109,7 +102,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
                         + "\"John\",\"Doe\",42\r\n",
                 "select firstname,lastname,age from " + topicName);
     }
@@ -124,7 +117,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         assertConnectorTaskRunningEventually();
         connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
 
-        assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
                         + "\"John\",\"Doe\",42\r\n",
                 "select firstname,lastname,age from " + topicName);
     }
@@ -162,7 +155,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\",\"key\"\r\n"
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\",\"key\"\r\n"
                         + "\"John\",\"Doe\",42,\"key\"\r\n",
                 "select firstname, lastname, age, key from " + topicName);
     }
@@ -182,7 +175,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "foo", "bar");
 
-        assertSqlEventually(questDBContainer, "\"col_key\",\"col_value\"\r\n"
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"col_key\",\"col_value\"\r\n"
                         + "\"foo\",\"bar\"\r\n",
                 "select col_key, col_value from " + topicName);
     }
@@ -208,7 +201,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        assertSqlEventually(questDBContainer, "\"key\",\"firstname\",\"lastname\"\r\n"
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"key\",\"firstname\",\"lastname\"\r\n"
                         + "\"key\",\"John\",\"Doe\"\r\n",
                 "select key, firstname, lastname from " + topicName);
     }
@@ -226,7 +219,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "foo", "bar");
 
-        assertSqlEventually(questDBContainer, "\"key\",\"value\"\r\n"
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"key\",\"value\"\r\n"
                         + "\"foo\",\"bar\"\r\n",
                 "select key, value from " + topicName);
     }
@@ -252,7 +245,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         String json = new String(converter.fromConnectData(topicName, schema, struct));
         connect.kafka().produce(topicName, json, json);
 
-        assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"key_firstname\",\"key_lastname\"\r\n"
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"key_firstname\",\"key_lastname\"\r\n"
                         + "\"John\",\"Doe\",\"John\",\"Doe\"\r\n",
                 "select firstname, lastname, key_firstname, key_lastname from " + topicName);
     }
@@ -280,7 +273,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         String json = new String(converter.fromConnectData(topicName, schema, struct));
         connect.kafka().produce(topicName, json, "foo");
 
-        assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"value\"\r\n"
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"value\"\r\n"
                         + "\"John\",\"Doe\",\"foo\"\r\n",
                 "select firstname, lastname, value from " + topicName);
     }
@@ -307,7 +300,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         String json = new String(converter.fromConnectData(topicName, schema, struct));
         connect.kafka().produce(topicName, json, "foo");
 
-        assertSqlEventually(questDBContainer, "\"key_firstname\",\"key_lastname\",\"value\"\r\n"
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"key_firstname\",\"key_lastname\",\"value\"\r\n"
                         + "\"John\",\"Doe\",\"foo\"\r\n",
                 "select key_firstname, key_lastname, value from " + topicName);
     }
@@ -335,7 +328,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
                         + "\"John\",\"Doe\",42\r\n",
                 "select firstname,lastname,age from " + tableName);
     }
@@ -385,7 +378,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\",\"col_timestamp\",\"col_date\",\"col_time\"\r\n"
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\",\"col_timestamp\",\"col_date\",\"col_time\"\r\n"
                         + "\"John\",\"Doe\",42,\"2022-10-23T13:53:59.123000Z\",\"2022-10-23T00:00:00.000000Z\",50039123\r\n",
                 "select firstname,lastname,age, col_timestamp, col_date, col_time from " + topicName);
     }
@@ -443,7 +436,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         String value = new String(converter.fromConnectData(topicName, personSchema, person));
         connect.kafka().produce(topicName, "key", value);
 
-        assertSqlEventually(questDBContainer, "\"name_firstname\",\"name_lastname\"\r\n"
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"name_firstname\",\"name_lastname\"\r\n"
                         + "\"John\",\"Doe\"\r\n",
                 "select name_firstname, name_lastname from " + topicName);
     }
@@ -486,7 +479,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         String value = new String(converter.fromConnectData(topicName, coupleSchema, couple));
         connect.kafka().produce(topicName, "key", value);
 
-        assertSqlEventually(questDBContainer, "\"partner1_name_firstname\",\"partner1_name_lastname\",\"partner2_name_firstname\",\"partner2_name_lastname\"\r\n"
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"partner1_name_firstname\",\"partner1_name_lastname\",\"partner2_name_firstname\",\"partner2_name_lastname\"\r\n"
                         + "\"John\",\"Doe\",\"Jane\",\"Doe\"\r\n",
                 "select partner1_name_firstname, partner1_name_lastname, partner2_name_firstname, partner2_name_lastname from " + topicName);
     }
@@ -500,21 +493,21 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     private void assertConnectorTaskStateEventually(AbstractStatus.State expectedState) {
-        await().atMost(CONNECTOR_START_TIMEOUT_MS, MILLISECONDS).untilAsserted(() -> assertConnectorTaskState(CONNECTOR_NAME, expectedState));
+        Awaitility.await().atMost(CONNECTOR_START_TIMEOUT_MS, MILLISECONDS).untilAsserted(() -> assertConnectorTaskState(CONNECTOR_NAME, expectedState));
     }
 
     private void assertConnectorTaskState(String connectorName, AbstractStatus.State expectedState) {
         ConnectorStateInfo info = connect.connectorStatus(connectorName);
         if (info == null) {
-            fail("Connector " + connectorName + " not found");
+            Assertions.fail("Connector " + connectorName + " not found");
         }
         List<ConnectorStateInfo.TaskState> taskStates = info.tasks();
         if (taskStates.size() == 0) {
-            fail("No tasks found for connector " + connectorName);
+            Assertions.fail("No tasks found for connector " + connectorName);
         }
         for (ConnectorStateInfo.TaskState taskState : taskStates) {
             if (!Objects.equals(taskState.state(), expectedState.toString())) {
-                fail("Task " + taskState.id() + " for connector " + connectorName + " is in state " + taskState.state() + " but expected " + expectedState);
+                Assertions.fail("Task " + taskState.id() + " for connector " + connectorName + " is in state " + taskState.state() + " but expected " + expectedState);
             }
         }
     }
