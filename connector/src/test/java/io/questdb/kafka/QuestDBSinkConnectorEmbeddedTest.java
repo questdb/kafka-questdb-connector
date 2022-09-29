@@ -24,7 +24,10 @@ import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.Calendar;
 import java.util.HashMap;
@@ -32,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TimeZone;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static java.util.Collections.singletonMap;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -39,6 +43,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.KEY_CONVERTER_CLASS_CONFIG;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.VALUE_CONVERTER_CLASS_CONFIG;
 
+@Testcontainers
 public final class QuestDBSinkConnectorEmbeddedTest {
     private static final String CONNECTOR_NAME = "questdb-sink-connector";
     private static final long CONNECTOR_START_TIMEOUT_MS = SECONDS.toMillis(60);
@@ -46,15 +51,19 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     private EmbeddedConnectCluster connect;
     private Converter converter;
 
-    private final GenericContainer questDBContainer = new GenericContainer("questdb/questdb:6.5.2")
+    private static final AtomicInteger ID_GEN = new AtomicInteger(0);
+    private String topicName;
+
+    @Container
+    private static final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:6.5.2")
             .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT, QuestDBUtils.QUESTDB_ILP_PORT)
             .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
             .withEnv("QDB_CAIRO_COMMIT_LAG", "100")
             .withEnv("JAVA_OPTS", "-Djava.locale.providers=JRE,SPI");
 
     @BeforeEach
-    public void setUp() {
-        questDBContainer.start();
+    public void setUp() throws IOException {
+        topicName = newTopicName();
         JsonConverter jsonConverter = new JsonConverter();
         jsonConverter.configure(singletonMap(ConverterConfig.TYPE_CONFIG, ConverterType.VALUE.getName()));
         converter = jsonConverter;
@@ -67,9 +76,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @AfterEach
-    public void tearDown() {
+    public void tearDown() throws IOException {
         connect.stop();
-        questDBContainer.stop();
     }
 
     private Map<String, String> baseConnectorProps(String topicName) {
@@ -84,7 +92,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testSmoke() {
-        String topicName = "testsmoke";
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         connect.configureConnector(CONNECTOR_NAME, props);
@@ -109,7 +116,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testJsonNoSchema() {
-        String topicName = "mytopic";
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         props.put("value.converter.schemas.enable", "false");
@@ -124,7 +130,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testJsonNoSchema_ArrayNotSupported() {
-        String topicName = "mytopic";
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         props.put("value.converter.schemas.enable", "false");
@@ -137,7 +142,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testPrimitiveKey() {
-        String topicName = "mytopic";
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         connect.configureConnector(CONNECTOR_NAME, props);
@@ -162,7 +166,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testCustomPrefixWithPrimitiveKeyAndValues() {
-        String topicName = "mytopic";
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         props.put(KEY_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
@@ -182,7 +185,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testSkipUnsupportedType_Bytes() {
-        String topicName = "testsmoke";
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         props.put(QuestDBSinkConnectorConfig.SKIP_UNSUPPORTED_TYPES_CONFIG, "true");
@@ -208,7 +210,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testDefaultPrefixWithPrimitiveKeyAndValues() {
-        String topicName = "mytopic";
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         props.put(KEY_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
@@ -226,7 +227,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testStructKey() {
-        String topicName = "mytopic";
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         //overrider the convertor from String to Json
@@ -252,7 +252,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testStructKeyWithNoPrefix() {
-        String topicName = "mytopic";
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         //overrider the convertor from String to Json
@@ -280,7 +279,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testStructKeyAndPrimitiveValue() {
-        String topicName = "mytopic";
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         //overrider the convertor from String to Json
@@ -308,8 +306,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testExplicitTableName() {
-        String tableName = "explicitTableName";
-        String topicName = "testExplicitTableName";
+        String tableName = newTableName();
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, tableName);
@@ -335,7 +332,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testLogicalTypes() {
-        String topicName = "mytopic";
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
@@ -385,7 +381,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testDecimalTypeNotSupported() {
-        String topicName = "mytopic";
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
@@ -411,7 +406,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testNestedStructInValue() {
-        String topicName = "mytopic";
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
@@ -443,7 +437,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testMultiLevelNestedStructInValue() {
-        String topicName = "mytopic";
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
@@ -510,5 +503,13 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 Assertions.fail("Task " + taskState.id() + " for connector " + connectorName + " is in state " + taskState.state() + " but expected " + expectedState);
             }
         }
+    }
+
+    private static String newTopicName() {
+        return "topic" + ID_GEN.getAndIncrement();
+    }
+
+    private static String newTableName() {
+        return "table" + ID_GEN.getAndIncrement();
     }
 }

@@ -50,5 +50,4 @@ public final class QuestDBUtils {
                 .build();
         return CLIENT.newCall(request).execute();
     }
-
 }
