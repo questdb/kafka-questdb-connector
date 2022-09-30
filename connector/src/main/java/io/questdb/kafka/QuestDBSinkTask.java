@@ -29,6 +29,8 @@ public final class QuestDBSinkTask extends SinkTask {
     private static final Logger log = LoggerFactory.getLogger(QuestDBSinkTask.class);
     private Sender sender;
     private QuestDBSinkConnectorConfig config;
+    private String timestampColumnName;
+    private Object timestampColumnValue;
 
     @Override
     public String version() {
@@ -39,6 +41,7 @@ public final class QuestDBSinkTask extends SinkTask {
     public void start(Map<String, String> map) {
         this.config = new QuestDBSinkConnectorConfig(map);
         this.sender = Sender.builder().address(config.getHost()).build();
+        this.timestampColumnName = config.getDesignatedTimestampColumnName();
     }
 
     @Override
@@ -50,16 +53,27 @@ public final class QuestDBSinkTask extends SinkTask {
     }
 
     private void handleSingleRecord(SinkRecord record) {
+        assert timestampColumnValue == null;
         String explicitTable = config.getTable();
         String tableName = explicitTable == null ? record.topic() : explicitTable;
         sender.table(tableName);
 
-        //todo: deal with duplicated columns
+        //todo: detect duplicated columns
         handleObject(config.getKeyPrefix(), record.keySchema(), record.key(), PRIMITIVE_KEY_FALLBACK_NAME);
         handleObject(config.getValuePrefix(), record.valueSchema(), record.value(), PRIMITIVE_VALUE_FALLBACK_NAME);
 
-        //todo: add support for event time, it should probably be extracted from a timestamp field in the value?
-        sender.atNow();
+        if (timestampColumnValue == null) {
+            sender.atNow();
+        } else {
+            if (timestampColumnValue instanceof Long) {
+                sender.at(TimeUnit.MILLISECONDS.toNanos((Long) timestampColumnValue));
+            } else if (timestampColumnValue instanceof java.util.Date) {
+                sender.at(TimeUnit.MILLISECONDS.toNanos(((java.util.Date) timestampColumnValue).getTime()));
+            } else {
+                throw new ConnectException("Unsupported timestamp column type: " + timestampColumnValue.getClass());
+            }
+            timestampColumnValue = null;
+        }
     }
 
     private void handleStruct(String parentName, Struct value, Schema schema) {
@@ -74,8 +88,29 @@ public final class QuestDBSinkTask extends SinkTask {
         }
     }
 
+    private boolean isDesignatedColumnName(String name, String fallbackName) {
+        if (timestampColumnName == null) {
+            return false;
+        }
+        if (timestampColumnName.equals(name)) {
+            return true;
+        }
+        if (name != null) {
+            return false;
+        }
+        return timestampColumnName.equals(fallbackName);
+    }
+
     private void handleObject(String name, Schema schema, Object value, String fallbackName) {
         assert !name.isEmpty() || !fallbackName.isEmpty();
+        if (isDesignatedColumnName(name, fallbackName)) {
+            assert timestampColumnValue == null;
+            if (value == null) {
+                throw new ConnectException("Timestamp column value cannot be null");
+            }
+            timestampColumnValue = value;
+            return;
+        }
         if (tryWriteLogicalType(name.isEmpty() ? fallbackName : name, schema, value)) {
             return;
         }
