@@ -17,7 +17,7 @@ async function ingest() {
             const data = {
                 firstname: faker.name.firstName(),
                 lastname: faker.name.lastName(),
-                birthday: faker.date.birthdate()
+                birthday: faker.date.birthdate({min: 1970}),
             };
             await producer.send({
                 topic: "People",
