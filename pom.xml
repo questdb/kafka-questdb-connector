@@ -8,6 +8,7 @@
     <modules>
         <module>connector</module>
         <module>integration-tests</module>
+        <module>kafka-questdb-connector-samples</module>
     </modules>
     <packaging>pom</packaging>
 

@@ -1,0 +1,62 @@
+version: '2.1'
+services:
+  questdb:
+    image: questdb/questdb:6.5.3
+    expose:
+      - "9009"
+    ports:
+      - "19000:9000"
+    environment:
+      - QDB_CAIRO_COMMIT_LAG=1000
+      - JAVA_OPTS=-Djava.locale.providers=JRE,SPI
+  zookeeper:
+    image: zookeeper:3.6.2
+    ports:
+      - "2181:2181"
+  kafka:
+    image: wurstmeister/kafka:2.13-2.8.1
+    ports:
+      - "9092:9092"
+    depends_on:
+      - zookeeper
+    links:
+      - zookeeper:zookeeper
+    environment:
+      KAFKA_ADVERTISED_HOST_NAME: "kafka"
+      KAFKA_ADVERTISED_PORT: "9092"
+      HOSTNAME_COMMAND: "route -n | awk '/UG[ \t]/{print $$2}'"
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_CREATE_TOPICS: "People:1:1"
+  producer:
+    image: kafka-questdb-connector-samples-faker-generator
+    build:
+      dockerfile: ./Dockerfile
+    depends_on:
+      - kafka
+    links:
+      - kafka:kafka
+      - questdb:questdb
+  connect:
+    image: kafka-questdb-connector-samples-faker-connect
+    build:
+      dockerfile: ./Dockerfile-Sample-Faker
+      context: ./../../
+    ports:
+      - "8083:8083"
+    depends_on:
+      - kafka
+    links:
+      - kafka:kafka
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: "kafka:9092"
+      CONNECT_GROUP_ID: "default"
+      CONNECT_OFFSET_STORAGE_TOPIC: "connect-storage-topic"
+      CONNECT_CONFIG_STORAGE_TOPIC: "connect-config-topic"
+      CONNECT_STATUS_STORAGE_TOPIC: "connect-status-topic"
+      CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.storage.StringConverter"
+      CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_REST_ADVERTISED_HOST_NAME: "connect"
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"

@@ -1,0 +1,16 @@
+{
+  "name": "producer",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@faker-js/faker": "^7.5.0",
+    "kafkajs": "^2.2.0"
+  }
+}
