@@ -31,6 +31,7 @@ services:
     image: kafka-questdb-connector-samples-faker-generator
     build:
       dockerfile: ./Dockerfile
+      context: .
     depends_on:
       - kafka
     links:
