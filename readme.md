@@ -35,7 +35,7 @@ The connector supports following Options:
 | timestamp.field.name   | STRING  | pickup_time                                                 | N/A                | Designated timestamp field name               |
 
 ## Supported serialization formats
-The connector does not do data deserialization on its own. It relies on Kafka Connect converters to deserialize data. It's been tested predominantly with JSON, but it should work with any converter, including Avro. Convertors can be configured using `key.converter` and `value.converter` options, see the table above. 
+The connector does not do data deserialization on its own. It relies on Kafka Connect converters to deserialize data. It's been tested predominantly with JSON, but it should work with any converter, including Avro. Converters can be configured using `key.converter` and `value.converter` options, see the table above. 
 
 ## How it works
 The connector reads data from Kafka topics and writes it to QuestDB tables. The connector converts each field in the Kafka message to a column in the QuestDB table. Structs and maps are flatted into columns. 
@@ -58,4 +58,5 @@ The connector will create a table with the following columns:
 |-----------|----------|----------------|--------------|
 | John      | Doe      | Main Street    | New York     |
 
-## Supported types
+## Designated Timestamps
+The connector supports designated timestamps. If the message contains a field with a timestamp, the connector can use it as a timestamp for the row. The field name must be configured using `timestamp.field.name` option. The field must either a simple number or a timestamp. When it's a simple number, the connector will interpret it as a Unix timestamp in milliseconds.
