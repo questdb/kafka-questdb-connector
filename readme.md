@@ -44,7 +44,8 @@ Example:
 Consider the following Kafka message:
 ```json
 {
-    "name": "John",
+    "firstname": "John",
+    "lastname": "Doe",
     "age": 30,
     "address": {
       "street": "Main Street",
@@ -54,9 +55,9 @@ Consider the following Kafka message:
 ```
 The connector will create a table with the following columns:
 
-| firstname | lastname | address_street | address_city |
-|-----------|----------|----------------|--------------|
-| John      | Doe      | Main Street    | New York     |
+| firstname <sub>string</sub> | lastname <sub>string</sub> | age <sub>long</sub> | address_street <sub>string</sub> | address_city <sub>string</sub> |
+|-------------------------------|------------------------------|-----------------------|------------------------------------|----------------------------------|
+| John                          | Doe                          | 30                    | Main Street                        | New York                         |
 
 ## Designated Timestamps
 The connector supports designated timestamps. If the message contains a field with a timestamp, the connector can use it as a timestamp for the row. The field name must be configured using `timestamp.field.name` option. The field must either a simple number or a timestamp. When it's a simple number, the connector will interpret it as a Unix timestamp in milliseconds.
