@@ -61,3 +61,11 @@ The connector will create a table with the following columns:
 
 ## Designated Timestamps
 The connector supports designated timestamps. If the message contains a field with a timestamp, the connector can use it as a timestamp for the row. The field name must be configured using `timestamp.field.name` option. The field must either a simple number or a timestamp. When it's a simple number, the connector will interpret it as a Unix timestamp in milliseconds.
+
+## QuestDB Symbol Type
+QuestDB supports a special type called [Symbol](https://questdb.io/docs/concept/symbol/). This connector never creates a column with a type `SYMBOL`. Instead, it creates a column with a type `STRING`. If you want to use `SYMBOL` type, you can pre-create a table in QuestDB and use it as a target table.
+
+## Target Table Considerations
+When a target table does not exist in QuestDB then it will be automatically created when a first row arrives. This is recommended approach for development and testing.
+
+In production, it's recommended to [create tables manually via SQL](https://questdb.io/docs/reference/sql/create-table/). This gives you more control over the table schema and allows you to create indexes.
