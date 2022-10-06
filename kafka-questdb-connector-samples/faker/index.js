@@ -13,21 +13,27 @@ async function ingest() {
     try {
         await producer.connect();
 
-        for (let i = 0; i < 100_000; i++) {
-            const data = {
-                firstname: faker.name.firstName(),
-                lastname: faker.name.lastName(),
-                birthday: faker.date.birthdate({min: 1970}),
-            };
-            await producer.send({
-                topic: "People",
-                messages: [
-                    {
-                        value: JSON.stringify(data)
-                    }
-                ]
-            });
+        for (let year = 1970; year < 2021; year++) {
+            for (let i = 0; i < 100; i++) {
+                let batch = [];
+                for (let j = 0; j < 100; j++) {
+                    const data = {
+                        firstname: faker.name.firstName(),
+                        lastname: faker.name.lastName(),
+                        birthday: faker.date.birthdate({min: year, max: year}),
+                    };
+                    batch.push({value: 'JSON.stringify(data)'})
+                }
+                await producer.sendBatch({
+                    topicMessages: [
+                        {
+                            topic: 'test',
+                            messages: batch
+                        }]
+                });
+            }
         }
+        console.log("Done");
     } catch(err){
         console.error(err);
     }
