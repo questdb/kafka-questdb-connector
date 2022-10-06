@@ -11,7 +11,7 @@ This guide assumes you are already familiar with Apache Kafka and Kafka Connect.
 {
   "name": "questdb-sink",
   "config": {
-    "connector.class": "io.questdb.kafka.connect.QuestDbSinkConnector",
+    "connector.class": "io.questdb.kafka.QuestDBSinkConnector",
     "host": "localhost:9009",
     "topics": "Orders",
     "table": "orders_table"
@@ -56,8 +56,8 @@ Consider the following Kafka message:
 The connector will create a table with the following columns:
 
 | firstname <sub>string</sub> | lastname <sub>string</sub> | age <sub>long</sub> | address_street <sub>string</sub> | address_city <sub>string</sub> |
-|-------------------------------|------------------------------|-----------------------|------------------------------------|----------------------------------|
-| John                          | Doe                          | 30                    | Main Street                        | New York                         |
+|-----------------------------|----------------------------|---------------------|----------------------------------|--------------------------------|
+| John                        | Doe                        | 30                  | Main Street                      | New York                       |
 
 ## Designated Timestamps
 The connector supports designated timestamps. If the message contains a field with a timestamp, the connector can use it as a timestamp for the row. The field name must be configured using `timestamp.field.name` option. The field must either a simple number or a timestamp. When it's a simple number, the connector will interpret it as a Unix timestamp in milliseconds.
