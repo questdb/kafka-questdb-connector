@@ -22,12 +22,12 @@ async function ingest() {
                         lastname: faker.name.lastName(),
                         birthday: faker.date.birthdate({min: year, max: year}),
                     };
-                    batch.push({value: 'JSON.stringify(data)'})
+                    batch.push({value: JSON.stringify(data)})
                 }
                 await producer.sendBatch({
                     topicMessages: [
                         {
-                            topic: 'test',
+                            topic: 'People',
                             messages: batch
                         }]
                 });
