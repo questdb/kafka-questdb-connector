@@ -113,6 +113,9 @@ public final class QuestDBSinkTask extends SinkTask {
             timestampColumnValue = value;
             return;
         }
+        if (value == null) {
+            return;
+        }
         if (tryWriteLogicalType(name.isEmpty() ? fallbackName : name, schema, value)) {
             return;
         }
@@ -170,29 +173,21 @@ public final class QuestDBSinkTask extends SinkTask {
             case INT16:
             case INT32:
             case INT64:
-                if (value != null) {
-                    Number l = (Number) value;
-                    sender.longColumn(sanitizedName, l.longValue());
-                }
+                Number l = (Number) value;
+                sender.longColumn(sanitizedName, l.longValue());
                 break;
             case FLOAT32:
             case FLOAT64:
-                if (value != null) {
-                    Number d = (Number) value;
-                    sender.doubleColumn(sanitizedName, d.doubleValue());
-                }
+                Number d = (Number) value;
+                sender.doubleColumn(sanitizedName, d.doubleValue());
                 break;
             case BOOLEAN:
-                if (value != null) {
-                    Boolean b = (Boolean) value;
-                    sender.boolColumn(sanitizedName, b);
-                }
+                Boolean b = (Boolean) value;
+                sender.boolColumn(sanitizedName, b);
                 break;
             case STRING:
-                if (value != null) {
-                    String s = (String) value;
-                    sender.stringColumn(sanitizedName, s);
-                }
+                String s = (String) value;
+                sender.stringColumn(sanitizedName, s);
                 break;
             case STRUCT:
                 handleStruct(name, (Struct) value, schema);

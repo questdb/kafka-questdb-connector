@@ -8,10 +8,8 @@ import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.StringSerializer;
-import org.apache.kafka.connect.storage.StringConverter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
-import io.questdb.kafka.extension.JarResolverExtension;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.KafkaContainer;
@@ -92,8 +90,8 @@ public class QuestDBSinkConnectorIT {
         ConnectorConfiguration connector = ConnectorConfiguration.create()
                 .with("connector.class", QuestDBSinkConnector.class.getName())
                 .with("tasks.max", "1")
-                .with("key.converter", StringConverter.class.getName())
-                .with("value.converter", StringConverter.class.getName())
+                .with("key.converter", "org.apache.kafka.connect.storage.StringConverter")
+                .with("value.converter", "org.apache.kafka.connect.storage.StringConverter")
                 .with("topics", topicName)
                 .with("host", questDBContainer.getNetworkAliases().get(0) + ":" + QuestDBUtils.QUESTDB_ILP_PORT);
 

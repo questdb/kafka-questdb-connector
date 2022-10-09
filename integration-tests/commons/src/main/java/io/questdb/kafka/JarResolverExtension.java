@@ -1,6 +1,5 @@
-package io.questdb.kafka.extension;
+package io.questdb.kafka;
 
-import io.questdb.client.Sender;
 import org.junit.jupiter.api.extension.AfterAllCallback;
 import org.junit.jupiter.api.extension.Extension;
 import org.junit.jupiter.api.extension.ExtensionContext;
@@ -46,7 +45,7 @@ public final class JarResolverExtension implements Extension, AfterAllCallback {
     }
 
     private static String getPathToJarWithClass(Class<?> clazz) {
-        URL resource = Sender.class.getClassLoader().getResource(clazz.getName().replace(".", "/") + ".class");
+        URL resource = clazz.getClassLoader().getResource(clazz.getName().replace(".", "/") + ".class");
         String stringPath = Objects.requireNonNull(resource, "class " + clazz + " not found").getPath();
         stringPath = stringPath.substring("file:".length(), stringPath.indexOf("!"));
         Path path = Paths.get(stringPath);

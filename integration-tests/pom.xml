@@ -12,6 +12,8 @@
 
     <modules>
         <module>cp-server</module>
+        <module>debezium</module>
+        <module>commons</module>
     </modules>
 
     <packaging>pom</packaging>

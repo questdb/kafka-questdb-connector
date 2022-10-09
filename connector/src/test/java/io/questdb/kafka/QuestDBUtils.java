@@ -24,7 +24,7 @@ public final class QuestDBUtils {
 
     }
 
-    static void assertSqlEventually(GenericContainer<?> questdbContainer, String expectedResult, String query) {
+    public static void assertSqlEventually(GenericContainer<?> questdbContainer, String expectedResult, String query) {
         await().atMost(QUERY_WAITING_TIME_SECONDS, TimeUnit.SECONDS).untilAsserted(() -> assertSql(questdbContainer, expectedResult, query));
     }
 
