@@ -40,7 +40,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static java.util.Collections.singletonMap;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.apache.kafka.common.config.AbstractConfig.CONFIG_PROVIDERS_CONFIG;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.KEY_CONVERTER_CLASS_CONFIG;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.VALUE_CONVERTER_CLASS_CONFIG;
 
@@ -63,7 +62,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
             .withEnv("JAVA_OPTS", "-Djava.locale.providers=JRE,SPI");
 
     @BeforeEach
-    public void setUp() throws IOException {
+    public void setUp() {
         topicName = newTopicName();
         JsonConverter jsonConverter = new JsonConverter();
         jsonConverter.configure(singletonMap(ConverterConfig.TYPE_CONFIG, ConverterType.VALUE.getName()));
@@ -120,7 +119,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         props.put("value.converter.schemas.enable", "false");
-        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME, "birth");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
         connect.configureConnector(CONNECTOR_NAME, props);
         assertConnectorTaskRunningEventually();
 
@@ -141,7 +140,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         props.put("transforms.convert_birth.target.type", "Timestamp");
         props.put("transforms.convert_birth.field", "birth");
         props.put("transforms.convert_birth.format", "yyyy-MM-dd'T'HH:mm:ss.SSSX");
-        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME, "birth");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
         connect.configureConnector(CONNECTOR_NAME, props);
         assertConnectorTaskRunningEventually();
 
@@ -156,7 +155,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     public void testDesignatedTimestamp_withSchema() {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
-        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME, "birth");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
         connect.configureConnector(CONNECTOR_NAME, props);
         assertConnectorTaskRunningEventually();
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
@@ -181,6 +180,39 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         QuestDBUtils.assertSqlEventually(questDBContainer, "\"key\",\"firstname\",\"lastname\",\"timestamp\"\r\n"
                         + "\"key\",\"John\",\"Doe\",\"2022-10-23T13:53:59.123000Z\"\r\n",
+                "select * from " + topicName);
+    }
+
+    @Test
+    public void testDoNotIncludeKey() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .field("birth", Timestamp.SCHEMA)
+                .build();
+
+        java.util.Date birth = new Calendar.Builder()
+                .setTimeZone(TimeZone.getTimeZone("UTC"))
+                .setDate(2022, 9, 23) // note: month is 0-based
+                .setTimeOfDay(13, 53, 59, 123)
+                .build().getTime();
+
+        Struct struct = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe")
+                .put("birth", birth);
+
+
+        connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
+
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"timestamp\"\r\n"
+                        + "\"John\",\"Doe\",\"2022-10-23T13:53:59.123000Z\"\r\n",
                 "select * from " + topicName);
     }
 

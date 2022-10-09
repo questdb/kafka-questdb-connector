@@ -59,7 +59,9 @@ public final class QuestDBSinkTask extends SinkTask {
         sender.table(tableName);
 
         //todo: detect duplicated columns
-        handleObject(config.getKeyPrefix(), record.keySchema(), record.key(), PRIMITIVE_KEY_FALLBACK_NAME);
+        if (config.isIncludeKey()) {
+            handleObject(config.getKeyPrefix(), record.keySchema(), record.key(), PRIMITIVE_KEY_FALLBACK_NAME);
+        }
         handleObject(config.getValuePrefix(), record.valueSchema(), record.value(), PRIMITIVE_VALUE_FALLBACK_NAME);
 
         if (timestampColumnValue == null) {

@@ -23,8 +23,11 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String SKIP_UNSUPPORTED_TYPES_CONFIG = "skip.unsupported.types";
     private static final String SKIP_UNSUPPORTED_TYPES_DOC = "Skip unsupported types";
 
-    public static final String DESIGNATED_TIMESTAMP_COLUMN_NAME = "timestamp.field.name";
+    public static final String DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG = "timestamp.field.name";
     private static final String DESIGNATED_TIMESTAMP_COLUMN_NAME_DOC = "Designated timestamp field name";
+
+    public static final String INCLUDE_KEY_CONFIG = "include.key";
+    private static final String INCLUDE_KEY_DOC = "Include key in the table";
 
     public QuestDBSinkConnectorConfig(ConfigDef config, Map<String, String> parsedConfig) {
         super(config, parsedConfig);
@@ -41,7 +44,8 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(KEY_PREFIX_CONFIG, Type.STRING, "key", Importance.MEDIUM, KEY_PREFIX_DOC)
                 .define(VALUE_PREFIX_CONFIG, Type.STRING, "", Importance.MEDIUM, VALUE_PREFIX_DOC)
                 .define(SKIP_UNSUPPORTED_TYPES_CONFIG, Type.BOOLEAN, false, Importance.MEDIUM, SKIP_UNSUPPORTED_TYPES_DOC)
-                .define(DESIGNATED_TIMESTAMP_COLUMN_NAME, Type.STRING, null, Importance.MEDIUM, DESIGNATED_TIMESTAMP_COLUMN_NAME_DOC);
+                .define(DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, Type.STRING, null, Importance.MEDIUM, DESIGNATED_TIMESTAMP_COLUMN_NAME_DOC)
+                .define(INCLUDE_KEY_CONFIG, Type.BOOLEAN, true, Importance.MEDIUM, INCLUDE_KEY_DOC);
     }
 
     public String getHost() {
@@ -65,6 +69,10 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     }
 
     public String getDesignatedTimestampColumnName() {
-        return getString(DESIGNATED_TIMESTAMP_COLUMN_NAME);
+        return getString(DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG);
+    }
+
+    public boolean isIncludeKey() {
+        return getBoolean(INCLUDE_KEY_CONFIG);
     }
 }
