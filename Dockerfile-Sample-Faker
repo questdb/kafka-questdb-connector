@@ -4,6 +4,8 @@ COPY ./pom.xml /opt/pom.xml
 COPY ./connector/pom.xml /opt/connector/pom.xml
 COPY ./integration-tests/pom.xml /opt/integration-tests/pom.xml
 COPY ./integration-tests/cp-server/pom.xml /opt/integration-tests/cp-server/pom.xml
+COPY ./integration-tests/commons/pom.xml /opt/integration-tests/commons/pom.xml
+COPY ./integration-tests/debezium/pom.xml /opt/integration-tests/debezium/pom.xml
 COPY ./kafka-questdb-connector-samples/pom.xml /opt/kafka-questdb-connector-samples/pom.xml
 RUN mvn -B -f ./pom.xml -pl connector dependency:go-offline
 
