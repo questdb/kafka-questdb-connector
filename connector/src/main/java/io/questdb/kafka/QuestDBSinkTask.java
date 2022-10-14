@@ -30,7 +30,7 @@ public final class QuestDBSinkTask extends SinkTask {
     private Sender sender;
     private QuestDBSinkConnectorConfig config;
     private String timestampColumnName;
-    private Object timestampColumnValue;
+    private long timestampColumnValue = Long.MIN_VALUE;
 
     @Override
     public String version() {
@@ -53,7 +53,7 @@ public final class QuestDBSinkTask extends SinkTask {
     }
 
     private void handleSingleRecord(SinkRecord record) {
-        assert timestampColumnValue == null;
+        assert timestampColumnValue == Long.MIN_VALUE;
         String explicitTable = config.getTable();
         String tableName = explicitTable == null ? record.topic() : explicitTable;
         sender.table(tableName);
@@ -64,17 +64,11 @@ public final class QuestDBSinkTask extends SinkTask {
         }
         handleObject(config.getValuePrefix(), record.valueSchema(), record.value(), PRIMITIVE_VALUE_FALLBACK_NAME);
 
-        if (timestampColumnValue == null) {
+        if (timestampColumnValue == Long.MIN_VALUE) {
             sender.atNow();
         } else {
-            if (timestampColumnValue instanceof Long) {
-                sender.at(TimeUnit.MILLISECONDS.toNanos((Long) timestampColumnValue));
-            } else if (timestampColumnValue instanceof java.util.Date) {
-                sender.at(TimeUnit.MILLISECONDS.toNanos(((java.util.Date) timestampColumnValue).getTime()));
-            } else {
-                throw new ConnectException("Unsupported timestamp column type: " + timestampColumnValue.getClass());
-            }
-            timestampColumnValue = null;
+            sender.at(timestampColumnValue);
+            timestampColumnValue = Long.MIN_VALUE;
         }
     }
 
@@ -106,11 +100,11 @@ public final class QuestDBSinkTask extends SinkTask {
     private void handleObject(String name, Schema schema, Object value, String fallbackName) {
         assert !name.isEmpty() || !fallbackName.isEmpty();
         if (isDesignatedColumnName(name, fallbackName)) {
-            assert timestampColumnValue == null;
+            assert timestampColumnValue == Long.MIN_VALUE;
             if (value == null) {
                 throw new ConnectException("Timestamp column value cannot be null");
             }
-            timestampColumnValue = value;
+            timestampColumnValue = resolveDesignatedTimestampColumnValue(value, schema);
             return;
         }
         if (value == null) {
@@ -119,11 +113,33 @@ public final class QuestDBSinkTask extends SinkTask {
         if (tryWriteLogicalType(name.isEmpty() ? fallbackName : name, schema, value)) {
             return;
         }
-        // ok, not a known logical try, try primitive types
+        // ok, not a known logical type, try primitive types
         if (tryWritePhysicalTypeFromSchema(name, schema, value, fallbackName)) {
             return;
         }
         writePhysicalTypeWithoutSchema(name, value, fallbackName);
+    }
+
+    private static long resolveDesignatedTimestampColumnValue(Object value, Schema schema) {
+        if (value instanceof java.util.Date) {
+            return TimeUnit.MILLISECONDS.toNanos(((java.util.Date) value).getTime());
+        }
+        if (!(value instanceof Long)) {
+            throw new ConnectException("Unsupported timestamp column type: " + value.getClass());
+        }
+        long longValue = (Long) value;
+        TimeUnit inputUnit;
+        if (schema == null || schema.name() == null) {
+            // no schema, assuming millis since epoch
+            inputUnit = TimeUnit.MILLISECONDS;
+        } else if ("io.debezium.time.MicroTimestamp".equals(schema.name())) {
+            // special case: Debezium micros since epoch
+            inputUnit = TimeUnit.MICROSECONDS;
+        } else {
+            // no idea what's that, let's assume it's again millis since epoch and hope for the best
+            inputUnit = TimeUnit.MILLISECONDS;
+        }
+        return inputUnit.toNanos(longValue);
     }
 
     private void writePhysicalTypeWithoutSchema(String name, Object value, String fallbackName) {
@@ -214,6 +230,10 @@ public final class QuestDBSinkTask extends SinkTask {
             return false;
         }
         switch (schema.name()) {
+            case "io.debezium.time.MicroTimestamp":
+                long l = (Long) value;
+                sender.timestampColumn(name, l);
+                return true;
             case Timestamp.LOGICAL_NAME:
             case Date.LOGICAL_NAME:
                 java.util.Date d = (java.util.Date) value;
