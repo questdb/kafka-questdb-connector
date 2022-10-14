@@ -118,18 +118,15 @@ public class DebeziumIT {
             statement.execute("alter table "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " replica identity full");
             statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (1, 'Learn CDC')");
             statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (2, 'Learn Debezium')");
-
-            ConnectorConfiguration debeziumSourceConfig = ConnectorConfiguration
-                    .forJdbcContainer(postgresContainer)
-                    .with("database.server.name", PG_SERVER_NAME);
-            debeziumContainer.registerConnector(DEBEZIUM_CONNECTOR_NAME, debeziumSourceConfig);
+            startDebeziumConnector();
 
             ConnectorConfiguration questSinkConfig = newQuestSinkBaseConfig(questTableName);
             debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSinkConfig);
 
             QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\"\r\n"
                     + "1,\"Learn CDC\"\r\n"
-                    + "2,\"Learn Debezium\"\r\n", "select id, title from " + questTableName);
+                    + "2,\"Learn Debezium\"\r\n",
+                    "select id, title from " + questTableName);
         }
     }
 
@@ -143,22 +140,31 @@ public class DebeziumIT {
             statement.execute("create table " + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " (id int8 not null, title varchar(255), primary key (id))");
             statement.execute("alter table "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " replica identity full");
             statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (1, 'Learn CDC')");
-            statement.execute("alter table "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " add column description varchar(255)");
-            statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (2, 'Learn Debezium', 'Best book ever')");
 
-            ConnectorConfiguration connector = ConnectorConfiguration
-                    .forJdbcContainer(postgresContainer)
-                    .with("database.server.name", PG_SERVER_NAME);
-
-            debeziumContainer.registerConnector(DEBEZIUM_CONNECTOR_NAME, connector);
+            startDebeziumConnector();
+            
             ConnectorConfiguration questSink = newQuestSinkBaseConfig(questTableName);
             debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSink);
+
+            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\"\r\n"
+                            + "1,\"Learn CDC\"\r\n",
+                    "select id, title from " + questTableName);
+
+            statement.execute("alter table "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " add column description varchar(255)");
+            statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (2, 'Learn Debezium', 'Best book ever')");
 
             QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\",\"description\"\r\n"
                     + "1,\"Learn CDC\",\r\n"
                     + "2,\"Learn Debezium\",\"Best book ever\"\r\n",
                     "select id, title, description from " + questTableName);
         }
+    }
+
+    private static void startDebeziumConnector() {
+        ConnectorConfiguration connector = ConnectorConfiguration
+                .forJdbcContainer(postgresContainer)
+                .with("database.server.name", PG_SERVER_NAME);
+        debeziumContainer.registerConnector(DEBEZIUM_CONNECTOR_NAME, connector);
     }
 
 
