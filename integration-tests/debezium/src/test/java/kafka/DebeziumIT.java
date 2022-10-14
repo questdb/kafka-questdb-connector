@@ -8,15 +8,11 @@ import io.questdb.kafka.QuestDBSinkConnectorConfig;
 import io.questdb.kafka.QuestDBSinkTask;
 import io.questdb.kafka.QuestDBUtils;
 import io.questdb.kafka.JarResolverExtension;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.KafkaConsumer;
-import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.connect.json.JsonConverter;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
-import org.rnorth.ducttape.unreliables.Unreliables;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.KafkaContainer;
@@ -33,20 +29,17 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.sql.Time;
-import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Properties;
-import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 
 @Testcontainers
 public class DebeziumIT {
+    private static final String PG_SCHEMA_NAME = "test";
+    private static final String PG_TABLE_NAME = "test";
+    private static final String PG_SERVER_NAME = "dbserver1";
+    private static final String DEBEZIUM_CONNECTOR_NAME = "debezium_source";
+    private static final String QUESTDB_CONNECTOR_NAME = "questdb_sink";
 
     // we need to locate JARs with QuestDB client and Kafka Connect Connector,
     // this is later used to copy to the Kafka Connect container
@@ -90,48 +83,84 @@ public class DebeziumIT {
                 .join();
     }
 
+    @AfterEach
+    public void cleanup() throws SQLException {
+        debeziumContainer.deleteAllConnectors();
+        try (Connection connection = getConnection(postgresContainer);
+            Statement statement = connection.createStatement()) {
+            statement.execute("drop schema " + PG_SCHEMA_NAME + " CASCADE");
+        }
+    }
+
+    private static ConnectorConfiguration newQuestSinkBaseConfig(String questTableName) {
+        ConnectorConfiguration questSink = ConnectorConfiguration.create()
+                .with("connector.class", QuestDBSinkConnector.class.getName())
+                .with("host", questDBContainer.getNetworkAliases().get(0))
+                .with("tasks.max", "1")
+                .with("topics", PG_SERVER_NAME + "."+ PG_SCHEMA_NAME + "." + PG_TABLE_NAME)
+                .with(QuestDBSinkConnectorConfig.TABLE_CONFIG, questTableName)
+                .with("key.converter", JsonConverter.class.getName())
+                .with("value.converter", JsonConverter.class.getName())
+                .with("transforms", "unwrap")
+                .with("transforms.unwrap.type", "io.debezium.transforms.ExtractNewRecordState")
+                .with(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        return questSink;
+    }
+
     @Test
     public void testSmoke() throws Exception {
-        String tableName = "todo";
+        String questTableName = "test_smoke";
         try (Connection connection = getConnection(postgresContainer);
              Statement statement = connection.createStatement()) {
 
-            statement.execute("create schema todo");
-            statement.execute("create table todo.Todo (id int8 not null, " +
-                    "title varchar(255), primary key (id))");
-            statement.execute("alter table todo.Todo replica identity full");
-            statement.execute("insert into todo.Todo values (1, " +
-                    "'Learn CDC')");
-            statement.execute("insert into todo.Todo values (2, " +
-                    "'Learn Debezium')");
+            statement.execute("create schema " + PG_SCHEMA_NAME);
+            statement.execute("create table " + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " (id int8 not null, title varchar(255), primary key (id))");
+            statement.execute("alter table "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " replica identity full");
+            statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (1, 'Learn CDC')");
+            statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (2, 'Learn Debezium')");
 
-            ConnectorConfiguration connector = ConnectorConfiguration
+            ConnectorConfiguration debeziumSourceConfig = ConnectorConfiguration
                     .forJdbcContainer(postgresContainer)
-                    .with("database.server.name", "dbserver1");
+                    .with("database.server.name", PG_SERVER_NAME);
+            debeziumContainer.registerConnector(DEBEZIUM_CONNECTOR_NAME, debeziumSourceConfig);
 
-
-            debeziumContainer.registerConnector("my-connector", connector);
-
-            ConnectorConfiguration questSink = ConnectorConfiguration.create()
-                    .with("connector.class", QuestDBSinkConnector.class.getName())
-                    .with("host", questDBContainer.getNetworkAliases().get(0))
-                    .with("tasks.max", "1")
-                    .with("topics", "dbserver1.todo.todo")
-                    .with(QuestDBSinkConnectorConfig.TABLE_CONFIG, tableName)
-                    .with("key.converter", JsonConverter.class.getName())
-                    .with("value.converter", JsonConverter.class.getName())
-                    .with("transforms", "unwrap")
-                    .with("transforms.unwrap.type", "io.debezium.transforms.ExtractNewRecordState")
-                    .with(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
-
-            debeziumContainer.registerConnector("questdb-sink", questSink);
-
+            ConnectorConfiguration questSinkConfig = newQuestSinkBaseConfig(questTableName);
+            debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSinkConfig);
 
             QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\"\r\n"
                     + "1,\"Learn CDC\"\r\n"
-                    + "2,\"Learn Debezium\"\r\n", "select id, title from " + tableName);
+                    + "2,\"Learn Debezium\"\r\n", "select id, title from " + questTableName);
         }
     }
+
+    @Test
+    public void testSchemaChange() throws Exception {
+        String questTableName = "test_schema_change";
+        try (Connection connection = getConnection(postgresContainer);
+             Statement statement = connection.createStatement()) {
+
+            statement.execute("create schema " + PG_SCHEMA_NAME);
+            statement.execute("create table " + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " (id int8 not null, title varchar(255), primary key (id))");
+            statement.execute("alter table "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " replica identity full");
+            statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (1, 'Learn CDC')");
+            statement.execute("alter table "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " add column description varchar(255)");
+            statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (2, 'Learn Debezium', 'Best book ever')");
+
+            ConnectorConfiguration connector = ConnectorConfiguration
+                    .forJdbcContainer(postgresContainer)
+                    .with("database.server.name", PG_SERVER_NAME);
+
+            debeziumContainer.registerConnector(DEBEZIUM_CONNECTOR_NAME, connector);
+            ConnectorConfiguration questSink = newQuestSinkBaseConfig(questTableName);
+            debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSink);
+
+            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\",\"description\"\r\n"
+                    + "1,\"Learn CDC\",\r\n"
+                    + "2,\"Learn Debezium\",\"Best book ever\"\r\n",
+                    "select id, title, description from " + questTableName);
+        }
+    }
+
 
     private static Connection getConnection(
             PostgreSQLContainer<?> postgresContainer)

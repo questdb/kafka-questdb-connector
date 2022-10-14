@@ -76,7 +76,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @AfterEach
-    public void tearDown() throws IOException {
+    public void tearDown() {
         connect.stop();
     }
 
