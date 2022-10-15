@@ -115,6 +115,35 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @Test
+    public void testUpfrontTable() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .field("age", Schema.INT8_SCHEMA)
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe")
+                .put("age", (byte) 42);
+
+        QuestDBUtils.assertSql(questDBContainer,
+                "{\"ddl\":\"OK\"}\n",
+                "create table " + topicName + " (firstname string, lastname string, age int)",
+                QuestDBUtils.Endpoint.EXEC);
+
+        connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
+
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\",\"key\"\r\n"
+                        + "\"John\",\"Doe\",42,\"key\"\r\n",
+                "select * from " + topicName);
+    }
+
+    @Test
     public void testDesignatedTimestamp_noSchema_unixEpochMillis() {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);

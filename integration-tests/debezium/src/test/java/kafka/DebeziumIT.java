@@ -322,6 +322,36 @@ public class DebeziumIT {
         }
     }
 
+    @Test
+    public void testDelete() throws SQLException {
+        String questTableName = "test_delete";
+        try (Connection connection = getConnection(postgresContainer);
+             Statement statement = connection.createStatement()) {
+            startDebeziumConnector();
+
+            statement.execute("create schema " + PG_SCHEMA_NAME);
+            statement.execute("create table " + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " (id int8 not null, title varchar(255), created_at timestamp, primary key (id))");
+            statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (1, 'Learn CDC', '2021-01-02')");
+
+            ConnectorConfiguration questSink = newQuestSinkBaseConfig(questTableName);
+            questSink.with(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "created_at");
+            debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSink);
+
+            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\",\"timestamp\"\r\n"
+                            + "1,\"Learn CDC\",\"2021-01-02T00:00:00.000000Z\"\r\n",
+                    "select * from " + questTableName);
+
+            // delete should be ignored by QuestDB
+            statement.execute("delete from "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " where id = 1");
+            statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (2, 'Learn Debezium', '2021-01-03')");
+
+            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\",\"timestamp\"\r\n"
+                            + "1,\"Learn CDC\",\"2021-01-02T00:00:00.000000Z\"\r\n"
+                            + "2,\"Learn Debezium\",\"2021-01-03T00:00:00.000000Z\"\r\n",
+                    "select * from " + questTableName);
+        }
+    }
+
     private static void startDebeziumConnector() {
         ConnectorConfiguration connector = ConnectorConfiguration
                 .forJdbcContainer(postgresContainer)
