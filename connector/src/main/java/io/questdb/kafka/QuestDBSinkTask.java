@@ -41,8 +41,17 @@ public final class QuestDBSinkTask extends SinkTask {
     @Override
     public void start(Map<String, String> map) {
         this.config = new QuestDBSinkConnectorConfig(map);
-        this.sender = Sender.builder().address(config.getHost()).build();
+        this.sender = createSender();
         this.timestampColumnName = config.getDesignatedTimestampColumnName();
+    }
+
+    private Sender createSender() {
+        Sender rawSender = Sender.builder().address(config.getHost()).build();
+        String symbolColumns = config.getSymbolColumns();
+        if (symbolColumns == null) {
+            return rawSender;
+        }
+        return new BufferingSender(rawSender, symbolColumns);
     }
 
     @Override
@@ -82,6 +91,18 @@ public final class QuestDBSinkTask extends SinkTask {
 
             String name = parentName.isEmpty() ? fieldName : parentName + STRUCT_FIELD_SEPARATOR + fieldName;
             handleObject(name, fieldSchema, fieldValue, "");
+        }
+    }
+
+    private void handleMap(String name, Map<?, ?> value, String fallbackName) {
+        for (Map.Entry<?, ?> entry : value.entrySet()) {
+            Object mapKey = entry.getKey();
+            if (!(mapKey instanceof String)) {
+                throw new ConnectException("Map keys must be strings");
+            }
+            String mapKeyName = (String) mapKey;
+            String entryName = name.isEmpty() ? mapKeyName : name + STRUCT_FIELD_SEPARATOR + mapKeyName;
+            handleObject(entryName, null, entry.getValue(), fallbackName);
         }
     }
 
@@ -159,15 +180,7 @@ public final class QuestDBSinkTask extends SinkTask {
         } else if (value instanceof Double) {
             sender.doubleColumn(actualName, (Double) value);
         } else if (value instanceof Map) {
-            for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
-                Object mapKey = entry.getKey();
-                if (!(mapKey instanceof String)) {
-                    throw new ConnectException("Map keys must be strings");
-                }
-                String mapKeyName = (String) mapKey;
-                String entryName = name.isEmpty() ? mapKeyName : name + STRUCT_FIELD_SEPARATOR + mapKeyName;
-                handleObject(entryName, null, entry.getValue(), fallbackName);
-            }
+            handleMap(name, (Map<?, ?>) value, fallbackName);
         } else {
             onUnsupportedType(actualName, value.getClass().getName());
         }

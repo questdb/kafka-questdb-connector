@@ -66,7 +66,7 @@ public class DebeziumIT {
                     .withCopyFileToContainer(MountableFile.forHostPath(connectorJarResolver.getJarPath()), "/kafka/connect/questdb-connector/questdb-connector.jar")
                     .withCopyFileToContainer(MountableFile.forHostPath(questdbJarResolver.getJarPath()), "/kafka/connect/questdb-connector/questdb.jar")
                     .dependsOn(kafkaContainer)
-//                    .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("debezium")))
+                    .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("debezium")))
                     .withEnv("CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE", "true")
                     .withEnv("CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE", "true");
 
@@ -74,7 +74,7 @@ public class DebeziumIT {
     private static final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:6.5.3")
             .withNetwork(network)
             .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT)
-//            .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
+            .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
             .withEnv("QDB_CAIRO_COMMIT_LAG", "100")
             .withEnv("JAVA_OPTS", "-Djava.locale.providers=JRE,SPI");
 

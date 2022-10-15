@@ -28,18 +28,19 @@ This guide assumes you are already familiar with Apache Kafka and Kafka Connect.
 ## Configuration
 The connector supports following Options:
 
-| Name                   | Type    | Example                                                     | Default            | Meaning                                       |
-|------------------------|---------|-------------------------------------------------------------|--------------------|-----------------------------------------------|
-| topics                 | STRING  | orders                                                      | N/A                | Topics to read from                           |
-| key.converter          | STRING  | <sub>org.apache.kafka.connect.storage.StringConverter</sub> | N/A                | Converter for keys stored in Kafka            |
-| value.converter        | STRING  | <sub>org.apache.kafka.connect.json.JsonConverter</sub>      | N/A                | Converter for values stored in Kafka          |
-| host                   | STRING  | localhost:9009                                              | N/A                | Host and port where QuestDB server is running |
-| table                  | STRING  | my_table                                                    | Same as Topic name | Target table in QuestDB                       |
-| key.prefix             | STRING  | from_key                                                    | key                | Prefix for key fields                         | 
-| value.prefix           | STRING  | from_value                                                  | N/A                | Prefix for value fields                       |
-| skip.unsupported.types | BOOLEAN | false                                                       | false              | Skip unsupported types                        |
-| timestamp.field.name   | STRING  | pickup_time                                                 | N/A                | Designated timestamp field name               |
-| include.key            | BOOLEAN | false                                                       | true               | Include message key in target table           |
+| Name                   | Type    | Example                                                     | Default            | Meaning                                                    |
+|------------------------|---------|-------------------------------------------------------------|--------------------|------------------------------------------------------------|
+| topics                 | STRING  | orders                                                      | N/A                | Topics to read from                                        |
+| key.converter          | STRING  | <sub>org.apache.kafka.connect.storage.StringConverter</sub> | N/A                | Converter for keys stored in Kafka                         |
+| value.converter        | STRING  | <sub>org.apache.kafka.connect.json.JsonConverter</sub>      | N/A                | Converter for values stored in Kafka                       |
+| host                   | STRING  | localhost:9009                                              | N/A                | Host and port where QuestDB server is running              |
+| table                  | STRING  | my_table                                                    | Same as Topic name | Target table in QuestDB                                    |
+| key.prefix             | STRING  | from_key                                                    | key                | Prefix for key fields                                      | 
+| value.prefix           | STRING  | from_value                                                  | N/A                | Prefix for value fields                                    |
+| skip.unsupported.types | BOOLEAN | false                                                       | false              | Skip unsupported types                                     |
+| timestamp.field.name   | STRING  | pickup_time                                                 | N/A                | Designated timestamp field name                            |
+| include.key            | BOOLEAN | false                                                       | true               | Include message key in target table                        |
+| symbols                | STRING  | instrument,stock                                            | N/A                | Comma separated list of columns that should be symbol type |
 
 ## Supported serialization formats
 The connector does not do data deserialization on its own. It relies on Kafka Connect converters to deserialize data. It's been tested predominantly with JSON, but it should work with any converter, including Avro. Converters can be configured using `key.converter` and `value.converter` options, see the table above. 
@@ -75,7 +76,7 @@ QuestDB supports a special type called [Symbol](https://questdb.io/docs/concept/
 ## Target Table Considerations
 When a target table does not exist in QuestDB then it will be automatically created when a first row arrives. This is recommended approach for development and testing.
 
-In production, it's recommended to [create tables manually via SQL](https://questdb.io/docs/reference/sql/create-table/). This gives you more control over the table schema and allows using the symbol type, create indexes, etc.
+In production, it's recommended to [create tables manually via SQL](https://questdb.io/docs/reference/sql/create-table/). This gives you more control over the table schema, allow per-table partitioning, creating indexes, etc.
 
 ## FAQ
 <b>Q</b>: Does this connector work with Schema Registry?

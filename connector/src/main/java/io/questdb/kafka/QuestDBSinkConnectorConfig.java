@@ -29,6 +29,9 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String INCLUDE_KEY_CONFIG = "include.key";
     private static final String INCLUDE_KEY_DOC = "Include key in the table";
 
+    public static final String SYMBOL_COLUMNS_CONFIG = "symbols";
+    private static final String SYMBOL_COLUMNS_DOC = "Comma separated list of columns that should be symbol type";
+
     public QuestDBSinkConnectorConfig(ConfigDef config, Map<String, String> parsedConfig) {
         super(config, parsedConfig);
     }
@@ -45,7 +48,8 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(VALUE_PREFIX_CONFIG, Type.STRING, "", Importance.MEDIUM, VALUE_PREFIX_DOC)
                 .define(SKIP_UNSUPPORTED_TYPES_CONFIG, Type.BOOLEAN, false, Importance.MEDIUM, SKIP_UNSUPPORTED_TYPES_DOC)
                 .define(DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, Type.STRING, null, Importance.MEDIUM, DESIGNATED_TIMESTAMP_COLUMN_NAME_DOC)
-                .define(INCLUDE_KEY_CONFIG, Type.BOOLEAN, true, Importance.MEDIUM, INCLUDE_KEY_DOC);
+                .define(INCLUDE_KEY_CONFIG, Type.BOOLEAN, true, Importance.MEDIUM, INCLUDE_KEY_DOC)
+                .define(SYMBOL_COLUMNS_CONFIG, Type.STRING, null, Importance.MEDIUM, SYMBOL_COLUMNS_DOC);
     }
 
     public String getHost() {
@@ -74,5 +78,9 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public boolean isIncludeKey() {
         return getBoolean(INCLUDE_KEY_CONFIG);
+    }
+
+    public String getSymbolColumns() {
+        return getString(SYMBOL_COLUMNS_CONFIG);
     }
 }
