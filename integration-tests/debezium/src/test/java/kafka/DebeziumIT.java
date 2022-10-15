@@ -241,6 +241,48 @@ public class DebeziumIT {
     }
 
     @Test
+    public void testEventTimeMicros() throws SQLException {
+        String questTableName = "test_event_time_micros";
+        try (Connection connection = getConnection(postgresContainer);
+             Statement statement = connection.createStatement()) {
+
+            statement.execute("create schema " + PG_SCHEMA_NAME);
+            statement.execute("create table " + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " (id int8 not null, title varchar(255), created_at timestamp(6), primary key (id))");
+            statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (1, 'Learn CDC', '2021-01-02T01:02:03.123456Z')");
+
+            startDebeziumConnector();
+            ConnectorConfiguration questSink = newQuestSinkBaseConfig(questTableName);
+            questSink.with(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "created_at");
+            debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSink);
+
+            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\",\"timestamp\"\r\n"
+                            + "1,\"Learn CDC\",\"2021-01-02T01:02:03.123456Z\"\r\n",
+                    "select id, title, timestamp from " + questTableName);
+        }
+    }
+
+    @Test
+    public void testEventTimeNanos() throws SQLException {
+        String questTableName = "test_event_time_nanos";
+        try (Connection connection = getConnection(postgresContainer);
+             Statement statement = connection.createStatement()) {
+
+            statement.execute("create schema " + PG_SCHEMA_NAME);
+            statement.execute("create table " + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " (id int8 not null, title varchar(255), created_at timestamp(9), primary key (id))");
+            statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (1, 'Learn CDC', '2021-01-02T01:02:03.123456789Z')");
+
+            startDebeziumConnector();
+            ConnectorConfiguration questSink = newQuestSinkBaseConfig(questTableName);
+            questSink.with(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "created_at");
+            debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSink);
+
+            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\",\"timestamp\"\r\n"
+                            + "1,\"Learn CDC\",\"2021-01-02T01:02:03.123457Z\"\r\n",
+                    "select id, title, timestamp from " + questTableName);
+        }
+    }
+
+    @Test
     public void testNonDesignatedTimestamp() throws SQLException {
         String questTableName = "test_non_designated_timestamp";
         try (Connection connection = getConnection(postgresContainer);
@@ -256,6 +298,26 @@ public class DebeziumIT {
 
             QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\",\"created_at\"\r\n"
                             + "1,\"Learn CDC\",\"2021-01-02T01:02:03.456000Z\"\r\n",
+                    "select id, title, created_at from " + questTableName);
+        }
+    }
+
+    @Test
+    public void testDate() throws SQLException {
+        String questTableName = "test_date";
+        try (Connection connection = getConnection(postgresContainer);
+             Statement statement = connection.createStatement()) {
+
+            statement.execute("create schema " + PG_SCHEMA_NAME);
+            statement.execute("create table " + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " (id int8 not null, title varchar(255), created_at date, primary key (id))");
+            statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (1, 'Learn CDC', '2021-01-02')");
+
+            startDebeziumConnector();
+            ConnectorConfiguration questSink = newQuestSinkBaseConfig(questTableName);
+            debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSink);
+
+            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\",\"created_at\"\r\n"
+                            + "1,\"Learn CDC\",\"2021-01-02T00:00:00.000000Z\"\r\n",
                     "select id, title, created_at from " + questTableName);
         }
     }

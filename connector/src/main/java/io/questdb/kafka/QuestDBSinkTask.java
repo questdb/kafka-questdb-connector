@@ -1,6 +1,7 @@
 package io.questdb.kafka;
 
 import io.questdb.client.Sender;
+import io.questdb.std.datetime.microtime.Timestamps;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.data.Date;
@@ -233,6 +234,11 @@ public final class QuestDBSinkTask extends SinkTask {
             case "io.debezium.time.MicroTimestamp":
                 long l = (Long) value;
                 sender.timestampColumn(name, l);
+                return true;
+            case "io.debezium.time.Date":
+                int i = (Integer) value;
+                long micros = Timestamps.addDays(0, i);
+                sender.timestampColumn(name, micros);
                 return true;
             case Timestamp.LOGICAL_NAME:
             case Date.LOGICAL_NAME:
