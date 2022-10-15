@@ -14,7 +14,13 @@ This guide assumes you are already familiar with Apache Kafka and Kafka Connect.
     "connector.class": "io.questdb.kafka.QuestDBSinkConnector",
     "host": "localhost:9009",
     "topics": "Orders",
-    "table": "orders_table"
+    "table": "orders_table",
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "transforms": "unwrap",
+    "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+    "include.key": "false",
+    "timestamp.field.name": "created_at"
   }
 }
 ```
@@ -72,15 +78,37 @@ When a target table does not exist in QuestDB then it will be automatically crea
 In production, it's recommended to [create tables manually via SQL](https://questdb.io/docs/reference/sql/create-table/). This gives you more control over the table schema and allows using the symbol type, create indexes, etc.
 
 ## FAQ
-Q: Does this connector work with Schema Registry?
+<b>Q</b>: Does this connector work with Schema Registry?
 
-A: The Connector does not care about serialization strategy used. It relies on Kafka Connect converters to deserialize data. Converters can be configured using `key.converter` and `value.converter` options, see the configuration section.
+<b>A</b>: The Connector does not care about serialization strategy used. It relies on Kafka Connect converters to deserialize data. Converters can be configured using `key.converter` and `value.converter` options, see the configuration section.
 
+<b>Q</b>: I'm getting this error: `org.apache.kafka.connect.errors.DataException: JsonConverter with schemas.enable requires "schema" and "payload" fields and may not contain additional fields. If you are trying to deserialize plain JSON data, set schemas.enable=false in your converter configuration.`
 
-Q: I'm getting this error: `org.apache.kafka.connect.errors.DataException: JsonConverter with schemas.enable requires "schema" and "payload" fields and may not contain additional fields. If you are trying to deserialize plain JSON data, set schemas.enable=false in your converter configuration.`
+<b>A</b>: This error means that the connector is trying to deserialize data using a converter that expects a schema. The connector does not use schemas, so you need to configure the converter to not expect a schema. For example, if you are using JSON converter, you need to set `value.converter.schemas.enable=false` or `key.converter.schemas.enable=false` in the connector configuration. 
 
-A: This error means that the connector is trying to deserialize data using a converter that expects a schema. The connector does not use schemas, so you need to configure the converter to not expect a schema. For example, if you are using JSON converter, you need to set `value.converter.schemas.enable=false` or `key.converter.schemas.enable=false` in the connector configuration. 
+<b>Q</b>: Does this connector work with Debezium?
 
-Q: Does this connector work with Debezium?
+<b>A</b>: Yes, it's been tested with Debezium as a source. Bear in mind that QuestDB is meant to be used as append-only database hence updates should be translated as new inserts. The connector supports Debezium's `ExtractNewRecordState` transformation to extract the new state of the record. The transform by default drops DELETE events so no need to handle it explicitly.
 
-A: Yes, it's been tested with Debezium as a source. Bear in mind that QuestDB is meant to be used as append-only database hence updates should be translated as new inserts.
+<b>Q</b>: How I can select which fields to include in the target table?
+
+<b>A</b>: Use the ReplaceField transformation to remove unwanted fields. For example, if you want to remove the `address` field from the example above, you can use the following configuration:
+```json
+{
+  "name": "questdb-sink",
+  "config": {
+    "connector.class": "io.questdb.kafka.QuestDBSinkConnector",
+    "host": "localhost:9009",
+    "topics": "Orders",
+    "table": "orders_table",
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "transforms": "unwrap,removeAddress",
+    "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+    "transforms.removeAddress.type": "org.apache.kafka.connect.transforms.ReplaceField$Value",
+    "transforms.removeAddress.blacklist": "address",
+    "include.key": "false"
+  }
+}
+```
+See [ReplaceField documentation](https://docs.confluent.io/platform/current/connect/transforms/replacefield.html#replacefield) for more details.
