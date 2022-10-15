@@ -69,4 +69,18 @@ QuestDB supports a special type called [Symbol](https://questdb.io/docs/concept/
 ## Target Table Considerations
 When a target table does not exist in QuestDB then it will be automatically created when a first row arrives. This is recommended approach for development and testing.
 
-In production, it's recommended to [create tables manually via SQL](https://questdb.io/docs/reference/sql/create-table/). This gives you more control over the table schema and allows you to create indexes.
+In production, it's recommended to [create tables manually via SQL](https://questdb.io/docs/reference/sql/create-table/). This gives you more control over the table schema and allows using the symbol type, create indexes, etc.
+
+## FAQ
+Q: Does this connector work with Schema Registry?
+
+A: The Connector does not care about serialization strategy used. It relies on Kafka Connect converters to deserialize data. Converters can be configured using `key.converter` and `value.converter` options, see the configuration section.
+
+
+Q: I'm getting this error: `org.apache.kafka.connect.errors.DataException: JsonConverter with schemas.enable requires "schema" and "payload" fields and may not contain additional fields. If you are trying to deserialize plain JSON data, set schemas.enable=false in your converter configuration.`
+
+A: This error means that the connector is trying to deserialize data using a converter that expects a schema. The connector does not use schemas, so you need to configure the converter to not expect a schema. For example, if you are using JSON converter, you need to set `value.converter.schemas.enable=false` or `key.converter.schemas.enable=false` in the connector configuration. 
+
+Q: Does this connector work with Debezium?
+
+A: Yes, it's been tested with Debezium as a source. Bear in mind that QuestDB is meant to be used as append-only database hence updates should be translated as new inserts.
