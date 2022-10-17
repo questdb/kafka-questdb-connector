@@ -10,6 +10,7 @@ import io.questdb.kafka.QuestDBUtils;
 import io.questdb.kafka.JarResolverExtension;
 import org.apache.kafka.connect.json.JsonConverter;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
@@ -27,12 +28,15 @@ import org.testcontainers.utility.MountableFile;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Stream;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.Assert.assertEquals;
 
 @Testcontainers
 public class DebeziumIT {
@@ -129,6 +133,68 @@ public class DebeziumIT {
                     + "1,\"Learn CDC\"\r\n"
                     + "2,\"Learn Debezium\"\r\n",
                     "select id, title from " + questTableName);
+        }
+    }
+
+    @Test
+    public void testManyUpdates() throws Exception {
+        String questTableName = "test_many_updates";
+        try (Connection connection = getConnection(postgresContainer);
+             Statement statement = connection.createStatement()) {
+            startDebeziumConnector();
+            ConnectorConfiguration questSink = newQuestSinkBaseConfig(questTableName);
+            questSink = questSink.with("transforms.unwrap.add.fields", "source.ts_ms")
+                            .with(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "__source_ts_ms");
+            questSink.with(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "symbol");
+            debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSink);
+
+            statement.execute("create schema " + PG_SCHEMA_NAME);
+            statement.execute("create table " + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " (id int8 not null, symbol varchar(255), price double precision, primary key (id))");
+            statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (0, 'TDB', 1.0)");
+            statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (1, 'QDB', 1.0)");
+            statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (2, 'IDB', 1.0)");
+            statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (3, 'PDB', 1.0)");
+            statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (4, 'KDB', 1.0)");
+
+            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"symbol\",\"price\"\r\n"
+                            + "0,\"TDB\",1.0\r\n"
+                            + "1,\"QDB\",1.0\r\n"
+                            + "2,\"IDB\",1.0\r\n"
+                            + "3,\"PDB\",1.0\r\n"
+                            + "4,\"KDB\",1.0\r\n",
+                    "select id, symbol, price from " + questTableName);
+
+            try (PreparedStatement preparedStatement = connection.prepareStatement("update " + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " set price = ? where id = ?")) {
+                //a bunch of updates
+                for (int i = 0; i < 200_000; i++) {
+                    int id = ThreadLocalRandom.current().nextInt(5);
+                    double newPrice = ThreadLocalRandom.current().nextDouble(100);
+                    preparedStatement.setDouble(1, newPrice);
+                    preparedStatement.setInt(2, id);
+                    preparedStatement.addBatch();
+                }
+                preparedStatement.executeBatch();
+                // set all prices to a known value, this will be useful in asserting the final state
+                for (int i = 0; i < 5; i++) {
+                    preparedStatement.setDouble(1, 42.0);
+                    preparedStatement.setInt(2, i);
+                    Assertions.assertEquals(1, preparedStatement.executeUpdate());
+                }
+            }
+
+            // all symbols have the last well-known price
+            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"symbol\",\"last_price\"\r\n"
+                            + "0,\"TDB\",42.0\r\n"
+                            + "1,\"QDB\",42.0\r\n"
+                            + "2,\"IDB\",42.0\r\n"
+                            + "3,\"PDB\",42.0\r\n"
+                            + "4,\"KDB\",42.0\r\n",
+                    "select id, symbol, last(price) as last_price from " + questTableName);
+
+            // total number of rows is equal to the number of updates / inserts
+            QuestDBUtils.assertSqlEventually(questDBContainer, "\"count\"\r\n"
+                            + "200010\r\n",
+                    "select count() from " + questTableName);
         }
     }
 

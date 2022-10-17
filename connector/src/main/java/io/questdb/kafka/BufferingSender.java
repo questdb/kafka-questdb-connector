@@ -31,9 +31,7 @@ final class BufferingSender implements Sender {
     private final List<CharSequence> stringValues = new ArrayList<>(DEFAULT_CAPACITY);
     private final List<CharSequence> symbolColumnNames = new ArrayList<>(DEFAULT_CAPACITY);
     private final List<CharSequence> symbolColumnValues = new ArrayList<>(DEFAULT_CAPACITY);
-
-
-    private Set<CharSequence> symbolColumns = new HashSet<>();
+    private final Set<CharSequence> symbolColumns = new HashSet<>();
 
     BufferingSender(Sender sender, String symbolColumns) {
         this.sender = sender;
