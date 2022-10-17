@@ -191,7 +191,7 @@ public class DebeziumIT {
                             + "4,\"KDB\",42.0\r\n",
                     "select id, symbol, last(price) as last_price from " + questTableName);
 
-            // total number of rows is equal to the number of updates / inserts
+            // total number of rows is equal to the number of updates and inserts
             QuestDBUtils.assertSqlEventually(questDBContainer, "\"count\"\r\n"
                             + "200010\r\n",
                     "select count() from " + questTableName);
