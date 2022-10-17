@@ -1,4 +1,4 @@
-FROM maven:3.8-jdk-8-slim AS dep-cache
+FROM maven:3.8-jdk-11-slim AS dep-cache
 WORKDIR /opt
 COPY ./pom.xml /opt/pom.xml
 COPY ./connector/pom.xml /opt/connector/pom.xml

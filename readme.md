@@ -2,6 +2,10 @@
 The connector reads data from Kafka topics and writes it to [QuestDB](https://questdb.io/) tables.
 The connector implements Apache Kafka [Sink Connector API](https://kafka.apache.org/documentation/#connect_development).
 
+## Pre-requisites
+* QuestDB 6.5.0 or newer
+* Apache Kafka 2.8.0 or newer, running on Java 11 or newer.
+
 ## Usage with Kafka Connect
 This guide assumes you are already familiar with Apache Kafka and Kafka Connect. If you are not then watch this [excellent video](https://www.youtube.com/watch?v=Jkcp28ki82k) or check our [sample projects](kafka-questdb-connector-samples).
 - Unpack connector ZIP into Kafka Connect `./plugin/` directory.
@@ -80,19 +84,19 @@ In production, it's recommended to [create tables manually via SQL](https://ques
 
 ## FAQ
 <b>Q</b>: Does this connector work with Schema Registry?
-
+<br/>
 <b>A</b>: The Connector does not care about serialization strategy used. It relies on Kafka Connect converters to deserialize data. Converters can be configured using `key.converter` and `value.converter` options, see the configuration section.
 
 <b>Q</b>: I'm getting this error: `org.apache.kafka.connect.errors.DataException: JsonConverter with schemas.enable requires "schema" and "payload" fields and may not contain additional fields. If you are trying to deserialize plain JSON data, set schemas.enable=false in your converter configuration.`
-
+<br/>
 <b>A</b>: This error means that the connector is trying to deserialize data using a converter that expects a schema. The connector does not use schemas, so you need to configure the converter to not expect a schema. For example, if you are using JSON converter, you need to set `value.converter.schemas.enable=false` or `key.converter.schemas.enable=false` in the connector configuration. 
 
 <b>Q</b>: Does this connector work with Debezium?
-
+<br/>
 <b>A</b>: Yes, it's been tested with Debezium as a source. Bear in mind that QuestDB is meant to be used as append-only database hence updates should be translated as new inserts. The connector supports Debezium's `ExtractNewRecordState` transformation to extract the new state of the record. The transform by default drops DELETE events so no need to handle it explicitly.
 
 <b>Q</b>: How I can select which fields to include in the target table?
-
+<br/>
 <b>A</b>: Use the ReplaceField transformation to remove unwanted fields. For example, if you want to remove the `address` field from the example above, you can use the following configuration:
 ```json
 {
@@ -113,3 +117,7 @@ In production, it's recommended to [create tables manually via SQL](https://ques
 }
 ```
 See [ReplaceField documentation](https://docs.confluent.io/platform/current/connect/transforms/replacefield.html#replacefield) for more details.
+
+<b>Q</b>: I need to run Kafka Connect on Java 8, but the connector says it requires Java 11. What should I do?
+<br/>
+<b>A</b>: The Kafka Connect-specific part of the connectors works with Java 8. The requirement for Java 11 is coming from QuestDB client itself. The zip archive contains 2 JARs: `questdb-kafka-connector-<version>.jar` and `questdb-<version>.jar`. You can use replace the latter with `questdb-<version>-jdk8.jar` from the [Maven central](https://mvnrepository.com/artifact/org.questdb/questdb/6.5.3-jdk8). Bear in mind this setup is not officially supported and you may encounter issues. If you do, please report them to us.
