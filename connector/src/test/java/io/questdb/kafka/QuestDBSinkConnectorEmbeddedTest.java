@@ -140,6 +140,87 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @Test
+    public void testSymbol_withAllOtherILPTypes() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "firstname");
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .field("age", Schema.INT8_SCHEMA)
+                .field("vegan", Schema.BOOLEAN_SCHEMA)
+                .field("height", Schema.FLOAT64_SCHEMA)
+                .field("birth", Timestamp.SCHEMA)
+                .build();
+
+        java.util.Date birth = new Calendar.Builder()
+                .setTimeZone(TimeZone.getTimeZone("UTC"))
+                .setDate(2022, 9, 23) // note: month is 0-based
+                .setTimeOfDay(13, 53, 59, 123)
+                .build().getTime();
+        Struct p1 = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe")
+                .put("age", (byte) 42)
+                .put("vegan", true)
+                .put("height", 1.80)
+                .put("birth", birth);
+
+        birth = new Calendar.Builder()
+                .setTimeZone(TimeZone.getTimeZone("UTC"))
+                .setDate(2021, 9, 23) // note: month is 0-based
+                .setTimeOfDay(13, 53, 59, 123)
+                .build().getTime();
+        Struct p2 = new Struct(schema)
+                .put("firstname", "Jane")
+                .put("lastname", "Doe")
+                .put("age", (byte) 41)
+                .put("vegan", false)
+                .put("height", 1.60)
+                .put("birth", birth);
+
+        connect.kafka().produce(topicName, "p1", new String(converter.fromConnectData(topicName, schema, p1)));
+        connect.kafka().produce(topicName, "p2", new String(converter.fromConnectData(topicName, schema, p2)));
+
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\",\"vegan\",\"height\",\"birth\"\r\n"
+                        + "\"John\",\"Doe\",42,true,1.8,\"2022-10-23T13:53:59.123000Z\"\r\n"
+                        + "\"Jane\",\"Doe\",41,false,1.6,\"2021-10-23T13:53:59.123000Z\"\r\n",
+                "select firstname,lastname,age,vegan,height,birth from " + topicName);
+    }
+
+    @Test
+    public void testUpfrontTable_withSymbols() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "firstname,lastname");
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .field("age", Schema.INT8_SCHEMA)
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe")
+                .put("age", (byte) 42);
+
+        QuestDBUtils.assertSql(questDBContainer,
+                "{\"ddl\":\"OK\"}\n",
+                "create table " + topicName + " (firstname symbol, lastname symbol, age int)",
+                QuestDBUtils.Endpoint.EXEC);
+
+        connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
+
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\",\"key\"\r\n"
+                        + "\"John\",\"Doe\",42,\"key\"\r\n",
+                "select * from " + topicName);
+    }
+
+    @Test
     public void testUpfrontTable() {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);

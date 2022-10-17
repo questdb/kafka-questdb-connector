@@ -9,26 +9,28 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+/**
+ * Allow to add regular fields before adding symbols.
+ * <p>
+ * Internally it buffers symbols and fields and sends them on calling <code>atNow()</code> or <code>at()</code>.
+ *
+ */
 final class BufferingSender implements Sender {
+    private static final int DEFAULT_CAPACITY = 4;
+
     private final Sender sender;
-
-    private List<CharSequence> timestampNames = new ArrayList<>(4);
-    private LongList timestampValues = new LongList(4);
-
-    private List<CharSequence> longNames = new ArrayList<>(4);
-    private LongList longValues = new LongList(4);
-
-    private List<CharSequence> doubleNames = new ArrayList<>(4);
-    private DoubleList doubleValues = new DoubleList();
-
-    private List<CharSequence> boolNames = new ArrayList<>(4);
-    private BoolList boolValues = new BoolList(4);
-
-    private List<CharSequence> stringNames = new ArrayList<>(4);
-    private List<CharSequence> stringValues = new ArrayList<>(4);
-
-    private List<CharSequence> symbolColumnNames = new ArrayList<>(4);
-    private List<CharSequence> symbolColumnValues = new ArrayList<>(4);
+    private final List<CharSequence> timestampNames = new ArrayList<>(DEFAULT_CAPACITY);
+    private final LongList timestampValues = new LongList(DEFAULT_CAPACITY);
+    private final List<CharSequence> longNames = new ArrayList<>(DEFAULT_CAPACITY);
+    private final LongList longValues = new LongList(DEFAULT_CAPACITY);
+    private final List<CharSequence> doubleNames = new ArrayList<>(DEFAULT_CAPACITY);
+    private final DoubleList doubleValues = new DoubleList(DEFAULT_CAPACITY);
+    private final List<CharSequence> boolNames = new ArrayList<>(DEFAULT_CAPACITY);
+    private final BoolList boolValues = new BoolList(DEFAULT_CAPACITY);
+    private final List<CharSequence> stringNames = new ArrayList<>(DEFAULT_CAPACITY);
+    private final List<CharSequence> stringValues = new ArrayList<>(DEFAULT_CAPACITY);
+    private final List<CharSequence> symbolColumnNames = new ArrayList<>(DEFAULT_CAPACITY);
+    private final List<CharSequence> symbolColumnValues = new ArrayList<>(DEFAULT_CAPACITY);
 
 
     private Set<CharSequence> symbolColumns = new HashSet<>();
