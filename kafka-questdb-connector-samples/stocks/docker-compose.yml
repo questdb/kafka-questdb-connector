@@ -27,17 +27,30 @@ services:
       KAFKA_ADVERTISED_PORT: "9092"
       HOSTNAME_COMMAND: "route -n | awk '/UG[ \t]/{print $$2}'"
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_CREATE_TOPICS: "People:1:1"
+      KAFKA_CREATE_TOPICS: "dbserver1.public.stock:1:1"
+  postgres:
+    image: debezium/postgres:14-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "postgres"
+      POSTGRES_DB: "postgres"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -d postgres -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
   producer:
-    image: kafka-questdb-connector-samples-faker-generator
+    image: kafka-questdb-connector-samples-stocks-generator
     build:
       dockerfile: ./Dockerfile
       context: .
     depends_on:
-      - kafka
+      postgres:
+        condition: service_healthy
     links:
-      - kafka:kafka
-      - questdb:questdb
+      - postgres:postgres
   connect:
     image: kafka-questdb-connector-samples-connect
     build:

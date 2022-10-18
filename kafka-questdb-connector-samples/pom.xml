@@ -11,4 +11,8 @@
 
     <artifactId>kafka-questdb-connector-samples</artifactId>
     <packaging>pom</packaging>
+
+    <modules>
+        <module>stocks</module>
+    </modules>
 </project>
