@@ -46,7 +46,17 @@ public final class QuestDBSinkTask extends SinkTask {
     }
 
     private Sender createSender() {
-        Sender rawSender = Sender.builder().address(config.getHost()).build();
+        Sender.LineSenderBuilder builder = Sender.builder().address(config.getHost());
+        if (config.isTls()) {
+            builder.enableTls();
+        }
+        if (config.getUsername() != null) {
+            if (config.getToken() == null) {
+                throw new ConnectException("Token is required when username is provided");
+            }
+            builder.enableAuth(config.getUsername()).authToken(config.getToken());
+        }
+        Sender rawSender = builder.build();
         String symbolColumns = config.getSymbolColumns();
         if (symbolColumns == null) {
             return rawSender;

@@ -32,6 +32,15 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String SYMBOL_COLUMNS_CONFIG = "symbols";
     private static final String SYMBOL_COLUMNS_DOC = "Comma separated list of columns that should be symbol type";
 
+    public static final String USERNAME = "username";
+    private static final String USERNAME_DOC = "Username for QuestDB ILP authentication";
+
+    public static final String TOKEN = "token";
+    private static final String TOKEN_DOC = "Token for QuestDB ILP authentication";
+
+    public static final String TLS = "tls";
+    public static final String TLS_DOC = "Use TLS for connecting to QuestDB";
+
     public QuestDBSinkConnectorConfig(ConfigDef config, Map<String, String> parsedConfig) {
         super(config, parsedConfig);
     }
@@ -49,7 +58,10 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(SKIP_UNSUPPORTED_TYPES_CONFIG, Type.BOOLEAN, false, Importance.MEDIUM, SKIP_UNSUPPORTED_TYPES_DOC)
                 .define(DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, Type.STRING, null, Importance.MEDIUM, DESIGNATED_TIMESTAMP_COLUMN_NAME_DOC)
                 .define(INCLUDE_KEY_CONFIG, Type.BOOLEAN, true, Importance.MEDIUM, INCLUDE_KEY_DOC)
-                .define(SYMBOL_COLUMNS_CONFIG, Type.STRING, null, Importance.MEDIUM, SYMBOL_COLUMNS_DOC);
+                .define(SYMBOL_COLUMNS_CONFIG, Type.STRING, null, Importance.MEDIUM, SYMBOL_COLUMNS_DOC)
+                .define(USERNAME, Type.STRING, null, Importance.MEDIUM, USERNAME_DOC)
+                .define(TOKEN, Type.STRING, null, Importance.MEDIUM, TOKEN_DOC)
+                .define(TLS, Type.BOOLEAN, false, Importance.MEDIUM, TLS_DOC);
     }
 
     public String getHost() {
@@ -82,5 +94,17 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public String getSymbolColumns() {
         return getString(SYMBOL_COLUMNS_CONFIG);
+    }
+
+    public String getUsername() {
+        return getString(USERNAME);
+    }
+
+    public String getToken() {
+        return getString(TOKEN);
+    }
+
+    public boolean isTls() {
+        return getBoolean(TLS);
     }
 }
