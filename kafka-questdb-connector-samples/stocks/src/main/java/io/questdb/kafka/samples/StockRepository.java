@@ -18,7 +18,7 @@ import java.util.List;
 public interface StockRepository extends CrudRepository<Stock, String> {
 
     @Modifying
-    @Query("UPDATE stock SET price = price + :delta, last_update = :timestamp WHERE symbol = :symbol")
+    @Query("UPDATE stock SET price = GREATEST(0, price + :delta), last_update = :timestamp WHERE symbol = :symbol")
     boolean updateBySymbol(@Param("symbol") String symbol, @Param("delta") double delta, @Param("timestamp") Timestamp timestamp);
 
     @Query("SELECT symbol FROM stock")
