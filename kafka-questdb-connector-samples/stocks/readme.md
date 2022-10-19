@@ -72,7 +72,7 @@ You can see the SQL executed in the [schema.sql](src/main/resources/schema.sql) 
 
 Once the application is started, it starts updating stock prices in regular intervals. The `price` and `last_update` columns are updated every time a new price is received for the stock symbol. It mimics a real-world scenario where you would have a Postgres table with the latest prices for each stock symbol. Such table would be typically used by a transactional system to get the latest prices for each stock symbol. It our case the transactional system is simulated by a [simple Java application](src/main/java/io/questdb/kafka/samples/StockService.java) which is randomly updating prices for each stock symbol in the Postgres table. The application generates 1000s of updates each second.
 
-The application is build and packaged as container image when executing `docker-compose build`. Inside the [docker-compose file](docker-compose.yml) you can see the container called `producer`. That's our Java application.
+The application is built and packaged as a container image when executing `docker-compose build`. Inside the [docker-compose file](docker-compose.yml) you can see the container called `producer`. That's our Java application.
 ```Dockerfile
   producer:
     image: kafka-questdb-connector-samples-stocks-generator
@@ -85,6 +85,19 @@ The application is build and packaged as container image when executing `docker-
     links:
       - postgres:postgres
 ```
+The Dockefile is rather trivial:
+```Dockerfile
+FROM maven:3.8-jdk-11-slim AS builder
+COPY ./pom.xml /opt/stocks/pom.xml
+COPY ./src ./opt/stocks/src
+WORKDIR /opt/stocks
+RUN mvn clean install -DskipTests
+
+FROM azul/zulu-openjdk:11-latest
+COPY --from=builder /opt/stocks/target/kafka-samples-stocks-*.jar /stocks.jar
+CMD ["java", "-jar", "/stocks.jar"]
+```
+It uses Maven to build the application and then copies the resulting JAR file to the container image. The container image is based on Zulu OpenJDK 11. The application is started with `java -jar /stocks.jar` command.
 
 ### Debezium Postgres connector
 Debezium is an open source project which provides connectors for various databases. It is used to capture changes from a database and feed them to a Kafka topic. In other words: Whenever there is a change in a database table, Debezium will read the change and feed it to a Kafka topic. This way it translates operations such as INSERT or UPDATE into events which can be consumed by other systems. Debezium supports a wide range of databases. In this sample we use the Postgres connector.
