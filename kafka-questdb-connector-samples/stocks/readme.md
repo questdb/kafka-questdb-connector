@@ -17,24 +17,25 @@ Bear in mind the sample starts multiple containers. It's running fine on my mach
 3. Run `docker-compose build` to build docker images with the sample project. This will take a few minutes.
 4. Run `docker-compose up` to start Postgres, Java stock price updater app, Apache Kafka, Kafka Connect with Debezium and QuestDB connectors, QuestDB and Grafana. This will take a few minutes.
 5. The previous command will generate a lot of log messages. Eventually logging should cease. This means all containers are running. 
-6. In a separate shell, execute following command to start Debezium connector:
+6. At this point we have all infrastructure running, the Java application keeps updating stock prices in Postgres. However, the rest of the pipeline is not yet running. We need to start the Kafka Connect connectors. Kafka Connect has a REST API, so we can use `curl` to start the connectors.
+7. In a separate shell, execute following command to start Debezium connector:
     ```shell
     curl -X POST -H "Content-Type: application/json" -d  '{"name":"debezium_source","config":{"tasks.max":1,"database.hostname":"postgres","database.port":5432,"database.user":"postgres","database.password":"postgres","connector.class":"io.debezium.connector.postgresql.PostgresConnector","database.dbname":"postgres","database.server.name":"dbserver1"}} ' localhost:8083/connectors
     ```
    It starts the Debezium connector that will capture changes from Postgres and feed them to Kafka.
-7. Execute following command to start QuestDB Kafka Connect sink:
+8. Execute following command to start QuestDB Kafka Connect sink:
     ```shell
     curl -X POST -H "Content-Type: application/json" -d '{"name":"questdb-connect","config":{"topics":"dbserver1.public.stock","table":"stock", "connector.class":"io.questdb.kafka.QuestDBSinkConnector","tasks.max":"1","key.converter":"org.apache.kafka.connect.storage.StringConverter","value.converter":"org.apache.kafka.connect.json.JsonConverter","host":"questdb", "transforms":"unwrap", "transforms.unwrap.type":"io.debezium.transforms.ExtractNewRecordState", "include.key": "false", "symbols": "symbol", "timestamp.field.name": "last_update"}}' localhost:8083/connectors
     ```
    It starts the QuestDB Kafka Connect sink that will read changes from Kafka and write them to QuestDB.
-8. Go to [QuestDB Web Console](http://localhost:19000/) and execute following query:
+9. Go to [QuestDB Web Console](http://localhost:19000/) and execute following query:
     ```sql
-    select * from stock
+    select * from stock;
     ```
-   It should return some rows. If it does not return any rows, wait a few seconds and try again.
-9. Go to [Grafana Dashboard](http://localhost:3000/d/stocks/stocks?orgId=1&refresh=5s&viewPanel=2). It should show some data. If it does not show any data, wait a few seconds, refresh try again.
-10. Play with the Grafana dashboard a bit. You can change the aggregation interval, change stock, zoom-in and zoom-out, etc.
-11. Go to [QuestDB Web Console](http://localhost:19000/) again and execute following query:
+   It should return some rows. If it does not return any rows or returns a _table not found_ error then wait a few seconds and try again.
+10. Go to [Grafana Dashboard](http://localhost:3000/d/stocks/stocks?orgId=1&refresh=5s&viewPanel=2). It should show some data. If it does not show any data, wait a few seconds, refresh try again.
+11. Play with the Grafana dashboard a bit. You can change the aggregation interval, change stock, zoom-in and zoom-out, etc.
+12. Go to [QuestDB Web Console](http://localhost:19000/) again and execute following query:
     ```sql
     SELECT
       timestamp,
@@ -47,7 +48,7 @@ Bear in mind the sample starts multiple containers. It's running fine on my mach
     SAMPLE by 1m align to calendar;
     ```
     It returns the average, minimum and maximum stock price for IBM in each minute. You can change the `1m` to `1s` to get data aggregated by second. The `SAMPLE by` shows a bit of QuestDB syntax sugar to make time-related queries more readable. 
-12. Don't forget to stop the containers when you're done. The project generates a lot of data and you could run out of disk space. 
+13. Don't forget to stop the containers when you're done. The project generates a lot of data and you could run out of disk space. 
 
 ## Project Internals
 The Postgres table has the following schema:

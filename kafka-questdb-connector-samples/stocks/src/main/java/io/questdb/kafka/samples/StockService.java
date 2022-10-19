@@ -27,7 +27,7 @@ public class StockService {
         this.allSymbols = stockRepository.findAllSymbols().toArray(new String[0]);
     }
 
-    @Scheduled(fixedRate = 1)
+    @Scheduled(fixedDelay = 1)
     public void tick() {
         refreshBias();
         Timestamp now = timestampNow();
