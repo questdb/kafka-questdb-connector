@@ -17,7 +17,7 @@ Bear in mind the sample starts multiple containers. It's running fine on my mach
 3. Run `docker-compose build` to build docker images with the sample project. This will take a few minutes.
 4. Run `docker-compose up` to start Postgres, Java stock price updater app, Apache Kafka, Kafka Connect with Debezium and QuestDB connectors, QuestDB and Grafana. This will take a few minutes.
 5. The previous command will generate a lot of log messages. Eventually logging should cease. This means all containers are running. 
-6. Execute following command to start Debezium connector:
+6. In a separate shell, execute following command to start Debezium connector:
     ```shell
     curl -X POST -H "Content-Type: application/json" -d  '{"name":"debezium_source","config":{"tasks.max":1,"database.hostname":"postgres","database.port":5432,"database.user":"postgres","database.password":"postgres","connector.class":"io.debezium.connector.postgresql.PostgresConnector","database.dbname":"postgres","database.server.name":"dbserver1"}} ' localhost:8083/connectors
     ```
@@ -33,7 +33,7 @@ Bear in mind the sample starts multiple containers. It's running fine on my mach
     ```
    It should return some rows. If it does not return any rows, wait a few seconds and try again.
 9. Go to [Grafana Dashboard](http://localhost:3000/d/stocks/stocks?orgId=1&refresh=5s&viewPanel=2). It should show some data. If it does not show any data, wait a few seconds, refresh try again.
-10. Play with the Grafana dashboard a bit. You can change the aggregation interval, zoom-in and zoom-out, etc.
+10. Play with the Grafana dashboard a bit. You can change the aggregation interval, change stock, zoom-in and zoom-out, etc.
 11. Go to [QuestDB Web Console](http://localhost:19000/) again and execute following query:
     ```sql
     SELECT
@@ -46,7 +46,7 @@ Bear in mind the sample starts multiple containers. It's running fine on my mach
       where symbol = 'IBM'
     SAMPLE by 1m align to calendar;
     ```
-    It returns the average, minimum and maximum stock price for IBM for each minute. You can change the `1m` to `1s` to get data aggregated by second. The `SAMPLE by` shows a bit of QuestDB syntax sugar to make time-related queries more readable. 
+    It returns the average, minimum and maximum stock price for IBM in each minute. You can change the `1m` to `1s` to get data aggregated by second. The `SAMPLE by` shows a bit of QuestDB syntax sugar to make time-related queries more readable. 
 12. Don't forget to stop the containers when you're done. The project generates a lot of data and you could run out of disk space. 
 
 ## Project Internals
@@ -116,6 +116,24 @@ You can see the `payload` field contains the actual change. Let's zoom it a bit 
 ```
 This is the actual change in a table. It's a JSON object which contains the new values for the columns in the Postgres table. Notice has the structure maps to the Postgres table schema described above. 
 
+We cannot feed a full change object to Kafka Connect QuestDB Sink, because the sink would create a column for each field in the change object, including all metadata, like the source part of the JSON:
+```json
+"source": {
+  "version": "1.9.6.Final",
+  "connector": "postgresql",
+  "name": "dbserver1",
+  "ts_ms": 1666172978272,
+  "snapshot": "false",
+  "db": "postgres",
+  "sequence": "[\"87397208\",\"87397208\"]",
+  "schema": "public",
+  "table": "stock",
+  "txId": 402087,
+  "lsn": 87397208,
+  "xmin": null
+},
+```
+We do not want to create columns in QuestDB for all this metadata. We only want to create columns for the actual data. Debezium comes to the rescue! It ships with a Kafka Connect transform which can extract the actual data from the change object and feed it to the Kafka Connect sink. The transform is called `ExtractNewRecordState`. 
 
 Postgres -> Kafka:
 ```shell
