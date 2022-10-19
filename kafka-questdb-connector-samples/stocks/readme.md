@@ -108,7 +108,7 @@ What's important: When this container start it just connects to Kafka broker, bu
 ```shell
 curl -X POST -H "Content-Type: application/json" -d  '{"name":"debezium_source","config":{"tasks.max":1,"database.hostname":"postgres","database.port":5432,"database.user":"postgres","database.password":"postgres","connector.class":"io.debezium.connector.postgresql.PostgresConnector","database.dbname":"postgres","database.server.name":"dbserver1"}} ' localhost:8083/connectors
 ```
-It uses Kafka Connect REST interface to start a new connector with a give configuration. Let's have a closer look at the configuration. This is how it looks like when formatted for readability:
+It uses Kafka Connect REST interface to start a new connector with a given configuration. Let's have a closer look at the configuration. This is how it looks like when formatted for readability:
 ```json
 {
   "name": "debezium_source",
