@@ -66,7 +66,7 @@ If you liked what you see and want to learn more about the internals of the proj
 ### Postgres
 The docker-compose start Postgres image. It's using a container image provided by the Debezium project as they maintain a Postgres which is preconfigured for Debezium. 
 
-## Java stock price updater
+### Java stock price updater
 It's a Spring Boot application which during startup creates a table in Postgres and populates it with initial data.  
 You can see the SQL executed in the [schema.sql](src/main/resources/schema.sql) file. The table has always one row per each stock symbol.
 
@@ -86,7 +86,7 @@ The application is build and packaged as container image when executing `docker-
       - postgres:postgres
 ```
 
-## Debezium Postgres connector
+### Debezium Postgres connector
 Debezium is an open source project which provides connectors for various databases. It is used to capture changes from a database and feed them to a Kafka topic. In other words: Whenever there is a change in a database table, Debezium will read the change and feed it to a Kafka topic. This way it translates operations such as INSERT or UPDATE into events which can be consumed by other systems. Debezium supports a wide range of databases. In this sample we use the Postgres connector.
 
 The Debezium Postgres connector is implemented as a Kafka Connect source connector. Inside the [docker-compose file](docker-compose.yml) it's called `connect` and its container image is also built during `docker-compose build`. The [Dockerfile](../../Dockerfile-Samples) uses Debezium image. The Debezium image contains Kafka Connect runtime and Debezium connectors. Our Dockerfile amends it with Kafka Connect QuestDB Sink. 
@@ -113,7 +113,7 @@ It uses Kafka Connect REST interface to start a new connector with a give config
 ```
 Most of the fields are self-explanatory. The only non-obvious one is `database.server.name`. It's a unique name of the database server. It's used by Kafka Connect to store offsets. It's important that it's unique for each database server. If you have multiple Postgres databases, you need to use different `database.server.name` for each of them. It's used by Debezium to generate Kafka topic names. The topic name is generated as `database.server.name`.`schema`.`table`. In our case it's `dbserver1.public.stock`.
 
-## Kafka QuestDB connector
+### Kafka QuestDB connector
 The Kafka QuestDB connector re-uses the same Kafka Connect runtime as the Debezium connector. It's also started using `curl` command. This is how we started the QuestDB connector:
 ```shell
 curl -X POST -H "Content-Type: application/json" -d '{"name":"questdb-connect","config":{"topics":"dbserver1.public.stock","table":"stock", "connector.class":"io.questdb.kafka.QuestDBSinkConnector","tasks.max":"1","key.converter":"org.apache.kafka.connect.storage.StringConverter","value.converter":"org.apache.kafka.connect.json.JsonConverter","host":"questdb", "transforms":"unwrap", "transforms.unwrap.type":"io.debezium.transforms.ExtractNewRecordState", "include.key": "false", "symbols": "symbol", "timestamp.field.name": "last_update"}}' localhost:8083/connectors
@@ -210,10 +210,10 @@ We cannot feed a full change object to Kafka Connect QuestDB Sink, because the s
 
 We do not want to create columns in QuestDB for all this metadata. We only want to create columns for the actual data. This is where the `ExtractNewRecordState` transform comes to the rescue! It extracts only the actual new data from the overall change object and feeds only this small part to the QuestDB sink. The end-result is that each INSERT and UPDATE in Postgres will insert a new row in QuestDB.
 
-## QuestDB
+### QuestDB
 QuestDB is a fast, open-source time-series database. It uses SQL for querying and it adds a bit of syntax sugar on top of SQL to make it easier to work with time-series data. It implements the Postgres wire protocol so many tools can be used to connect to it. 
 
-## Grafana
+### Grafana
 Grafana is a popular open-source tool for visualizing time-series data. It can be used to visualize data from QuestDB. There is no native QuestDB datasource for Grafana, but there is a Postgres datasource. We can use this datasource to connect to QuestDB. Grafana is provisioned with a dashboard that visualizes the data from QuestDB in a candlestick chart. The char is configured to execute this query:
 ```sql
 SELECT
@@ -248,4 +248,5 @@ SAMPLE BY 5s ALIGN TO CALENDAR;
 ```
 And this is then used by the candlestick chart to visualize the data.
 
-[Grafana Dashboard](http://localhost:3000/d/stocks/stocks?orgId=1&refresh=5s&viewPanel=2)
+### Summary of internals
+At this point you should have a good understanding of the architecture. If the explanation above is unclear then please [open a new issue](https://github.com/questdb/kafka-questdb-connector/issues/new).
