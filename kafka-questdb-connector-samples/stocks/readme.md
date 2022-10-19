@@ -55,7 +55,7 @@ Bear in mind the sample starts multiple containers. It's running fine on my mach
 13. Don't forget to stop the containers when you're done. The project generates a lot of data and you could run out of disk space. 
 
 ## Project Internals
-If you liked what you see and want to learn more about the internals of the project, read on. It's time do demistify the black box. We will discuss these components:
+If you like what you see and want to learn more about the internals of the project, read on. It's time do demystify the black box. We will discuss these components:
 1. Postgres and its schema
 2. Java stock price updater
 3. Debezium Postgres connector
