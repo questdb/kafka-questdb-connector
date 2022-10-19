@@ -30,13 +30,20 @@ public class StocksAppTest {
     @Autowired
     private StockService stockService;
 
+    @Autowired
+    private StockRepository stockRepository;
+
     @Container
-    public static PostgreSQLContainer postgreSQLContainer = new PostgreSQLContainer<>("postgres:10.4")
+    public static PostgreSQLContainer<?> postgreSQLContainer = new PostgreSQLContainer<>("postgres:10.4")
                     .withDatabaseName("sampledb")
                     .withStartupTimeout(Duration.ofSeconds(600));
 
     @Test
     public void foo() throws Exception {
         stockService.tick();
+        for (;;) {
+            Thread.sleep(1000);
+            stockRepository.findAll().forEach(System.out::println);
+        }
     }
 }

@@ -5,14 +5,22 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
+import java.sql.Timestamp;
+import java.time.Instant;
 import java.util.Random;
 
 @Service
 public class StockService {
-    @Autowired
-    private StockRepository stockRepository;
+    private final StockRepository stockRepository;
     private String[] allSymbols;
     private final Random random = new Random();
+    private int biasMaxValue = 0;
+    private boolean biasPositive = true;
+    private long biasChangeTime = 0;
+
+    public StockService(StockRepository stockRepository) {
+        this.stockRepository = stockRepository;
+    }
 
     @PostConstruct
     public void init() {
@@ -21,10 +29,28 @@ public class StockService {
 
     @Scheduled(fixedRate = 1)
     public void tick() {
+        refreshBias();
+        Timestamp now = timestampNow();
         for (String symbol : allSymbols) {
-            double factor = 1 + (random.nextGaussian() / 100);
-            stockRepository.updateBySymbol(symbol, factor);
-//            stockRepository.updateBySymbol(symbol, 1.0 + Math.random() * 0.1);
+            double delta = random.nextGaussian() * 20;
+            double biasNow = biasPositive ? random.nextDouble() * biasMaxValue : -random.nextDouble() * biasMaxValue;
+            stockRepository.updateBySymbol(symbol, delta + biasNow, now);
         }
+    }
+
+    private void refreshBias() {
+        long nowMillis = System.currentTimeMillis();
+        if (nowMillis > biasChangeTime) {
+            biasChangeTime = nowMillis + 1000;
+            biasPositive = random.nextBoolean();
+            biasMaxValue = random.nextInt(10);
+        }
+    }
+
+    private static Timestamp timestampNow() {
+        Instant instant = Instant.now();
+        Timestamp now = new Timestamp(instant.toEpochMilli());
+        now.setNanos(instant.getNano());
+        return now;
     }
 }

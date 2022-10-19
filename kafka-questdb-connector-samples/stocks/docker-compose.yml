@@ -10,10 +10,31 @@ services:
       - QDB_CAIRO_COMMIT_LAG=1000
       - JAVA_OPTS=-Djava.locale.providers=JRE,SPI
       - QDB_LINE_DEFAULT_PARTITION_BY=YEAR
+      - QDB_PG_SELECT_CACHE_ENABLED=false
   zookeeper:
     image: zookeeper:3.6.2
     ports:
       - "2181:2181"
+  grafana:
+    image: grafana/grafana-oss:9.2.1
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning/
+      - ./grafana/dashboards/:/var/lib/grafana/dashboards/
+    depends_on:
+      - questdb
+    links:
+      - questdb:questdb
+    environment:
+        - GF_SECURITY_ADMIN_PASSWORD=quest
+        - GF_SECURITY_ADMIN_USER=admin
+        - GF_USERS_ALLOW_SIGN_UP=false
+        - GF_USERS_ALLOW_ORG_CREATE=false
+        - GF_AUTH_ANONYMOUS_ENABLED=true
+        - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+        - GF_AUTH_ANONYMOUS_ORG_NAME=Main Org.
+        - GF_AUTH_ANONYMOUS_ORG_ID=1
   kafka:
     image: wurstmeister/kafka:2.13-2.8.1
     ports:
