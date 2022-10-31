@@ -1,7 +1,10 @@
 name: Create a release from a tag
 
-# todo: change to trigger on tag
 on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "v*.*"
   workflow_dispatch:
 
 jobs:
@@ -18,13 +21,10 @@ jobs:
       - name: Build with Maven
         #we are skipping tests as tests are executed when creating a tag
         run: mvn -B package --file pom.xml -DskipTests
-      - name: Create Release
-        run: echo ${{ github.sha }} > Release.txt
-      - name: Test
-        run: cat Release.txt
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
             Release.txt
             connector/target/kafka-questdb-connector-*-bin.zip
+          draft: true
