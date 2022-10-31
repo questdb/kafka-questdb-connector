@@ -1,7 +1,7 @@
 version: '2.1'
 services:
   questdb:
-    image: questdb/questdb:6.5.3
+    image: questdb/questdb:6.5.4
     expose:
       - "9009"
     ports:
@@ -65,8 +65,7 @@ services:
   producer:
     image: kafka-questdb-connector-samples-stocks-generator
     build:
-      dockerfile: ./Dockerfile
-      context: .
+      dockerfile: Dockerfile-App
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,8 +74,7 @@ services:
   connect:
     image: kafka-questdb-connector-samples-connect
     build:
-      dockerfile: ./Dockerfile-Samples
-      context: ./../../
+      dockerfile: ./Dockerfile-Connect
     ports:
       - "8083:8083"
     depends_on:
