@@ -1,0 +1,30 @@
+name: Java CI with Maven
+
+# todo: change to trigger on tag
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+          cache: maven
+      - name: Build with Maven
+        #we are skipping tests as tests are executed when creating a tag
+        run: mvn -B package --file pom.xml -DskipTests
+      - name: Create Release
+        run: echo ${{ github.sha }} > Release.txt
+      - name: Test
+        run: cat Release.txt
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            Release.txt
+            connector/target/kafka-questdb-connector-*-bin.zip
