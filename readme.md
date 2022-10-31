@@ -8,8 +8,8 @@ The connector implements Apache Kafka [Sink Connector API](https://kafka.apache.
 
 ## Usage with Kafka Connect
 This guide assumes you are already familiar with Apache Kafka and Kafka Connect. If you are not then watch this [excellent video](https://www.youtube.com/watch?v=Jkcp28ki82k) or check our [sample projects](kafka-questdb-connector-samples).
-1. Unpack connector ZIP into Kafka Connect `./plugin/` directory.
-2. Start Kafka Connect
+1. [Download](https://github.com/questdb/kafka-questdb-connector/releases/latest) and unpack connector ZIP into Apache Kafka `./libs/` directory.
+2. Start Kafka Connect in the distributed mode.
 3. Create a connector configuration:
     ```json
     {
@@ -21,10 +21,7 @@ This guide assumes you are already familiar with Apache Kafka and Kafka Connect.
         "table": "orders_table",
         "key.converter": "org.apache.kafka.connect.storage.StringConverter",
         "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-        "transforms": "unwrap",
-        "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
-        "include.key": "false",
-        "timestamp.field.name": "created_at"
+        "include.key": "false"
       }
     }
     ```

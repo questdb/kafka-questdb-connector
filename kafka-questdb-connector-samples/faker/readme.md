@@ -20,7 +20,7 @@ The project was tested on MacOS with M1, but it should work on other platforms t
     $ curl -X POST -H "Content-Type: application/json" -d '{"name":"questdb-connect","config":{"topics":"People","connector.class":"io.questdb.kafka.QuestDBSinkConnector","tasks.max":"1","key.converter":"org.apache.kafka.connect.storage.StringConverter","value.converter":"org.apache.kafka.connect.json.JsonConverter","value.converter.schemas.enable":"false","host":"questdb", "timestamp.field.name": "birthday", "transforms":"convert_birthday","transforms.convert_birthday.type":"org.apache.kafka.connect.transforms.TimestampConverter$Value","transforms.convert_birthday.target.type":"Timestamp","transforms.convert_birthday.field":"birthday","transforms.convert_birthday.format": "yyyy-MM-dd'"'"'T'"'"'HH:mm:ss.SSSX"}}' localhost:8083/connectors
     ```
 7. The command above will create a new Kafka connector that will read data from the `People` topic and write it to a QuestDB table called `People`. The connector will also convert the `birthday` field to a timestamp.
-8. Go to the [QuestDB console](http://localhost:19000) and run `select * from 'People';` and you should see some rows.
+8. Go to the QuestDB console running at http://localhost:19000 and run `select * from 'People';` and you should see some rows.
 9. Congratulations! You have successfully created a Kafka connector that reads data from a Kafka topic and writes it to a QuestDB table!
 
 ## How does it work?

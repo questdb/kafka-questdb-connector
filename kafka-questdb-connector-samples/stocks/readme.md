@@ -32,12 +32,12 @@ Bear in mind the sample starts multiple containers. It's running fine on my mach
     curl -X POST -H "Content-Type: application/json" -d '{"name":"questdb-connect","config":{"topics":"dbserver1.public.stock","table":"stock", "connector.class":"io.questdb.kafka.QuestDBSinkConnector","tasks.max":"1","key.converter":"org.apache.kafka.connect.storage.StringConverter","value.converter":"org.apache.kafka.connect.json.JsonConverter","host":"questdb", "transforms":"unwrap", "transforms.unwrap.type":"io.debezium.transforms.ExtractNewRecordState", "include.key": "false", "symbols": "symbol", "timestamp.field.name": "last_update"}}' localhost:8083/connectors
     ```
    It starts the QuestDB Kafka Connect sink that will read changes from Kafka and write them to QuestDB.
-9. Go to [QuestDB Web Console](http://localhost:19000/) and execute following query:
+9. Go to QuestDB Web Console running at http://localhost:19000/ and execute following query:
     ```sql
     select * from stock;
     ```
    It should return some rows. If it does not return any rows or returns a _table not found_ error then wait a few seconds and try again.
-10. Go to [Grafana Dashboard](http://localhost:3000/d/stocks/stocks?orgId=1&refresh=5s&viewPanel=2). It should show some data. If it does not show any data, wait a few seconds, refresh try again.
+10. Go to  Grafana Dashboard running at http://localhost:3000/d/stocks/stocks?orgId=1&refresh=5s&viewPanel=2. It should show some data. If it does not show any data, wait a few seconds, refresh try again.
 11. Play with the Grafana dashboard a bit. You can change the aggregation interval, change stock, zoom-in and zoom-out, etc.
 12. Go to [QuestDB Web Console](http://localhost:19000/) again and execute following query:
     ```sql
