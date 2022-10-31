@@ -49,7 +49,7 @@ The connector supports following Options:
 | timestamp.field.name   | STRING  | pickup_time                                                 | N/A                | Designated timestamp field name                            |
 | include.key            | BOOLEAN | false                                                       | true               | Include message key in target table                        |
 | symbols                | STRING  | instrument,stock                                            | N/A                | Comma separated list of columns that should be symbol type |
-| user                   | STRING  | user1                                                       | admin              | User name for QuestDB. Used only when token is non-empty   |
+| username               | STRING  | user1                                                       | admin              | User name for QuestDB. Used only when token is non-empty   |
 | token                  | STRING  | <sub>QgHCOyq35D5HocCMrUGJinEsjEscJlCp7FZQETH21Bw</sub>      | N/A                | Token for QuestDB authentication                           |
 | tls                    | BOOLEAN | true                                                        | false              | Use TLS for QuestDB connection                             |
 
