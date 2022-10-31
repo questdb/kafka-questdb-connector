@@ -1,4 +1,4 @@
-name: Java CI with Maven
+name: Create a release from a tag
 
 # todo: change to trigger on tag
 on:
