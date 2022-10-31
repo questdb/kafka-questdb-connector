@@ -59,7 +59,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, Type.STRING, null, Importance.MEDIUM, DESIGNATED_TIMESTAMP_COLUMN_NAME_DOC)
                 .define(INCLUDE_KEY_CONFIG, Type.BOOLEAN, true, Importance.MEDIUM, INCLUDE_KEY_DOC)
                 .define(SYMBOL_COLUMNS_CONFIG, Type.STRING, null, Importance.MEDIUM, SYMBOL_COLUMNS_DOC)
-                .define(USERNAME, Type.STRING, null, Importance.MEDIUM, USERNAME_DOC)
+                .define(USERNAME, Type.STRING, "admin", Importance.MEDIUM, USERNAME_DOC)
                 .define(TOKEN, Type.STRING, null, Importance.MEDIUM, TOKEN_DOC)
                 .define(TLS, Type.BOOLEAN, false, Importance.MEDIUM, TLS_DOC);
     }

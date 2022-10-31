@@ -50,11 +50,12 @@ public final class QuestDBSinkTask extends SinkTask {
         if (config.isTls()) {
             builder.enableTls();
         }
-        if (config.getUsername() != null) {
-            if (config.getToken() == null) {
-                throw new ConnectException("Token is required when username is provided");
+        if (config.getToken() != null) {
+            String username = config.getUsername();
+            if (username == null || username.equals("")) {
+                throw new ConnectException("Username cannot be empty when using ILP authentication");
             }
-            builder.enableAuth(config.getUsername()).authToken(config.getToken());
+            builder.enableAuth(username).authToken(config.getToken());
         }
         Sender rawSender = builder.build();
         String symbolColumns = config.getSymbolColumns();
