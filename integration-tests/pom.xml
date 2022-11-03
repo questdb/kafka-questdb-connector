@@ -12,6 +12,7 @@
         <module>cp-server</module>
         <module>debezium</module>
         <module>commons</module>
+        <module>avro-schema-registry</module>
     </modules>
 
     <packaging>pom</packaging>

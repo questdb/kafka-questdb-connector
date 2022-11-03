@@ -1,0 +1,31 @@
+{
+  "namespace": "io.questdb.kafka.domain",
+  "type": "record",
+  "name": "Student",
+  "version": 1,
+  "fields": [
+    {
+      "name": "firstname",
+      "type": "string"
+    },
+    {
+      "name": "lastname",
+      "type": "string"
+    },
+    {
+      "name": "birthday",
+      "type": [
+        "null",
+        {
+          "type": "long",
+          "logicalType": "timestamp-millis"
+        }
+      ]
+    },
+    {
+      "name": "active",
+      "type": ["null", "boolean"],
+      "default": null
+    }
+  ]
+}
