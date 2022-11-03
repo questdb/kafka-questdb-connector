@@ -53,17 +53,20 @@ public class DebeziumIT {
     @RegisterExtension
     public static JarResolverExtension questdbJarResolver = JarResolverExtension.forClass(Sender.class);
 
-    private static Network network = Network.newNetwork();
+    private static final Network network = Network.newNetwork();
 
-    private static KafkaContainer kafkaContainer = new KafkaContainer()
+    @Container
+    private final KafkaContainer kafkaContainer = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.2.2"))
             .withNetwork(network);
 
-    public static PostgreSQLContainer<?> postgresContainer =
-            new PostgreSQLContainer<>(DockerImageName.parse("debezium/postgres:11").asCompatibleSubstituteFor("postgres"))
+    @Container
+    public PostgreSQLContainer<?> postgresContainer =
+            new PostgreSQLContainer<>(DockerImageName.parse("debezium/postgres:11-alpine").asCompatibleSubstituteFor("postgres"))
                     .withNetwork(network)
                     .withNetworkAliases("postgres");
 
-    public static DebeziumContainer debeziumContainer =
+    @Container
+    public DebeziumContainer debeziumContainer =
             new DebeziumContainer("debezium/connect:1.9.6.Final")
                     .withNetwork(network)
                     .withKafka(kafkaContainer)
@@ -75,30 +78,15 @@ public class DebeziumIT {
                     .withEnv("CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE", "true");
 
     @Container
-    private static final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:6.5.3")
+    private final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:6.5.3")
             .withNetwork(network)
             .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT)
             .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
             .withEnv("QDB_CAIRO_COMMIT_LAG", "100")
             .withEnv("JAVA_OPTS", "-Djava.locale.providers=JRE,SPI");
 
-    @BeforeAll
-    public static void startContainers() {
-        Startables.deepStart(Stream.of(
-                        kafkaContainer, postgresContainer, debeziumContainer))
-                .join();
-    }
 
-    @AfterEach
-    public void cleanup() throws SQLException {
-        debeziumContainer.deleteAllConnectors();
-        try (Connection connection = getConnection(postgresContainer);
-            Statement statement = connection.createStatement()) {
-            statement.execute("drop schema " + PG_SCHEMA_NAME + " CASCADE");
-        }
-    }
-
-    private static ConnectorConfiguration newQuestSinkBaseConfig(String questTableName) {
+    private ConnectorConfiguration newQuestSinkBaseConfig(String questTableName) {
         ConnectorConfiguration questSink = ConnectorConfiguration.create()
                 .with("connector.class", QuestDBSinkConnector.class.getName())
                 .with("host", questDBContainer.getNetworkAliases().get(0))
@@ -418,7 +406,7 @@ public class DebeziumIT {
         }
     }
 
-    private static void startDebeziumConnector() {
+    private void startDebeziumConnector() {
         ConnectorConfiguration connector = ConnectorConfiguration
                 .forJdbcContainer(postgresContainer)
                 .with("database.server.name", PG_SERVER_NAME);
