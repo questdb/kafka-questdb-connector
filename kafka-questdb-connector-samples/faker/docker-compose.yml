@@ -38,7 +38,7 @@ services:
       - kafka:kafka
       - questdb:questdb
   connect:
-    image: kafka-questdb-connector-samples-connect
+    image: kafka-questdb-connector-samples-debezium
     build:
       dockerfile: ./Dockerfile-Connect
     ports:
