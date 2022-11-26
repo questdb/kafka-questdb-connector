@@ -27,7 +27,6 @@ import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
-import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.Calendar;
 import java.util.HashMap;
@@ -35,6 +34,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TimeZone;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static java.util.Collections.singletonMap;
@@ -221,6 +221,93 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @Test
+    public void testTimestampUnitResolution_auto() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+
+        java.util.Date birth = new Calendar.Builder()
+                .setTimeZone(TimeZone.getTimeZone("UTC"))
+                .setDate(2022, 9, 23) // note: month is 0-based
+                .setTimeOfDay(13, 53, 59, 123)
+                .build().getTime();
+
+        long birthInMillis = birth.getTime();
+        long birthInMicros = birthInMillis * 1000;
+        long birthInNanos = birthInMicros * 1000;
+
+
+        connect.kafka().produce(topicName, "foo", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"birth\":" + birthInMillis + "}");
+        connect.kafka().produce(topicName, "bar", "{\"firstname\":\"Jane\",\"lastname\":\"Doe\",\"birth\":" + birthInMicros + "}");
+        connect.kafka().produce(topicName, "baz", "{\"firstname\":\"Jack\",\"lastname\":\"Doe\",\"birth\":" + birthInNanos + "}");
+
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"timestamp\"\r\n"
+                        + "\"John\",\"Doe\",\"2022-10-23T13:53:59.123000Z\"\r\n"
+                        + "\"Jane\",\"Doe\",\"2022-10-23T13:53:59.123000Z\"\r\n"
+                        + "\"Jack\",\"Doe\",\"2022-10-23T13:53:59.123000Z\"\r\n",
+                "select firstname,lastname,timestamp from " + topicName);
+    }
+
+    @Test
+    public void testTimestampUnitResolution_millis() {
+        testTimestampUnitResolution0("millis");
+    }
+
+    @Test
+    public void testTimestampUnitResolution_micros() {
+        testTimestampUnitResolution0("micros");
+    }
+
+    @Test
+    public void testTimestampUnitResolution_nanos() {
+        testTimestampUnitResolution0("nanos");
+    }
+
+    private void testTimestampUnitResolution0(String mode) {
+        TimeUnit unit;
+        switch (mode) {
+            case "nanos":
+                unit = TimeUnit.NANOSECONDS;
+                break;
+            case "micros":
+                unit = TimeUnit.MICROSECONDS;
+                break;
+            case "millis":
+                unit = TimeUnit.MILLISECONDS;
+                break;
+            default:
+                throw new IllegalArgumentException("Unknown mode: " + mode);
+        }
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
+        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_UNITS_CONFIG, mode);
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+
+        long birthMillis = new Calendar.Builder()
+                .setTimeZone(TimeZone.getTimeZone("UTC"))
+                .setDate(2206, 10, 20) // note: month is 0-based
+                .setTimeOfDay(17, 46, 39, 999)
+                .build().getTime().getTime();
+
+        long birthTarget = unit.convert(birthMillis, MILLISECONDS);
+
+        connect.kafka().produce(topicName, "foo", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"birth\":0}");
+        connect.kafka().produce(topicName, "bar", "{\"firstname\":\"Jane\",\"lastname\":\"Doe\",\"birth\":" + birthTarget + "}");
+
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"timestamp\"\r\n"
+                        + "\"John\",\"Doe\",\"1970-01-01T00:00:00.000000Z\"\r\n"
+                        + "\"Jane\",\"Doe\",\"2206-11-20T17:46:39.999000Z\"\r\n",
+                "select firstname,lastname,timestamp from " + topicName);
+    }
+
+
+                                              @Test
     public void testUpfrontTable() {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);

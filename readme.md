@@ -44,6 +44,7 @@ The connector supports following Options:
 | value.prefix           | STRING  | from_value                                                  | N/A                | Prefix for value fields                                    |
 | skip.unsupported.types | BOOLEAN | false                                                       | false              | Skip unsupported types                                     |
 | timestamp.field.name   | STRING  | pickup_time                                                 | N/A                | Designated timestamp field name                            |
+| timestamp.units        | STRING  | micros                                                      | auto               | Designated timestamp field units                           |
 | include.key            | BOOLEAN | false                                                       | true               | Include message key in target table                        |
 | symbols                | STRING  | instrument,stock                                            | N/A                | Comma separated list of columns that should be symbol type |
 | username               | STRING  | user1                                                       | admin              | User name for QuestDB. Used only when token is non-empty   |
@@ -76,7 +77,7 @@ The connector will create a table with the following columns:
 | John                        | Doe                        | 30                  | Main Street                      | New York                       |
 
 ## Designated Timestamps
-The connector supports designated timestamps. If the message contains a field with a timestamp, the connector can use it as a timestamp for the row. The field name must be configured using `timestamp.field.name` option. The field must either a simple number or a timestamp. When it's a simple number, the connector will interpret it as a Unix timestamp in milliseconds.
+The connector supports designated timestamps. If a message contains a field with a timestamp, the connector can use it as a timestamp for the row. The field name must be configured using `timestamp.field.name` option. The field must either a plain integer or being labelled as a timestamp in a message schema. When it's a plain integer, the connector will autodetect its units. This works for timestamps after 4/26/1970, 5:46:40 PM. The units can be also configured explicitly using `timestamp.units` option. Supported configuration values are `nanos`, `micros`, `millis` and `auto`. 
 
 ## QuestDB Symbol Type
 QuestDB supports a special type called [Symbol](https://questdb.io/docs/concept/symbol/). This connector never creates a column with a type `SYMBOL`. Instead, it creates a column with a type `STRING`. If you want to use `SYMBOL` type, you can pre-create a table in QuestDB and use it as a target table.

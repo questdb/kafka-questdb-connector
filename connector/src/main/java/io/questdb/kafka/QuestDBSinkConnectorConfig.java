@@ -4,8 +4,10 @@ import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigDef.Importance;
 import org.apache.kafka.common.config.ConfigDef.Type;
+import org.apache.kafka.connect.errors.ConnectException;
 
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String HOST_CONFIG = "host";
@@ -25,6 +27,9 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public static final String DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG = "timestamp.field.name";
     private static final String DESIGNATED_TIMESTAMP_COLUMN_NAME_DOC = "Designated timestamp field name";
+
+    public static final String TIMESTAMP_UNITS_CONFIG = "timestamp.units";
+    private static final String TIMESTAMP_UNITS_DOC = "Units of timestamp field. Possible values: auto, millis, micros, nanos";
 
     public static final String INCLUDE_KEY_CONFIG = "include.key";
     private static final String INCLUDE_KEY_DOC = "Include key in the table";
@@ -61,7 +66,8 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(SYMBOL_COLUMNS_CONFIG, Type.STRING, null, Importance.MEDIUM, SYMBOL_COLUMNS_DOC)
                 .define(USERNAME, Type.STRING, "admin", Importance.MEDIUM, USERNAME_DOC)
                 .define(TOKEN, Type.PASSWORD, null, Importance.MEDIUM, TOKEN_DOC)
-                .define(TLS, Type.BOOLEAN, false, Importance.MEDIUM, TLS_DOC);
+                .define(TLS, Type.BOOLEAN, false, Importance.MEDIUM, TLS_DOC)
+                .define(TIMESTAMP_UNITS_CONFIG, Type.STRING, "auto", ConfigDef.ValidString.in("auto", "millis", "micros", "nanos"), Importance.LOW, TIMESTAMP_UNITS_DOC);
     }
 
     public String getHost() {
@@ -106,5 +112,21 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public boolean isTls() {
         return getBoolean(TLS);
+    }
+
+    public TimeUnit getTimestampUnitsOrNull() {
+        String configured = getString(TIMESTAMP_UNITS_CONFIG);
+        switch (configured) {
+            case "millis":
+                return TimeUnit.MILLISECONDS;
+            case "micros":
+                return TimeUnit.MICROSECONDS;
+            case "nanos":
+                return TimeUnit.NANOSECONDS;
+            case "auto":
+                return null;
+            default:
+                throw new ConnectException("Unknown timestamp units mode: " + configured + ". Possible values: auto, millis, micros, nanos");
+        }
     }
 }

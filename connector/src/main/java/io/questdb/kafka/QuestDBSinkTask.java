@@ -32,6 +32,7 @@ public final class QuestDBSinkTask extends SinkTask {
     private QuestDBSinkConnectorConfig config;
     private String timestampColumnName;
     private long timestampColumnValue = Long.MIN_VALUE;
+    private TimeUnit timestampUnits;
 
     @Override
     public String version() {
@@ -43,6 +44,7 @@ public final class QuestDBSinkTask extends SinkTask {
         this.config = new QuestDBSinkConnectorConfig(map);
         this.sender = createSender();
         this.timestampColumnName = config.getDesignatedTimestampColumnName();
+        this.timestampUnits = config.getTimestampUnitsOrNull();
     }
 
     private Sender createSender() {
@@ -153,7 +155,7 @@ public final class QuestDBSinkTask extends SinkTask {
         writePhysicalTypeWithoutSchema(name, value, fallbackName);
     }
 
-    private static long resolveDesignatedTimestampColumnValue(Object value, Schema schema) {
+    private long resolveDesignatedTimestampColumnValue(Object value, Schema schema) {
         if (value instanceof java.util.Date) {
             return TimeUnit.MILLISECONDS.toNanos(((java.util.Date) value).getTime());
         }
@@ -162,15 +164,11 @@ public final class QuestDBSinkTask extends SinkTask {
         }
         long longValue = (Long) value;
         TimeUnit inputUnit;
-        if (schema == null || schema.name() == null) {
-            // no schema, assuming millis since epoch
-            inputUnit = TimeUnit.MILLISECONDS;
-        } else if ("io.debezium.time.MicroTimestamp".equals(schema.name())) {
+        if (schema == null || !"io.debezium.time.MicroTimestamp".equals(schema.name())) {
+            inputUnit = TimestampHelper.getTimestampUnits(timestampUnits, longValue);
+        } else {
             // special case: Debezium micros since epoch
             inputUnit = TimeUnit.MICROSECONDS;
-        } else {
-            // no idea what's that, let's assume it's again millis since epoch and hope for the best
-            inputUnit = TimeUnit.MILLISECONDS;
         }
         return inputUnit.toNanos(longValue);
     }
