@@ -1,4 +1,4 @@
-version: "2.1"
+version: '2.1'
 services:
   questdb:
     image: questdb/questdb:6.6.1
