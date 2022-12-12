@@ -453,6 +453,24 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @Test
+    public void testJsonNoSchema_mixedFlotingAndIntTypes() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.DOUBLE_COLUMNS_CONFIG, "age");
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+        connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
+        connect.kafka().produce(topicName, "key", "{\"firstname\":\"Jane\",\"lastname\":\"Doe\",\"age\":42.5}");
+
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+                        + "\"John\",\"Doe\",42.0\r\n"
+                        + "\"Jane\",\"Doe\",42.5\r\n",
+                "select firstname,lastname,age from " + topicName);
+    }
+
+
+    @Test
     public void testJsonNoSchema_ArrayNotSupported() {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);

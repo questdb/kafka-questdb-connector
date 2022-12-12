@@ -18,8 +18,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 public final class QuestDBSinkTask extends SinkTask {
@@ -33,6 +36,7 @@ public final class QuestDBSinkTask extends SinkTask {
     private String timestampColumnName;
     private long timestampColumnValue = Long.MIN_VALUE;
     private TimeUnit timestampUnits;
+    private Set<CharSequence> doubleColumns;
 
     @Override
     public String version() {
@@ -42,6 +46,15 @@ public final class QuestDBSinkTask extends SinkTask {
     @Override
     public void start(Map<String, String> map) {
         this.config = new QuestDBSinkConnectorConfig(map);
+        String doubleColumnsConfig = config.getDoubleColumns();
+        if (doubleColumnsConfig == null) {
+            doubleColumns = Collections.emptySet();
+        } else {
+            doubleColumns = new HashSet<>();
+            for (String symbolColumn : doubleColumnsConfig.split(",")) {
+                doubleColumns.add(symbolColumn.trim());
+            }
+        }
         this.sender = createSender();
         this.timestampColumnName = config.getDesignatedTimestampColumnName();
         this.timestampUnits = config.getTimestampUnitsOrNull();
@@ -181,9 +194,19 @@ public final class QuestDBSinkTask extends SinkTask {
         if (value instanceof String) {
             sender.stringColumn(actualName, (String) value);
         } else if (value instanceof Long) {
-            sender.longColumn(actualName, (Long) value);
+            Long longValue = (Long) value;
+            if (doubleColumns.contains(actualName)) {
+                sender.doubleColumn(actualName, longValue.doubleValue());
+            } else {
+                sender.longColumn(actualName, longValue);
+            }
         } else if (value instanceof Integer) {
-            sender.longColumn(actualName, (Integer) value);
+            Integer intValue = (Integer) value;
+            if (doubleColumns.contains(actualName)) {
+                sender.doubleColumn(actualName, intValue.doubleValue());
+            } else {
+                sender.longColumn(actualName, intValue);
+            }
         } else if (value instanceof Boolean) {
             sender.boolColumn(actualName, (Boolean) value);
         } else if (value instanceof Double) {

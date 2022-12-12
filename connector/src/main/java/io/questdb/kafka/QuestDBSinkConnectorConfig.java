@@ -37,6 +37,9 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String SYMBOL_COLUMNS_CONFIG = "symbols";
     private static final String SYMBOL_COLUMNS_DOC = "Comma separated list of columns that should be symbol type";
 
+    public static final String DOUBLE_COLUMNS_CONFIG = "doubles";
+    private static final String DOUBLE_COLUMNS_DOC = "Comma separated list of columns that should be double type";
+
     public static final String USERNAME = "username";
     private static final String USERNAME_DOC = "Username for QuestDB ILP authentication";
 
@@ -64,6 +67,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, Type.STRING, null, Importance.MEDIUM, DESIGNATED_TIMESTAMP_COLUMN_NAME_DOC)
                 .define(INCLUDE_KEY_CONFIG, Type.BOOLEAN, true, Importance.MEDIUM, INCLUDE_KEY_DOC)
                 .define(SYMBOL_COLUMNS_CONFIG, Type.STRING, null, Importance.MEDIUM, SYMBOL_COLUMNS_DOC)
+                .define(DOUBLE_COLUMNS_CONFIG, Type.STRING, null, Importance.MEDIUM, DOUBLE_COLUMNS_DOC)
                 .define(USERNAME, Type.STRING, "admin", Importance.MEDIUM, USERNAME_DOC)
                 .define(TOKEN, Type.PASSWORD, null, Importance.MEDIUM, TOKEN_DOC)
                 .define(TLS, Type.BOOLEAN, false, Importance.MEDIUM, TLS_DOC)
@@ -100,6 +104,10 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public String getSymbolColumns() {
         return getString(SYMBOL_COLUMNS_CONFIG);
+    }
+
+    public String getDoubleColumns() {
+        return getString(DOUBLE_COLUMNS_CONFIG);
     }
 
     public String getUsername() {
