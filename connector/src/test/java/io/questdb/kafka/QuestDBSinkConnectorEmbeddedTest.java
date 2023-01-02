@@ -1,5 +1,7 @@
 package io.questdb.kafka;
 
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.connect.data.Date;
 import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Schema;
@@ -112,6 +114,30 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
                         + "\"John\",\"Doe\",42\r\n",
                 "select firstname,lastname,age from " + topicName);
+    }
+
+    @Test
+    public void testDeadLetterQueue_wrongJson() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put("value.converter.schemas.enable", "false");
+        props.put("errors.deadletterqueue.topic.name", "dlq");
+        props.put("errors.deadletterqueue.topic.replication.factor", "1");
+        props.put("errors.tolerance", "all");
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+        connect.kafka().produce(topicName, "key", "{\"not valid json}");
+        connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
+
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+                        + "\"John\",\"Doe\",42\r\n",
+                "select firstname,lastname,age from " + topicName);
+
+        ConsumerRecords<byte[], byte[]> fetchedRecords = connect.kafka().consume(1, 5000, "dlq");
+        Assertions.assertEquals(1, fetchedRecords.count());
+
+        ConsumerRecord<byte[], byte[]> dqlRecord = fetchedRecords.iterator().next();
+        Assertions.assertEquals("{\"not valid json}", new String(dqlRecord.value()));
     }
 
     @Test
