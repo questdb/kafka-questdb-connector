@@ -1,9 +1,11 @@
 package io.questdb.kafka;
 
+import io.questdb.cairo.TableUtils;
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigDef.Importance;
 import org.apache.kafka.common.config.ConfigDef.Type;
+import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.connect.errors.ConnectException;
 
 import java.util.Arrays;
@@ -63,7 +65,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static ConfigDef conf() {
         return new ConfigDef()
                 .define(HOST_CONFIG, Type.STRING, Importance.HIGH, HOST_DOC)
-                .define(TABLE_CONFIG, Type.STRING, null, Importance.HIGH, TABLE_DOC)
+                .define(TABLE_CONFIG, Type.STRING, null, TablenameValidator.INSTANCE, Importance.HIGH, TABLE_DOC)
                 .define(KEY_PREFIX_CONFIG, Type.STRING, "key", Importance.MEDIUM, KEY_PREFIX_DOC)
                 .define(VALUE_PREFIX_CONFIG, Type.STRING, "", Importance.MEDIUM, VALUE_PREFIX_DOC)
                 .define(SKIP_UNSUPPORTED_TYPES_CONFIG, Type.BOOLEAN, false, Importance.MEDIUM, SKIP_UNSUPPORTED_TYPES_DOC)
@@ -153,6 +155,22 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
         @Override
         public boolean visible(String name, Map<String, Object> parsedConfig) {
             return true;
+        }
+    }
+
+    private static class TablenameValidator implements ConfigDef.Validator {
+        private static final TablenameValidator INSTANCE = new TablenameValidator();
+        @Override
+        public void ensureValid(String name, Object value) {
+            if (value == null) {
+                // null is allowed, it means we will use the topic name as the table name
+                return;
+            }
+            String tableName = (String) value;
+            if (!TableUtils.isValidTableName(tableName, Integer.MAX_VALUE)) {
+                throw new ConfigException(name, value, "table name contain an illegal char: '\\n', '\\r', '?', ',', ''', " +
+                        "'\"', '\\', '/', ':', ')', '(', '+', '*' '%%', '~', or a non-printable char");
+            }
         }
     }
 }
