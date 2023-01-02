@@ -6,6 +6,9 @@ import org.apache.kafka.common.config.ConfigDef.Importance;
 import org.apache.kafka.common.config.ConfigDef.Type;
 import org.apache.kafka.connect.errors.ConnectException;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -71,7 +74,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(USERNAME, Type.STRING, "admin", Importance.MEDIUM, USERNAME_DOC)
                 .define(TOKEN, Type.PASSWORD, null, Importance.MEDIUM, TOKEN_DOC)
                 .define(TLS, Type.BOOLEAN, false, Importance.MEDIUM, TLS_DOC)
-                .define(TIMESTAMP_UNITS_CONFIG, Type.STRING, "auto", ConfigDef.ValidString.in("auto", "millis", "micros", "nanos"), Importance.LOW, TIMESTAMP_UNITS_DOC);
+                .define(TIMESTAMP_UNITS_CONFIG, Type.STRING, "auto", ConfigDef.ValidString.in("auto", "millis", "micros", "nanos"), Importance.LOW, TIMESTAMP_UNITS_DOC, null, -1, ConfigDef.Width.NONE, TIMESTAMP_UNITS_CONFIG, Collections.emptyList(), TimestampUnitsRecommender.INSTANCE);
     }
 
     public String getHost() {
@@ -135,6 +138,21 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 return null;
             default:
                 throw new ConnectException("Unknown timestamp units mode: " + configured + ". Possible values: auto, millis, micros, nanos");
+        }
+    }
+
+    private static class TimestampUnitsRecommender implements ConfigDef.Recommender {
+        private static final TimestampUnitsRecommender INSTANCE = new TimestampUnitsRecommender();
+        private static final List<Object> VALID_UNITS = Arrays.asList("auto", "millis", "micros", "nanos");
+
+        @Override
+        public List<Object> validValues(String name, Map<String, Object> parsedConfig) {
+            return VALID_UNITS;
+        }
+
+        @Override
+        public boolean visible(String name, Map<String, Object> parsedConfig) {
+            return true;
         }
     }
 }
