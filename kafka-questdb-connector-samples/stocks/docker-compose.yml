@@ -65,6 +65,7 @@ services:
     image: kafka-questdb-connector-samples-stocks-generator
     build:
       dockerfile: Dockerfile-App
+      context: .
     depends_on:
       postgres:
         condition: service_healthy
@@ -74,6 +75,7 @@ services:
     image: kafka-questdb-connector-samples-connect
     build:
       dockerfile: ./Dockerfile-Connect
+      context: .
     ports:
       - "8083:8083"
     depends_on:
