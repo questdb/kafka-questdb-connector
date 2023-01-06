@@ -54,6 +54,12 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String TLS = "tls";
     public static final String TLS_DOC = "Use TLS for connecting to QuestDB";
 
+    public static final String RETRY_BACKOFF_MS = "retry.backoff.ms";
+    private static final String RETRY_BACKOFF_MS_DOC = "The time in milliseconds to wait following an error before a retry attempt is made";
+
+    public static final String MAX_RETRIES = "max.retries";
+    private static final String MAX_RETRIES_DOC = "The maximum number of times to retry on errors before failing the task";
+
     public QuestDBSinkConnectorConfig(ConfigDef config, Map<String, String> parsedConfig) {
         super(config, parsedConfig);
     }
@@ -76,7 +82,9 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(USERNAME, Type.STRING, "admin", Importance.MEDIUM, USERNAME_DOC)
                 .define(TOKEN, Type.PASSWORD, null, Importance.MEDIUM, TOKEN_DOC)
                 .define(TLS, Type.BOOLEAN, false, Importance.MEDIUM, TLS_DOC)
-                .define(TIMESTAMP_UNITS_CONFIG, Type.STRING, "auto", ConfigDef.ValidString.in("auto", "millis", "micros", "nanos"), Importance.LOW, TIMESTAMP_UNITS_DOC, null, -1, ConfigDef.Width.NONE, TIMESTAMP_UNITS_CONFIG, Collections.emptyList(), TimestampUnitsRecommender.INSTANCE);
+                .define(TIMESTAMP_UNITS_CONFIG, Type.STRING, "auto", ConfigDef.ValidString.in("auto", "millis", "micros", "nanos"), Importance.LOW, TIMESTAMP_UNITS_DOC, null, -1, ConfigDef.Width.NONE, TIMESTAMP_UNITS_CONFIG, Collections.emptyList(), TimestampUnitsRecommender.INSTANCE)
+                .define(RETRY_BACKOFF_MS, Type.LONG, 3_000, Importance.LOW, RETRY_BACKOFF_MS_DOC)
+                .define(MAX_RETRIES, Type.INT, 10, Importance.LOW, MAX_RETRIES_DOC);
     }
 
     public String getHost() {
@@ -141,6 +149,14 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
             default:
                 throw new ConnectException("Unknown timestamp units mode: " + configured + ". Possible values: auto, millis, micros, nanos");
         }
+    }
+
+    public long getRetryBackoffMs() {
+        return getLong(RETRY_BACKOFF_MS);
+    }
+
+    public int getMaxRetries() {
+        return getInt(MAX_RETRIES);
     }
 
     private static class TimestampUnitsRecommender implements ConfigDef.Recommender {

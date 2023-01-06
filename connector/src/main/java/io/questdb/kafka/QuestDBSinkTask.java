@@ -1,6 +1,8 @@
 package io.questdb.kafka;
 
 import io.questdb.client.Sender;
+import io.questdb.cutlass.line.LineSenderException;
+import io.questdb.network.Net;
 import io.questdb.std.datetime.microtime.Timestamps;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
@@ -12,6 +14,7 @@ import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.data.Time;
 import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.errors.ConnectException;
+import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTask;
 import org.slf4j.Logger;
@@ -37,6 +40,8 @@ public final class QuestDBSinkTask extends SinkTask {
     private long timestampColumnValue = Long.MIN_VALUE;
     private TimeUnit timestampUnits;
     private Set<CharSequence> doubleColumns;
+    private int remainingRetries;
+    private long batchesSinceLastError = 0;
 
     @Override
     public String version() {
@@ -56,11 +61,13 @@ public final class QuestDBSinkTask extends SinkTask {
             }
         }
         this.sender = createSender();
+        this.remainingRetries = config.getMaxRetries();
         this.timestampColumnName = config.getDesignatedTimestampColumnName();
         this.timestampUnits = config.getTimestampUnitsOrNull();
     }
 
     private Sender createSender() {
+        log.debug("Creating a new sender");
         Sender.LineSenderBuilder builder = Sender.builder().address(config.getHost());
         if (config.isTls()) {
             builder.enableTls();
@@ -75,17 +82,68 @@ public final class QuestDBSinkTask extends SinkTask {
         Sender rawSender = builder.build();
         String symbolColumns = config.getSymbolColumns();
         if (symbolColumns == null) {
+            log.debug("No symbol columns configured. Using raw sender");
             return rawSender;
         }
+        log.debug("Symbol columns configured. Using buffering sender");
         return new BufferingSender(rawSender, symbolColumns);
     }
 
     @Override
     public void put(Collection<SinkRecord> collection) {
-        for (SinkRecord record : collection) {
-            handleSingleRecord(record);
+        if (log.isDebugEnabled()) {
+            SinkRecord record = collection.iterator().next();
+            log.debug("Received {} records. First record kafka coordinates:({}-{}-{}). ",
+                    collection.size(), record.topic(), record.kafkaPartition(), record.kafkaOffset());
         }
-        sender.flush();
+        try {
+            if (sender == null) {
+                sender = createSender();
+            }
+            for (SinkRecord record : collection) {
+                handleSingleRecord(record);
+            }
+            sender.flush();
+            log.debug("Successfully sent {} records", collection.size());
+            if (++batchesSinceLastError == 10) {
+                // why 10? why not to reset the retry counter immediately upon a successful flush()?
+                // there are two reasons for server disconnections:
+                // 1. the server is down / unreachable / other_infrastructure_issues
+                // 2. the client is sending bad data (e.g. pushing a string to a double column)
+                // errors in the latter case are not recoverable. upon receiving bad data the server will *eventually* close the connection,
+                // after a while, the client will notice that the connection is closed and will try to reconnect
+                // if we reset the retry counter immediately upon first successful flush() then we end-up in a loop where we flush bad data,
+                // the server closes the connection, the client reconnects, reset the retry counter, and sends bad data again, etc.
+                // to avoid this, we only reset the retry counter after a few successful flushes.
+                log.debug("Successfully sent 10 batches in a row. Resetting retry counter");
+                remainingRetries = config.getMaxRetries();
+            }
+        } catch (LineSenderException e) {
+            onSenderException(e);
+        }
+    }
+
+    private void onSenderException(LineSenderException e) {
+        batchesSinceLastError = 0;
+        if (--remainingRetries > 0) {
+            closeSenderSilently();
+            sender = null;
+            log.debug("Sender exception, retrying in {} ms", config.getRetryBackoffMs());
+            context.timeout(config.getRetryBackoffMs());
+            throw new RetriableException(e);
+        } else {
+            throw new ConnectException("Failed to send data to QuestDB after " + config.getMaxRetries() + " retries");
+        }
+    }
+
+    private void closeSenderSilently() {
+        try {
+            if (sender != null) {
+                sender.close();
+            }
+        } catch (Exception ex) {
+            log.warn("Failed to close sender", ex);
+        }
     }
 
     private void handleSingleRecord(SinkRecord record) {
@@ -94,7 +152,6 @@ public final class QuestDBSinkTask extends SinkTask {
         String tableName = explicitTable == null ? record.topic() : explicitTable;
         sender.table(tableName);
 
-        //todo: detect duplicated columns
         if (config.isIncludeKey()) {
             handleObject(config.getKeyPrefix(), record.keySchema(), record.key(), PRIMITIVE_KEY_FALLBACK_NAME);
         }
@@ -170,6 +227,7 @@ public final class QuestDBSinkTask extends SinkTask {
 
     private long resolveDesignatedTimestampColumnValue(Object value, Schema schema) {
         if (value instanceof java.util.Date) {
+            log.debug("Timestamp column value is a java.util.Date");
             return TimeUnit.MILLISECONDS.toNanos(((java.util.Date) value).getTime());
         }
         if (!(value instanceof Long)) {
@@ -179,9 +237,11 @@ public final class QuestDBSinkTask extends SinkTask {
         TimeUnit inputUnit;
         if (schema == null || !"io.debezium.time.MicroTimestamp".equals(schema.name())) {
             inputUnit = TimestampHelper.getTimestampUnits(timestampUnits, longValue);
+            log.debug("Detected {} as timestamp units", inputUnit);
         } else {
             // special case: Debezium micros since epoch
             inputUnit = TimeUnit.MICROSECONDS;
+            log.debug("Detected Debezium micros as timestamp units");
         }
         return inputUnit.toNanos(longValue);
     }
@@ -304,11 +364,11 @@ public final class QuestDBSinkTask extends SinkTask {
 
     @Override
     public void flush(Map<TopicPartition, OffsetAndMetadata> map) {
-        sender.flush();
+        // not needed as put() flushes after each record
     }
 
     @Override
     public void stop() {
-        sender.close();
+        closeSenderSilently();
     }
 }

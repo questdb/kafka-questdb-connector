@@ -24,8 +24,10 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
+import org.testcontainers.containers.FixedHostPortGenericContainer;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
+import org.testcontainers.containers.wait.strategy.LogMessageWaitStrategy;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
@@ -44,6 +46,7 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.KEY_CONVERTER_CLASS_CONFIG;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.VALUE_CONVERTER_CLASS_CONFIG;
+import static org.junit.jupiter.api.Assertions.fail;
 
 @Testcontainers
 public final class QuestDBSinkConnectorEmbeddedTest {
@@ -57,11 +60,29 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     private String topicName;
 
     @Container
-    private static final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:6.5.2")
-            .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT, QuestDBUtils.QUESTDB_ILP_PORT)
-            .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
-            .withEnv("QDB_CAIRO_COMMIT_LAG", "100")
-            .withEnv("JAVA_OPTS", "-Djava.locale.providers=JRE,SPI");
+    private static GenericContainer<?> questDBContainer = newQuestDbConnector();
+
+    private static GenericContainer<?> newQuestDbConnector() {
+        return newQuestDbConnector(null, null);
+    }
+
+    private static GenericContainer<?> newQuestDbConnector(Integer httpPort, Integer ilpPort) {
+        FixedHostPortGenericContainer<?> selfGenericContainer = new FixedHostPortGenericContainer<>("questdb/questdb:6.6.1");
+        if (httpPort != null) {
+            selfGenericContainer.withFixedExposedPort(httpPort, QuestDBUtils.QUESTDB_HTTP_PORT);
+        } else {
+            selfGenericContainer.addExposedPort(QuestDBUtils.QUESTDB_HTTP_PORT);
+        }
+        if (ilpPort != null) {
+            selfGenericContainer.withFixedExposedPort(ilpPort, QuestDBUtils.QUESTDB_ILP_PORT);
+        } else {
+            selfGenericContainer.addExposedPort(QuestDBUtils.QUESTDB_ILP_PORT);
+        }
+        selfGenericContainer.setWaitStrategy(new LogMessageWaitStrategy().withRegEx(".*server-main enjoy.*"));
+        return selfGenericContainer.withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
+                .withEnv("QDB_CAIRO_COMMIT_LAG", "100")
+                .withEnv("JAVA_OPTS", "-Djava.locale.providers=JRE,SPI");
+    }
 
     @BeforeEach
     public void setUp() {
@@ -163,6 +184,79 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
                         + "\"John\",\"Doe\",42\r\n",
                 "select firstname,lastname,age from " + topicName);
+    }
+
+    @Test
+    public void testRetrying_badDataStopsTheConnectorEventually() throws Exception {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.RETRY_BACKOFF_MS, "1000");
+        props.put(QuestDBSinkConnectorConfig.MAX_RETRIES, "5");
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+
+        // creates a record with 'age' as long
+        connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
+
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+                        + "\"John\",\"Doe\",42\r\n",
+                "select firstname,lastname,age from " + topicName);
+
+        for (int i = 0; i < 50; i++) {
+            // injects a record with 'age' as string
+            connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":\"str\"}");
+
+            try {
+                assertConnectorTaskState(CONNECTOR_NAME, AbstractStatus.State.FAILED);
+                return; // ok, the connector already failed, good, we are done
+            } catch (AssertionError e) {
+                // not yet, maybe next-time
+            }
+            Thread.sleep(1000);
+        }
+        fail("The connector should have failed by now");
+    }
+
+    @Test
+    public void testRetrying_recoversFromInfrastructureIssues() throws Exception {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.RETRY_BACKOFF_MS, "1000");
+        props.put(QuestDBSinkConnectorConfig.MAX_RETRIES, "40");
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+
+        connect.kafka().produce(topicName, "key1", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
+
+
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+                        + "\"John\",\"Doe\",42\r\n",
+                "select firstname,lastname,age from " + topicName);
+
+        // we need to get mapped ports, becasue we are going to kill the container and restart it again
+        // and we need the same mapping otherwise the Kafka connect will not be able to re-connect to it
+        Integer httpPort = questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT);
+        Integer ilpPort = questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT);
+        questDBContainer.stop();
+        // insert a few records while the QuestDB is down
+        for (int i = 0; i < 10; i++) {
+            connect.kafka().produce(topicName, "key2", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
+            Thread.sleep(500);
+        }
+
+        // restart QuestDB
+        questDBContainer = newQuestDbConnector(httpPort, ilpPort);
+        questDBContainer.start();
+        for (int i = 0; i < 50; i++) {
+            connect.kafka().produce(topicName, "key3", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":" + i + "}");
+            Thread.sleep(100);
+        }
+
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+                        + "\"John\",\"Doe\",49\r\n",
+                "select firstname,lastname,age from " + topicName + " where age = 49");
     }
 
     @Test
@@ -860,15 +954,15 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     private void assertConnectorTaskState(String connectorName, AbstractStatus.State expectedState) {
         ConnectorStateInfo info = connect.connectorStatus(connectorName);
         if (info == null) {
-            Assertions.fail("Connector " + connectorName + " not found");
+            fail("Connector " + connectorName + " not found");
         }
         List<ConnectorStateInfo.TaskState> taskStates = info.tasks();
         if (taskStates.size() == 0) {
-            Assertions.fail("No tasks found for connector " + connectorName);
+            fail("No tasks found for connector " + connectorName);
         }
         for (ConnectorStateInfo.TaskState taskState : taskStates) {
             if (!Objects.equals(taskState.state(), expectedState.toString())) {
-                Assertions.fail("Task " + taskState.id() + " for connector " + connectorName + " is in state " + taskState.state() + " but expected " + expectedState);
+                fail("Task " + taskState.id() + " for connector " + connectorName + " is in state " + taskState.state() + " but expected " + expectedState);
             }
         }
     }
