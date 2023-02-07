@@ -11,7 +11,7 @@
     </modules>
     <packaging>pom</packaging>
 
-    <name>QuestDB ILP Connector for Kafka Connect</name>
+    <name>QuestDB Sink Connector</name>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
