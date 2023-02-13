@@ -110,6 +110,56 @@
                     </execution>
                 </executions>
             </plugin>
+            <plugin>
+                <groupId>io.confluent</groupId>
+                <version>0.12.0</version>
+                <artifactId>kafka-connect-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>kafka-connect</goal>
+                        </goals>
+                        <configuration>
+                            <title>Kafka Connect QuestDB</title>
+                            <documentationUrl>https://questdb.io/docs/third-party-tools/kafka/questdb-kafka/</documentationUrl>
+                            <description>
+                                QuestDB Sink connector for Apache Kafka. QuestDB is a columnar time-series database with
+                                high-performance ingestion and SQL analytics. It supports fast ingestion via the Influx Line Protocol
+                                and the Postgres protocol for querying. QuestDB uses the SQL language for querying and amends the syntax
+                                to simplify time-related queries. This connector reads data from Kafka topics and writes
+                                it to QuestDB tables. The connector implements Apache Kafka Sink Connector API.
+                            </description>
+                            <logo>logos/questdb.png</logo>
+
+                            <supportProviderName>QuestDB, Inc.</supportProviderName>
+                            <supportSummary>QuestDB Inc. supports the QuestDB sink connector alongside community members as part of its open source offering.</supportSummary>
+                            <supportUrl>https://questdb.io/community/</supportUrl>
+                            <supportLogo>logos/questdb.png</supportLogo>
+
+                            <ownerUsername>questdb</ownerUsername>
+                            <ownerType>organization</ownerType>
+                            <ownerName>QuestDB, Inc.</ownerName>
+                            <ownerUrl>https://questdb.io/</ownerUrl>
+                            <ownerLogo>logos/questdb.png</ownerLogo>
+
+                            <componentTypes>
+                                <componentType>sink</componentType>
+                            </componentTypes>
+
+                            <tags>
+                                <tag>QuestDB</tag>
+                                <tag>time-series</tag>
+                                <tag>analytics</tag>
+                            </tags>
+
+                            <requirements>
+                                <requirement>QuestDB 6.6 or above</requirement>
+                            </requirements>
+
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 </project>
