@@ -2,7 +2,6 @@ package io.questdb.kafka;
 
 import io.questdb.client.Sender;
 import io.questdb.cutlass.line.LineSenderException;
-import io.questdb.network.Net;
 import io.questdb.std.datetime.microtime.Timestamps;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
