@@ -51,6 +51,8 @@ The connector supports following Options:
 | username               | STRING  | user1                                                       | admin              | User name for QuestDB. Used only when token is non-empty   |
 | token                  | STRING  | <sub>QgHCOyq35D5HocCMrUGJinEsjEscJlCp7FZQETH21Bw</sub>      | N/A                | Token for QuestDB authentication                           |
 | tls                    | BOOLEAN | true                                                        | false              | Use TLS for QuestDB connection                             |
+| retry.backoff.ms       | LONG    | 1000                                                        | 3000               | Connection retry interval in milliseconds                  |
+| max.retries            | LONG    | 1                                                           | 10                 | Maximum no. connection of retry attempts                   |
 
 ## Supported serialization formats
 The connector does not do data deserialization on its own. It relies on Kafka Connect converters to deserialize data. It's been tested predominantly with JSON, but it should work with any converter, including Avro. Converters can be configured using `key.converter` and `value.converter` options, see the table above. 
@@ -87,6 +89,9 @@ QuestDB supports a special type called [Symbol](https://questdb.io/docs/concept/
 When a target table does not exist in QuestDB then it will be automatically created when a first row arrives. This is recommended approach for development and testing.
 
 In production, it's recommended to [create tables manually via SQL](https://questdb.io/docs/reference/sql/create-table/). This gives you more control over the table schema, allow per-table partitioning, creating indexes, etc.
+
+## Issues
+If you encounter any issues, please [create an issue](https://github.com/questdb/kafka-questdb-connector/issues/new) in this repository.
 
 ## FAQ
 <b>Q</b>: Does this connector work with Schema Registry?
