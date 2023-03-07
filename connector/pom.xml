@@ -162,4 +162,12 @@
             </plugin>
         </plugins>
     </build>
+
+    <scm>
+        <connection>scm:git:https://github.com/questdb/kafka-questdb-connector.git</connection>
+        <developerConnection>scm:git:https://github.com/questdb/kafka-questdb-connector.git</developerConnection>
+        <url>https://github.com/questdb/kafka-questdb-connector</url>
+        <tag>HEAD</tag>
+    </scm>
+
 </project>
