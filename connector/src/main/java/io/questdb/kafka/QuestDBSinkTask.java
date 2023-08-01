@@ -90,6 +90,10 @@ public final class QuestDBSinkTask extends SinkTask {
 
     @Override
     public void put(Collection<SinkRecord> collection) {
+        if (collection.isEmpty()) {
+            log.debug("Received empty collection, ignoring");
+            return;
+        }
         if (log.isDebugEnabled()) {
             SinkRecord record = collection.iterator().next();
             log.debug("Received {} records. First record kafka coordinates:({}-{}-{}). ",

@@ -260,6 +260,37 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @Test
+    public void testEmptyCollection_wontFailTheConnector() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        // filter out all message
+        props.put("transforms", "drop");
+        props.put("transforms.drop.type", "org.apache.kafka.connect.transforms.Filter");
+
+
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .field("age", Schema.INT8_SCHEMA)
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe")
+                .put("age", (byte) 42);
+
+        connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
+
+        int durationMs = 10_000;
+        long deadline = System.currentTimeMillis() + durationMs;
+        while (System.currentTimeMillis() < deadline) {
+            assertConnectorTaskState(CONNECTOR_NAME, AbstractStatus.State.RUNNING);
+        }
+    }
+
+    @Test
     public void testSymbol_withAllOtherILPTypes() {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
