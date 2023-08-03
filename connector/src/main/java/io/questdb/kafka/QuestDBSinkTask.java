@@ -276,6 +276,9 @@ public final class QuestDBSinkTask extends SinkTask {
             sender.doubleColumn(actualName, (Double) value);
         } else if (value instanceof Map) {
             handleMap(name, (Map<?, ?>) value, fallbackName);
+        } else if (value instanceof java.util.Date) {
+            long epochMillis = ((java.util.Date) value).getTime();
+            sender.timestampColumn(actualName, TimeUnit.MILLISECONDS.toMicros(epochMillis));
         } else {
             onUnsupportedType(actualName, value.getClass().getName());
         }
