@@ -2,7 +2,10 @@ package io.questdb.kafka;
 
 import io.questdb.client.Sender;
 import io.questdb.cutlass.line.LineSenderException;
+import io.questdb.std.NumericException;
+import io.questdb.std.datetime.DateFormat;
 import io.questdb.std.datetime.microtime.Timestamps;
+import io.questdb.std.datetime.millitime.DateFormatUtils;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.data.Date;
@@ -19,9 +22,6 @@ import org.apache.kafka.connect.sink.SinkTask;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.time.format.DateTimeFormatter;
-import java.time.temporal.ChronoField;
-import java.time.temporal.TemporalAccessor;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
@@ -45,7 +45,7 @@ public final class QuestDBSinkTask extends SinkTask {
     private Set<String> stringTimestampColumns;
     private int remainingRetries;
     private long batchesSinceLastError = 0;
-    private DateTimeFormatter timestampParser;
+    private DateFormat dataFormat;
 
     @Override
     public String version() {
@@ -61,7 +61,7 @@ public final class QuestDBSinkTask extends SinkTask {
             for (String symbolColumn : timestampStringFields.split(",")) {
                 stringTimestampColumns.add(symbolColumn.trim());
             }
-            this.timestampParser = DateTimeFormatter.ofPattern(config.getDefaultTimestampFormat());
+            dataFormat = TimestampParserCompiler.compilePattern(config.getDefaultTimestampFormat());
         } else {
             stringTimestampColumns = Collections.emptySet();
         }
@@ -251,7 +251,7 @@ public final class QuestDBSinkTask extends SinkTask {
         }
         if (value instanceof String) {
             log.debug("Timestamp column value is a string");
-            return parseTimestamp((String) value, TimeUnit.NANOSECONDS);
+            return parseToMicros((String) value) * 1000;
         }
         if (!(value instanceof Long)) {
             throw new ConnectException("Unsupported timestamp column type: " + value.getClass());
@@ -277,7 +277,7 @@ public final class QuestDBSinkTask extends SinkTask {
         if (value instanceof String) {
             String stringVal = (String) value;
             if (stringTimestampColumns.contains(actualName)) {
-                long timestamp = parseTimestamp(stringVal, TimeUnit.MICROSECONDS);
+                long timestamp = parseToMicros(stringVal);
                 sender.timestampColumn(actualName, timestamp);
             } else {
                 sender.stringColumn(actualName, stringVal);
@@ -310,11 +310,12 @@ public final class QuestDBSinkTask extends SinkTask {
         }
     }
 
-    private long parseTimestamp(String timestamp, TimeUnit unit) {
-        TemporalAccessor accessor = timestampParser.parse(timestamp);
-        long seconds = accessor.getLong(ChronoField.INSTANT_SECONDS);
-        int nanos = accessor.get(ChronoField.NANO_OF_SECOND);
-        return unit.convert(seconds, TimeUnit.SECONDS) + unit.convert(nanos, TimeUnit.NANOSECONDS);
+    private long parseToMicros(String timestamp) {
+        try {
+            return dataFormat.parse(timestamp, DateFormatUtils.enLocale);
+        } catch (NumericException e) {
+            throw new ConnectException("Cannot parse timestamp: " + timestamp, e);
+        }
     }
 
     private static String sanitizeName(String name) {
@@ -349,7 +350,7 @@ public final class QuestDBSinkTask extends SinkTask {
             case STRING:
                 String s = (String) value;
                 if (stringTimestampColumns.contains(primitiveTypesName)) {
-                    long timestamp = parseTimestamp(s, TimeUnit.MICROSECONDS);
+                    long timestamp = parseToMicros(s);
                     sender.timestampColumn(sanitizedName, timestamp);
                 } else {
                     sender.stringColumn(sanitizedName, s);

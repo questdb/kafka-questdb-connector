@@ -38,7 +38,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     private static final String TIMESTAMP_STRING_FIELDS_DOC = "Comma separated list of string fields that should be parsed as timestamp.";
 
     public static final String TIMESTAMP_UNITS_CONFIG = "timestamp.units";
-    private static final String TIMESTAMP_UNITS_DOC = "Units of timestamp field. Possible values: auto, millis, micros, nanos";
+    private static final String TIMESTAMP_UNITS_DOC = "Units of designated timestamp field. Possible values: auto, millis, micros, nanos";
 
     public static final String INCLUDE_KEY_CONFIG = "include.key";
     private static final String INCLUDE_KEY_DOC = "Include key in the table";
@@ -64,8 +64,8 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String MAX_RETRIES = "max.retries";
     private static final String MAX_RETRIES_DOC = "The maximum number of times to retry on errors before failing the task";
 
-    public static final String TIMESTAMP_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'";
-    private static final String TIMESTAMP_FORMAT_DOC = "Default timestamp format";
+    public static final String TIMESTAMP_FORMAT = "timestamp.string.format";
+    private static final String TIMESTAMP_FORMAT_DOC = "Default timestamp format. Used when parsing timestamp string fields";
 
     private static final String DEFAULT_TIMESTAMP_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'";
 
@@ -199,11 +199,6 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
         public void ensureValid(String name, Object value) {
             if (!(value instanceof String)) {
                 throw new ConfigException(name, value, "Timestamp format must be a string");
-            }
-            try {
-                DateTimeFormatter.ofPattern((String) value);
-            } catch (IllegalArgumentException e) {
-                throw new ConfigException(name, value, "Timestamp format is not a valid DateTimeFormatter pattern. Error='" + e.getMessage() + "'");
             }
         }
     }
