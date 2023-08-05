@@ -19,6 +19,9 @@ import org.apache.kafka.connect.sink.SinkTask;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoField;
+import java.time.temporal.TemporalAccessor;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
@@ -39,8 +42,10 @@ public final class QuestDBSinkTask extends SinkTask {
     private long timestampColumnValue = Long.MIN_VALUE;
     private TimeUnit timestampUnits;
     private Set<CharSequence> doubleColumns;
+    private Set<String> stringTimestampColumns;
     private int remainingRetries;
     private long batchesSinceLastError = 0;
+    private DateTimeFormatter timestampParser;
 
     @Override
     public String version() {
@@ -50,6 +55,17 @@ public final class QuestDBSinkTask extends SinkTask {
     @Override
     public void start(Map<String, String> map) {
         this.config = new QuestDBSinkConnectorConfig(map);
+        String timestampStringFields = config.getTimestampStringFields();
+        if (timestampStringFields != null) {
+            stringTimestampColumns = new HashSet<>();
+            for (String symbolColumn : timestampStringFields.split(",")) {
+                stringTimestampColumns.add(symbolColumn.trim());
+            }
+            this.timestampParser = DateTimeFormatter.ofPattern(config.getDefaultTimestampFormat());
+        } else {
+            stringTimestampColumns = Collections.emptySet();
+        }
+
         String doubleColumnsConfig = config.getDoubleColumns();
         if (doubleColumnsConfig == null) {
             doubleColumns = Collections.emptySet();
@@ -233,6 +249,10 @@ public final class QuestDBSinkTask extends SinkTask {
             log.debug("Timestamp column value is a java.util.Date");
             return TimeUnit.MILLISECONDS.toNanos(((java.util.Date) value).getTime());
         }
+        if (value instanceof String) {
+            log.debug("Timestamp column value is a string");
+            return parseTimestamp((String) value, TimeUnit.NANOSECONDS);
+        }
         if (!(value instanceof Long)) {
             throw new ConnectException("Unsupported timestamp column type: " + value.getClass());
         }
@@ -255,7 +275,13 @@ public final class QuestDBSinkTask extends SinkTask {
         }
         String actualName = name.isEmpty() ? fallbackName : sanitizeName(name);
         if (value instanceof String) {
-            sender.stringColumn(actualName, (String) value);
+            String stringVal = (String) value;
+            if (stringTimestampColumns.contains(actualName)) {
+                long timestamp = parseTimestamp(stringVal, TimeUnit.MICROSECONDS);
+                sender.timestampColumn(actualName, timestamp);
+            } else {
+                sender.stringColumn(actualName, stringVal);
+            }
         } else if (value instanceof Long) {
             Long longValue = (Long) value;
             if (doubleColumns.contains(actualName)) {
@@ -282,6 +308,13 @@ public final class QuestDBSinkTask extends SinkTask {
         } else {
             onUnsupportedType(actualName, value.getClass().getName());
         }
+    }
+
+    private long parseTimestamp(String timestamp, TimeUnit unit) {
+        TemporalAccessor accessor = timestampParser.parse(timestamp);
+        long seconds = accessor.getLong(ChronoField.INSTANT_SECONDS);
+        int nanos = accessor.get(ChronoField.NANO_OF_SECOND);
+        return unit.convert(seconds, TimeUnit.SECONDS) + unit.convert(nanos, TimeUnit.NANOSECONDS);
     }
 
     private static String sanitizeName(String name) {
@@ -315,7 +348,12 @@ public final class QuestDBSinkTask extends SinkTask {
                 break;
             case STRING:
                 String s = (String) value;
-                sender.stringColumn(sanitizedName, s);
+                if (stringTimestampColumns.contains(primitiveTypesName)) {
+                    long timestamp = parseTimestamp(s, TimeUnit.MICROSECONDS);
+                    sender.timestampColumn(sanitizedName, timestamp);
+                } else {
+                    sender.stringColumn(sanitizedName, s);
+                }
                 break;
             case STRUCT:
                 handleStruct(name, (Struct) value, schema);

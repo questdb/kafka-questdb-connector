@@ -8,6 +8,7 @@ import org.apache.kafka.common.config.ConfigDef.Type;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.connect.errors.ConnectException;
 
+import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -32,6 +33,9 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public static final String DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG = "timestamp.field.name";
     private static final String DESIGNATED_TIMESTAMP_COLUMN_NAME_DOC = "Designated timestamp field name";
+
+    public static final String TIMESTAMP_STRING_FIELDS = "timestamp.string.fields";
+    private static final String TIMESTAMP_STRING_FIELDS_DOC = "Comma separated list of string fields that should be parsed as timestamp.";
 
     public static final String TIMESTAMP_UNITS_CONFIG = "timestamp.units";
     private static final String TIMESTAMP_UNITS_DOC = "Units of timestamp field. Possible values: auto, millis, micros, nanos";
@@ -60,6 +64,11 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String MAX_RETRIES = "max.retries";
     private static final String MAX_RETRIES_DOC = "The maximum number of times to retry on errors before failing the task";
 
+    public static final String TIMESTAMP_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'";
+    private static final String TIMESTAMP_FORMAT_DOC = "Default timestamp format";
+
+    private static final String DEFAULT_TIMESTAMP_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'";
+
     public QuestDBSinkConnectorConfig(ConfigDef config, Map<String, String> parsedConfig) {
         super(config, parsedConfig);
     }
@@ -84,7 +93,9 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(TLS, Type.BOOLEAN, false, Importance.MEDIUM, TLS_DOC)
                 .define(TIMESTAMP_UNITS_CONFIG, Type.STRING, "auto", ConfigDef.ValidString.in("auto", "millis", "micros", "nanos"), Importance.LOW, TIMESTAMP_UNITS_DOC, null, -1, ConfigDef.Width.NONE, TIMESTAMP_UNITS_CONFIG, Collections.emptyList(), TimestampUnitsRecommender.INSTANCE)
                 .define(RETRY_BACKOFF_MS, Type.LONG, 3_000, Importance.LOW, RETRY_BACKOFF_MS_DOC)
-                .define(MAX_RETRIES, Type.INT, 10, Importance.LOW, MAX_RETRIES_DOC);
+                .define(MAX_RETRIES, Type.INT, 10, Importance.LOW, MAX_RETRIES_DOC)
+                .define(TIMESTAMP_FORMAT, Type.STRING, DEFAULT_TIMESTAMP_FORMAT, TimestampFormatValidator.INSTANCE, Importance.MEDIUM, TIMESTAMP_FORMAT_DOC)
+                .define(TIMESTAMP_STRING_FIELDS, Type.STRING, null, Importance.MEDIUM, TIMESTAMP_STRING_FIELDS_DOC);
     }
 
     public String getHost() {
@@ -93,6 +104,14 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public String getTable() {
         return getString(TABLE_CONFIG);
+    }
+
+    public String getDefaultTimestampFormat() {
+        return getString(TIMESTAMP_FORMAT);
+    }
+
+    public String getTimestampStringFields() {
+        return getString(TIMESTAMP_STRING_FIELDS);
     }
 
     public String getKeyPrefix() {
@@ -171,6 +190,21 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
         @Override
         public boolean visible(String name, Map<String, Object> parsedConfig) {
             return true;
+        }
+    }
+
+    private static class TimestampFormatValidator implements ConfigDef.Validator {
+        private static final TimestampFormatValidator INSTANCE = new TimestampFormatValidator();
+        @Override
+        public void ensureValid(String name, Object value) {
+            if (!(value instanceof String)) {
+                throw new ConfigException(name, value, "Timestamp format must be a string");
+            }
+            try {
+                DateTimeFormatter.ofPattern((String) value);
+            } catch (IllegalArgumentException e) {
+                throw new ConfigException(name, value, "Timestamp format is not a valid DateTimeFormatter pattern. Error='" + e.getMessage() + "'");
+            }
         }
     }
 
