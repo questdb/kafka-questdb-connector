@@ -747,7 +747,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
-        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_FORMAT, "yyyy-MM-dd HH:mm:ss.U+ z");
+        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_FORMAT, "yyyy-MM-dd HH:mm:ss.SSSUUU z");
         props.put(QuestDBSinkConnectorConfig.TIMESTAMP_STRING_FIELDS, "born,death");
 
         connect.configureConnector(CONNECTOR_NAME, props);
