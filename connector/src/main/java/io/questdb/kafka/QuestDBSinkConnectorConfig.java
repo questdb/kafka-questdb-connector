@@ -33,6 +33,9 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG = "timestamp.field.name";
     private static final String DESIGNATED_TIMESTAMP_COLUMN_NAME_DOC = "Designated timestamp field name";
 
+    public static final String DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG = "timestamp.kafka.native";
+    private static final String DESIGNATED_TIMESTAMP_KAFKA_NATIVE_DOC = "Use Kafka record timestamps as designated timestamp. Mutually exclusive with timestamp.field.name";
+
     public static final String TIMESTAMP_STRING_FIELDS = "timestamp.string.fields";
     private static final String TIMESTAMP_STRING_FIELDS_DOC = "Comma-separated list of string fields that should be parsed as timestamps.";
 
@@ -94,7 +97,8 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(RETRY_BACKOFF_MS, Type.LONG, 3_000, Importance.LOW, RETRY_BACKOFF_MS_DOC)
                 .define(MAX_RETRIES, Type.INT, 10, Importance.LOW, MAX_RETRIES_DOC)
                 .define(TIMESTAMP_FORMAT, Type.STRING, DEFAULT_TIMESTAMP_FORMAT, TimestampFormatValidator.INSTANCE, Importance.MEDIUM, TIMESTAMP_FORMAT_DOC)
-                .define(TIMESTAMP_STRING_FIELDS, Type.STRING, null, Importance.MEDIUM, TIMESTAMP_STRING_FIELDS_DOC);
+                .define(TIMESTAMP_STRING_FIELDS, Type.STRING, null, Importance.MEDIUM, TIMESTAMP_STRING_FIELDS_DOC)
+                .define(DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG, Type.BOOLEAN, false, Importance.MEDIUM, DESIGNATED_TIMESTAMP_KAFKA_NATIVE_DOC);
     }
 
     public String getHost() {
@@ -119,6 +123,10 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public String getValuePrefix() {
         return getString(VALUE_PREFIX_CONFIG);
+    }
+
+    public boolean isDesignatedTimestampKafkaNative() {
+        return getBoolean(DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG);
     }
 
     public boolean isSkipUnsupportedTypes() {

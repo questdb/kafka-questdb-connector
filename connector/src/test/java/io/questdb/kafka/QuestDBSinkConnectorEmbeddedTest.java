@@ -2,6 +2,8 @@ package io.questdb.kafka;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.connect.data.Date;
 import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Schema;
@@ -9,8 +11,10 @@ import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.data.Time;
 import org.apache.kafka.connect.data.Timestamp;
+import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.json.JsonConverter;
 import org.apache.kafka.connect.runtime.AbstractStatus;
+import org.apache.kafka.connect.runtime.Connect;
 import org.apache.kafka.connect.runtime.ConnectorConfig;
 import org.apache.kafka.connect.runtime.rest.entities.ConnectorStateInfo;
 import org.apache.kafka.connect.storage.Converter;
@@ -46,6 +50,8 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.KEY_CONVERTER_CLASS_CONFIG;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.VALUE_CONVERTER_CLASS_CONFIG;
+import static org.hamcrest.CoreMatchers.containsString;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.fail;
 
 @Testcontainers
@@ -455,6 +461,53 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                         + "\"John\",\"Doe\",\"1970-01-01T00:00:00.000000Z\"\r\n"
                         + "\"Jane\",\"Doe\",\"2206-11-20T17:46:39.999000Z\"\r\n",
                 "select firstname,lastname,timestamp from " + topicName);
+    }
+
+    @Test
+    public void testKafkaNativeTimestampsAndExplicitDesignatedFieldTimestampMutuallyExclusive() {
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG, "true");
+        try {
+            connect.configureConnector(CONNECTOR_NAME, props);
+            fail("Expected ConnectException");
+        } catch (ConnectException e) {
+            assertThat(e.getMessage(), containsString("timestamp.field.name with timestamp.kafka.native"));
+        }
+    }
+
+    @Test
+    public void testKafkaNativeTimestamp() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG, "true");
+
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+
+        QuestDBUtils.assertSql(questDBContainer,
+                "{\"ddl\":\"OK\"}\n",
+                "create table " + topicName + " (firstname string, lastname string, born timestamp) timestamp(born)",
+                QuestDBUtils.Endpoint.EXEC);
+
+        java.util.Date birth = new Calendar.Builder()
+                .setTimeZone(TimeZone.getTimeZone("UTC"))
+                .setDate(2022, 9, 23) // note: month is 0-based, so it's October and not November
+                .setTimeOfDay(13, 53, 59, 123)
+                .build().getTime();
+
+        Map<String, Object> prodProps = new HashMap<>();
+        try (KafkaProducer<byte[], byte[]> producer = connect.kafka().createProducer(prodProps)) {
+            String val = "{\"firstname\":\"John\",\"lastname\":\"Doe\"}";
+            ProducerRecord<byte[], byte[]> record = new ProducerRecord<>(topicName, null, birth.getTime(), null, val.getBytes());
+            producer.send(record);
+        }
+
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"born\"\r\n" +
+                        "\"John\",\"Doe\",\"2022-10-23T13:53:59.123000Z\"\r\n",
+                "select * from " + topicName);
     }
 
     @Test
