@@ -120,7 +120,7 @@
                             <goal>kafka-connect</goal>
                         </goals>
                         <configuration>
-                            <title>Kafka Connect QuestDB</title>
+                            <title>QuestDB Kafka Connector</title>
                             <documentationUrl>https://questdb.io/docs/third-party-tools/kafka/questdb-kafka/</documentationUrl>
                             <description>
                                 QuestDB Sink connector for Apache Kafka. QuestDB is a columnar time-series database with

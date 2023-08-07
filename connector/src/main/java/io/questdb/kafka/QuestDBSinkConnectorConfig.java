@@ -8,7 +8,6 @@ import org.apache.kafka.common.config.ConfigDef.Type;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.connect.errors.ConnectException;
 
-import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -106,7 +105,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
         return getString(TABLE_CONFIG);
     }
 
-    public String getDefaultTimestampFormat() {
+    public String getTimestampFormat() {
         return getString(TIMESTAMP_FORMAT);
     }
 

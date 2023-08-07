@@ -61,7 +61,7 @@ public final class QuestDBSinkTask extends SinkTask {
             for (String symbolColumn : timestampStringFields.split(",")) {
                 stringTimestampColumns.add(symbolColumn.trim());
             }
-            dataFormat = TimestampParserCompiler.compilePattern(config.getDefaultTimestampFormat());
+            dataFormat = TimestampParserCompiler.compilePattern(config.getTimestampFormat());
         } else {
             stringTimestampColumns = Collections.emptySet();
         }
@@ -314,7 +314,9 @@ public final class QuestDBSinkTask extends SinkTask {
         try {
             return dataFormat.parse(timestamp, DateFormatUtils.enLocale);
         } catch (NumericException e) {
-            throw new ConnectException("Cannot parse timestamp: " + timestamp, e);
+            throw new ConnectException("Cannot parse timestamp: " + timestamp + " with the configured format '" + config.getTimestampFormat() +"' use '"
+                    + QuestDBSinkConnectorConfig.TIMESTAMP_FORMAT + "' to configure the right timestamp format. " +
+                    "See https://questdb.io/docs/reference/function/date-time/#date-and-timestamp-format for timestamp parser documentation. ", e);
         }
     }
 
