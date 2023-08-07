@@ -458,14 +458,14 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @Test
-    public void testTimestampSMT_parseMicroseconds_schemaLess() {
+    public void testTimestampSMT_parseTimestamp_schemaLess() {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
 
-        String timestampFormat = "yyyy-MM-dd HH:mm:ss.SSSSSS z";
+        String timestampFormat = "yyyy-MM-dd HH:mm:ss.SSS z";
         props.put("transforms", "Timestamp-born,Timestamp-death");
         props.put("transforms.Timestamp-born.type", "org.apache.kafka.connect.transforms.TimestampConverter$Value");
         props.put("transforms.Timestamp-born.field", "born");
@@ -485,8 +485,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 "create table " + topicName + " (firstname string, lastname string, death timestamp, born timestamp) timestamp(born)",
                 QuestDBUtils.Endpoint.EXEC);
 
-        String birthTimestamp = "1985-08-02 16:41:55.402095 UTC";
-        String deadTimestamp = "2023-08-02 16:41:55.402095 UTC";
+        String birthTimestamp = "1985-08-02 16:41:55.402 UTC";
+        String deadTimestamp = "2023-08-02 16:41:55.402 UTC";
         connect.kafka().produce(topicName, "foo",
                 "{\"firstname\":\"John\""
                         + ",\"lastname\":\"Doe\""
@@ -495,18 +495,18 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
 
         QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"death\",\"born\"\r\n" +
-                        "\"John\",\"Doe\",\"2023-08-02T16:48:37.095000Z\",\"1985-08-02T16:48:37.095000Z\"\r\n",
+                        "\"John\",\"Doe\",\"2023-08-02T16:41:55.402000Z\",\"1985-08-02T16:41:55.402000Z\"\r\n",
                 "select * from " + topicName);
     }
 
     @Test
-    public void testTimestampSMT_parseMicroseconds_withSchema() {
+    public void testTimestampSMT_parseTimestamp_withSchema() {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = baseConnectorProps(topicName);
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
 
-        String timestampFormat = "yyyy-MM-dd HH:mm:ss.SSSSSS z";
+        String timestampFormat = "yyyy-MM-dd HH:mm:ss.SSS z";
         props.put("transforms", "Timestamp-born,Timestamp-death");
         props.put("transforms.Timestamp-born.type", "org.apache.kafka.connect.transforms.TimestampConverter$Value");
         props.put("transforms.Timestamp-born.field", "born");
@@ -530,14 +530,14 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         Struct struct = new Struct(schema)
                 .put("firstname", "John")
                 .put("lastname", "Doe")
-                .put("born", "1985-08-02 16:41:55.402095 UTC")
-                .put("death", "2023-08-02 16:41:55.402095 UTC");
+                .put("born", "1985-08-02 16:41:55.402 UTC")
+                .put("death", "2023-08-02 16:41:55.402 UTC");
 
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
         QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"death\",\"timestamp\"\r\n" +
-                        "\"John\",\"Doe\",\"2023-08-02T16:48:37.095000Z\",\"1985-08-02T16:48:37.095000Z\"\r\n",
+                        "\"John\",\"Doe\",\"2023-08-02T16:41:55.402000Z\",\"1985-08-02T16:41:55.402000Z\"\r\n",
                 "select * from " + topicName);
     }
 
@@ -738,6 +738,38 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\",\"key\"\r\n"
                         + "\"John\",\"Doe\",42,\"key\"\r\n",
                 "select firstname, lastname, age, key from " + topicName);
+    }
+
+    @Test
+    public void testParsingStringTimestamp() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = baseConnectorProps(topicName);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_FORMAT, "yyyy-MM-dd HH:mm:ss.SSSUUU z");
+        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_STRING_FIELDS, "born,death");
+
+        connect.configureConnector(CONNECTOR_NAME, props);
+        assertConnectorTaskRunningEventually();
+
+        QuestDBUtils.assertSql(questDBContainer,
+                "{\"ddl\":\"OK\"}\n",
+                "create table " + topicName + " (firstname string, lastname string, death timestamp, born timestamp) timestamp(born)",
+                QuestDBUtils.Endpoint.EXEC);
+
+        String birthTimestamp = "1985-08-02 16:41:55.402095 UTC";
+        String deadTimestamp = "2023-08-02 16:41:55.402095 UTC";
+        connect.kafka().produce(topicName, "foo",
+                "{\"firstname\":\"John\""
+                        + ",\"lastname\":\"Doe\""
+                        + ",\"death\":\"" + deadTimestamp + "\""
+                        + ",\"born\":\"" + birthTimestamp + "\"}"
+        );
+
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"death\",\"born\"\r\n" +
+                        "\"John\",\"Doe\",\"2023-08-02T16:41:55.402095Z\",\"1985-08-02T16:41:55.402095Z\"\r\n",
+                "select * from " + topicName);
     }
 
     @Test
