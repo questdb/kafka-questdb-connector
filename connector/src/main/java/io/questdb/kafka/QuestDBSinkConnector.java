@@ -1,5 +1,6 @@
 package io.questdb.kafka;
 
+import org.apache.kafka.common.config.Config;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.connect.connector.Task;
 import org.apache.kafka.connect.sink.SinkConnector;
@@ -42,5 +43,15 @@ public final class QuestDBSinkConnector extends SinkConnector {
     @Override
     public ConfigDef config() {
         return QuestDBSinkConnectorConfig.conf();
+    }
+
+    @Override
+    public Config validate(Map<String, String> connectorConfigs) {
+        String s = connectorConfigs.get(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG);
+        if (Boolean.parseBoolean(s) && connectorConfigs.get(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG) != null) {
+            throw new IllegalArgumentException("Cannot use " + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG
+                    + " with " + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG +". These options are mutually exclusive.");
+        }
+        return super.validate(connectorConfigs);
     }
 }

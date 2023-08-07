@@ -46,6 +46,7 @@ public final class QuestDBSinkTask extends SinkTask {
     private int remainingRetries;
     private long batchesSinceLastError = 0;
     private DateFormat dataFormat;
+    private boolean kafkaTimestampsEnabled;
 
     @Override
     public String version() {
@@ -78,6 +79,7 @@ public final class QuestDBSinkTask extends SinkTask {
         this.sender = createSender();
         this.remainingRetries = config.getMaxRetries();
         this.timestampColumnName = config.getDesignatedTimestampColumnName();
+        this.kafkaTimestampsEnabled = config.isDesignatedTimestampKafkaNative();
         this.timestampUnits = config.getTimestampUnitsOrNull();
     }
 
@@ -176,11 +178,17 @@ public final class QuestDBSinkTask extends SinkTask {
         }
         handleObject(config.getValuePrefix(), record.valueSchema(), record.value(), PRIMITIVE_VALUE_FALLBACK_NAME);
 
+        if (kafkaTimestampsEnabled) {
+            timestampColumnValue = TimeUnit.MILLISECONDS.toNanos(record.timestamp());
+        }
         if (timestampColumnValue == Long.MIN_VALUE) {
             sender.atNow();
         } else {
-            sender.at(timestampColumnValue);
-            timestampColumnValue = Long.MIN_VALUE;
+            try {
+                sender.at(timestampColumnValue);
+            } finally {
+                timestampColumnValue = Long.MIN_VALUE;
+            }
         }
     }
 
@@ -223,6 +231,7 @@ public final class QuestDBSinkTask extends SinkTask {
 
     private void handleObject(String name, Schema schema, Object value, String fallbackName) {
         assert !name.isEmpty() || !fallbackName.isEmpty();
+
         if (isDesignatedColumnName(name, fallbackName)) {
             assert timestampColumnValue == Long.MIN_VALUE;
             if (value == null) {
