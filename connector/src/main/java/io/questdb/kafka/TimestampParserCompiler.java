@@ -7,16 +7,14 @@ import io.questdb.std.datetime.microtime.TimestampFormatCompiler;
 class TimestampParserCompiler {
     private static TimestampFormatCompiler compiler;
     private static final Object MUTEX = new Object();
-    // we assume that there will just a few patterns
+    // we assume that there will just a few patterns hence to issue with unbounded cache growth
     private static CharSequenceObjHashMap<DateFormat> cache;
 
     public static DateFormat compilePattern(String timestampPattern) {
         synchronized (MUTEX) {
             if (compiler == null) {
                 compiler = new TimestampFormatCompiler();
-            }
-            // DateFormat instances are thread-safe, so we can cache them and use for multiple workers
-            if (cache == null) {
+                // DateFormat instances are thread-safe, so we can cache them and use for multiple workers
                 cache = new CharSequenceObjHashMap<>();
             }
             DateFormat format = cache.get(timestampPattern);
