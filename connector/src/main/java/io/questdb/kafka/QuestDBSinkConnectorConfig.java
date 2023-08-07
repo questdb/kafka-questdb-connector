@@ -34,7 +34,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     private static final String DESIGNATED_TIMESTAMP_COLUMN_NAME_DOC = "Designated timestamp field name";
 
     public static final String TIMESTAMP_STRING_FIELDS = "timestamp.string.fields";
-    private static final String TIMESTAMP_STRING_FIELDS_DOC = "Comma separated list of string fields that should be parsed as timestamp.";
+    private static final String TIMESTAMP_STRING_FIELDS_DOC = "Comma-separated list of string fields that should be parsed as timestamps.";
 
     public static final String TIMESTAMP_UNITS_CONFIG = "timestamp.units";
     private static final String TIMESTAMP_UNITS_DOC = "Units of designated timestamp field. Possible values: auto, millis, micros, nanos";
@@ -64,7 +64,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     private static final String MAX_RETRIES_DOC = "The maximum number of times to retry on errors before failing the task";
 
     public static final String TIMESTAMP_FORMAT = "timestamp.string.format";
-    private static final String TIMESTAMP_FORMAT_DOC = "Default timestamp format. Used when parsing timestamp string fields";
+    private static final String TIMESTAMP_FORMAT_DOC = "Timestamp format. Used when parsing timestamp string fields";
 
     private static final String DEFAULT_TIMESTAMP_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'";
 
