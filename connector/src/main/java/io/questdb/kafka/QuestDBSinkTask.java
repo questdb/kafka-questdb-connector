@@ -9,12 +9,7 @@ import io.questdb.std.datetime.millitime.DateFormatUtils;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.data.Date;
-import org.apache.kafka.connect.data.Decimal;
-import org.apache.kafka.connect.data.Field;
-import org.apache.kafka.connect.data.Schema;
-import org.apache.kafka.connect.data.Struct;
-import org.apache.kafka.connect.data.Time;
-import org.apache.kafka.connect.data.Timestamp;
+import org.apache.kafka.connect.data.*;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.sink.SinkRecord;
@@ -22,12 +17,7 @@ import org.apache.kafka.connect.sink.SinkTask;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 public final class QuestDBSinkTask extends SinkTask {
@@ -91,10 +81,10 @@ public final class QuestDBSinkTask extends SinkTask {
         }
         if (config.getToken() != null) {
             String username = config.getUsername();
-            if (username == null || username.equals("")) {
+            if (username == null || username.isEmpty()) {
                 throw new ConnectException("Username cannot be empty when using ILP authentication");
             }
-            builder.enableAuth(username).authToken(config.getToken());
+            builder.enableAuth(username).authToken(config.getToken().value());
         }
         Sender rawSender = builder.build();
         String symbolColumns = config.getSymbolColumns();
