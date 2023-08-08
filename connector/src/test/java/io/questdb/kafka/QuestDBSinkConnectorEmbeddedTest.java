@@ -42,10 +42,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 @Testcontainers
 public final class QuestDBSinkConnectorEmbeddedTest {
-
     private EmbeddedConnectCluster connect;
     private Converter converter;
-
     private String topicName;
 
     @Container

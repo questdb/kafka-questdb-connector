@@ -20,20 +20,13 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.MountableFile;
 
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static java.util.Collections.singletonMap;
-import static java.util.concurrent.TimeUnit.SECONDS;
 
 @Testcontainers
 public class QuestDBSinkConnectorEmbeddedAuthTest {
-    private static final String CONNECTOR_NAME = "questdb-sink-connector";
-    private static final long CONNECTOR_START_TIMEOUT_MS = SECONDS.toMillis(60);
-
     private EmbeddedConnectCluster connect;
     private Converter converter;
-
-    private static final AtomicInteger ID_GEN = new AtomicInteger(0);
     private String topicName;
 
     @Container
@@ -49,13 +42,9 @@ public class QuestDBSinkConnectorEmbeddedAuthTest {
         return container.withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")));
     }
 
-    private static String newTopicName() {
-        return "topic" + ID_GEN.getAndIncrement();
-    }
-
     @BeforeEach
     public void setUp() {
-        topicName = newTopicName();
+        topicName = ConnectTestUtils.newTopicName();
         JsonConverter jsonConverter = new JsonConverter();
         jsonConverter.configure(singletonMap(ConverterConfig.TYPE_CONFIG, ConverterType.VALUE.getName()));
         converter = jsonConverter;
@@ -74,7 +63,7 @@ public class QuestDBSinkConnectorEmbeddedAuthTest {
         props.put(QuestDBSinkConnectorConfig.USERNAME, "testUser1");
         props.put(QuestDBSinkConnectorConfig.TOKEN, "UvuVb1USHGRRT08gEnwN2zGZrvM4MsLQ5brgF6SVkAw=");
 
-        connect.configureConnector(CONNECTOR_NAME, props);
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
