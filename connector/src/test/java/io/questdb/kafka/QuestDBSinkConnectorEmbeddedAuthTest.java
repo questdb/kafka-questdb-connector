@@ -29,6 +29,10 @@ public class QuestDBSinkConnectorEmbeddedAuthTest {
     private Converter converter;
     private String topicName;
 
+    // must match the user in authDb.txt
+    private static final String TEST_USER_TOKEN = "UvuVb1USHGRRT08gEnwN2zGZrvM4MsLQ5brgF6SVkAw=";
+    private static final String TEST_USER_NAME = "testUser1";
+
     @Container
     private static GenericContainer<?> questDBContainer = newQuestDbConnector();
 
@@ -60,8 +64,8 @@ public class QuestDBSinkConnectorEmbeddedAuthTest {
     public void testSmoke() {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
-        props.put(QuestDBSinkConnectorConfig.USERNAME, "testUser1");
-        props.put(QuestDBSinkConnectorConfig.TOKEN, "UvuVb1USHGRRT08gEnwN2zGZrvM4MsLQ5brgF6SVkAw=");
+        props.put(QuestDBSinkConnectorConfig.USERNAME, TEST_USER_NAME);
+        props.put(QuestDBSinkConnectorConfig.TOKEN, TEST_USER_TOKEN);
 
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
