@@ -797,6 +797,37 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @Test
+    public void testParsingStringTimestamp_defaultPattern() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_STRING_FIELDS, "born,death");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        QuestDBUtils.assertSql(questDBContainer,
+                "{\"ddl\":\"OK\"}\n",
+                "create table " + topicName + " (firstname string, lastname string, death timestamp, born timestamp) timestamp(born)",
+                QuestDBUtils.Endpoint.EXEC);
+
+        String birthTimestamp = "1985-08-02T16:41:55.402095Z";
+        String deadTimestamp = "2023-08-02T16:41:55.402095Z";
+        connect.kafka().produce(topicName, "foo",
+                "{\"firstname\":\"John\""
+                        + ",\"lastname\":\"Doe\""
+                        + ",\"death\":\"" + deadTimestamp + "\""
+                        + ",\"born\":\"" + birthTimestamp + "\"}"
+        );
+
+        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"death\",\"born\"\r\n" +
+                        "\"John\",\"Doe\",\"2023-08-02T16:41:55.402095Z\",\"1985-08-02T16:41:55.402095Z\"\r\n",
+                "select * from " + topicName);
+    }
+
+    @Test
     public void testCustomPrefixWithPrimitiveKeyAndValues() {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
