@@ -4,25 +4,15 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
-import org.apache.kafka.connect.data.Date;
-import org.apache.kafka.connect.data.Decimal;
-import org.apache.kafka.connect.data.Schema;
-import org.apache.kafka.connect.data.SchemaBuilder;
-import org.apache.kafka.connect.data.Struct;
-import org.apache.kafka.connect.data.Time;
-import org.apache.kafka.connect.data.Timestamp;
+import org.apache.kafka.connect.data.*;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.json.JsonConverter;
 import org.apache.kafka.connect.runtime.AbstractStatus;
-import org.apache.kafka.connect.runtime.Connect;
-import org.apache.kafka.connect.runtime.ConnectorConfig;
-import org.apache.kafka.connect.runtime.rest.entities.ConnectorStateInfo;
 import org.apache.kafka.connect.storage.Converter;
 import org.apache.kafka.connect.storage.ConverterConfig;
 import org.apache.kafka.connect.storage.ConverterType;
 import org.apache.kafka.connect.storage.StringConverter;
 import org.apache.kafka.connect.util.clusters.EmbeddedConnectCluster;
-import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
@@ -38,16 +28,12 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import java.math.BigDecimal;
 import java.util.Calendar;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.TimeZone;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static java.util.Collections.singletonMap;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
-import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.KEY_CONVERTER_CLASS_CONFIG;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.VALUE_CONVERTER_CLASS_CONFIG;
 import static org.hamcrest.CoreMatchers.containsString;
@@ -56,13 +42,10 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 @Testcontainers
 public final class QuestDBSinkConnectorEmbeddedTest {
-    private static final String CONNECTOR_NAME = "questdb-sink-connector";
-    private static final long CONNECTOR_START_TIMEOUT_MS = SECONDS.toMillis(60);
 
     private EmbeddedConnectCluster connect;
     private Converter converter;
 
-    private static final AtomicInteger ID_GEN = new AtomicInteger(0);
     private String topicName;
 
     @Container
@@ -92,7 +75,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @BeforeEach
     public void setUp() {
-        topicName = newTopicName();
+        topicName = ConnectTestUtils.newTopicName();
         JsonConverter jsonConverter = new JsonConverter();
         jsonConverter.configure(singletonMap(ConverterConfig.TYPE_CONFIG, ConverterType.VALUE.getName()));
         converter = jsonConverter;
@@ -109,22 +92,12 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.stop();
     }
 
-    private Map<String, String> baseConnectorProps(String topicName) {
-        Map<String, String> props = new HashMap<>();
-        props.put(ConnectorConfig.CONNECTOR_CLASS_CONFIG, QuestDBSinkConnector.class.getName());
-        props.put("topics", topicName);
-        props.put(KEY_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
-        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
-        props.put("host", questDBContainer.getHost() + ":" + questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT));
-        return props;
-    }
-
     @Test
     public void testSmoke() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -146,13 +119,13 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testDeadLetterQueue_wrongJson() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put("value.converter.schemas.enable", "false");
         props.put("errors.deadletterqueue.topic.name", "dlq");
         props.put("errors.deadletterqueue.topic.replication.factor", "1");
         props.put("errors.tolerance", "all");
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         connect.kafka().produce(topicName, "key", "{\"not valid json}");
         connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
 
@@ -170,10 +143,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testSymbol() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "firstname,lastname");
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -195,12 +168,12 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testRetrying_badDataStopsTheConnectorEventually() throws Exception {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.RETRY_BACKOFF_MS, "1000");
         props.put(QuestDBSinkConnectorConfig.MAX_RETRIES, "5");
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         // creates a record with 'age' as long
         connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
@@ -214,7 +187,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
             connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":\"str\"}");
 
             try {
-                assertConnectorTaskState(CONNECTOR_NAME, AbstractStatus.State.FAILED);
+                ConnectTestUtils.assertConnectorTaskState(connect, ConnectTestUtils.CONNECTOR_NAME, AbstractStatus.State.FAILED);
                 return; // ok, the connector already failed, good, we are done
             } catch (AssertionError e) {
                 // not yet, maybe next-time
@@ -227,12 +200,12 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testRetrying_recoversFromInfrastructureIssues() throws Exception {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.RETRY_BACKOFF_MS, "1000");
         props.put(QuestDBSinkConnectorConfig.MAX_RETRIES, "40");
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         connect.kafka().produce(topicName, "key1", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
 
@@ -268,14 +241,14 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testEmptyCollection_wontFailTheConnector() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         // filter out all message
         props.put("transforms", "drop");
         props.put("transforms.drop.type", "org.apache.kafka.connect.transforms.Filter");
 
 
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -292,17 +265,17 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         int durationMs = 10_000;
         long deadline = System.currentTimeMillis() + durationMs;
         while (System.currentTimeMillis() < deadline) {
-            assertConnectorTaskState(CONNECTOR_NAME, AbstractStatus.State.RUNNING);
+            ConnectTestUtils.assertConnectorTaskState(connect, ConnectTestUtils.CONNECTOR_NAME, AbstractStatus.State.RUNNING);
         }
     }
 
     @Test
     public void testSymbol_withAllOtherILPTypes() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "firstname");
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -350,10 +323,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testUpfrontTable_withSymbols() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "firstname,lastname");
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -380,11 +353,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testTimestampUnitResolution_auto() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         java.util.Date birth = new Calendar.Builder()
                 .setTimeZone(TimeZone.getTimeZone("UTC"))
@@ -439,12 +412,12 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 throw new IllegalArgumentException("Unknown mode: " + mode);
         }
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
         props.put(QuestDBSinkConnectorConfig.TIMESTAMP_UNITS_CONFIG, mode);
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         long birthMillis = new Calendar.Builder()
                 .setTimeZone(TimeZone.getTimeZone("UTC"))
@@ -465,12 +438,12 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testKafkaNativeTimestampsAndExplicitDesignatedFieldTimestampMutuallyExclusive() {
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG, "true");
         try {
-            connect.configureConnector(CONNECTOR_NAME, props);
+            connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
             fail("Expected ConnectException");
         } catch (ConnectException e) {
             assertThat(e.getMessage(), containsString("timestamp.field.name with timestamp.kafka.native"));
@@ -480,12 +453,12 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testKafkaNativeTimestamp() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG, "true");
 
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         QuestDBUtils.assertSql(questDBContainer,
                 "{\"ddl\":\"OK\"}\n",
@@ -513,7 +486,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testTimestampSMT_parseTimestamp_schemaLess() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
@@ -530,8 +503,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         props.put("transforms.Timestamp-death.target.type", "Timestamp");
         props.put("transforms.Timestamp-death.format", timestampFormat);
 
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         QuestDBUtils.assertSql(questDBContainer,
                 "{\"ddl\":\"OK\"}\n",
@@ -555,7 +528,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testTimestampSMT_parseTimestamp_withSchema() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
 
@@ -570,8 +543,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         props.put("transforms.Timestamp-death.target.type", "Timestamp");
         props.put("transforms.Timestamp-death.format", timestampFormat);
 
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
@@ -597,9 +570,9 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testUpfrontTable() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -626,11 +599,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testDesignatedTimestamp_noSchema_unixEpochMillis() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         connect.kafka().produce(topicName, "foo", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"birth\":433774466123}");
 
@@ -642,7 +615,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testDesignatedTimestamp_noSchema_dateTransform_fromStringToTimestamp() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put("value.converter.schemas.enable", "false");
         props.put("transforms", "convert_birth");
         props.put("transforms.convert_birth.type", "org.apache.kafka.connect.transforms.TimestampConverter$Value");
@@ -650,8 +623,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         props.put("transforms.convert_birth.field", "birth");
         props.put("transforms.convert_birth.format", "yyyy-MM-dd'T'HH:mm:ss.SSSX");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         connect.kafka().produce(topicName, "foo", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"birth\":\"1989-09-23T10:25:33.107Z\"}");
 
@@ -663,10 +636,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testDesignatedTimestamp_withSchema() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -695,11 +668,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testDoNotIncludeKey() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -728,10 +701,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testJsonNoSchema() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put("value.converter.schemas.enable", "false");
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
 
         QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
@@ -742,11 +715,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testJsonNoSchema_mixedFlotingAndIntTypes() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DOUBLE_COLUMNS_CONFIG, "age");
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
         connect.kafka().produce(topicName, "key", "{\"firstname\":\"Jane\",\"lastname\":\"Doe\",\"age\":42.5}");
 
@@ -760,21 +733,21 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testJsonNoSchema_ArrayNotSupported() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put("value.converter.schemas.enable", "false");
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"array\":[1,2,3]}");
 
-        assertConnectorTaskFailedEventually();
+        ConnectTestUtils.assertConnectorTaskFailedEventually(connect);
     }
 
     @Test
     public void testPrimitiveKey() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -796,15 +769,15 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testParsingStringTimestamp() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
         props.put(QuestDBSinkConnectorConfig.TIMESTAMP_FORMAT, "yyyy-MM-dd HH:mm:ss.SSSUUU z");
         props.put(QuestDBSinkConnectorConfig.TIMESTAMP_STRING_FIELDS, "born,death");
 
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         QuestDBUtils.assertSql(questDBContainer,
                 "{\"ddl\":\"OK\"}\n",
@@ -828,14 +801,14 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testCustomPrefixWithPrimitiveKeyAndValues() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put(KEY_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
         props.put(VALUE_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
         props.put(QuestDBSinkConnectorConfig.KEY_PREFIX_CONFIG, "col_key");
         props.put(QuestDBSinkConnectorConfig.VALUE_PREFIX_CONFIG, "col_value");
 
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         connect.kafka().produce(topicName, "foo", "bar");
 
@@ -847,10 +820,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testSkipUnsupportedType_Bytes() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put(QuestDBSinkConnectorConfig.SKIP_UNSUPPORTED_TYPES_CONFIG, "true");
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -872,12 +845,12 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testDefaultPrefixWithPrimitiveKeyAndValues() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put(KEY_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
         props.put(VALUE_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
 
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         connect.kafka().produce(topicName, "foo", "bar");
 
@@ -889,11 +862,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testStructKey() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         //overrider the convertor from String to Json
         props.put(KEY_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -914,13 +887,13 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testStructKeyWithNoPrefix() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         //overrider the convertor from String to Json
         props.put(KEY_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put(VALUE_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
         props.put(QuestDBSinkConnectorConfig.KEY_PREFIX_CONFIG, "");
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -941,12 +914,12 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testStructKeyAndPrimitiveValue() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         //overrider the convertor from String to Json
         props.put(KEY_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put(VALUE_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -967,12 +940,12 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @Test
     public void testExplicitTableName() {
-        String tableName = newTableName();
+        String tableName = ConnectTestUtils.newTableName();
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, tableName);
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -994,10 +967,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testLogicalTypes() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -1043,10 +1016,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testDecimalTypeNotSupported() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
@@ -1062,16 +1035,16 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        assertConnectorTaskFailedEventually();
+        ConnectTestUtils.assertConnectorTaskFailedEventually(connect);
     }
 
     @Test
     public void testNestedStructInValue() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         Schema nameSchema = SchemaBuilder.struct().name("com.example.Name")
                 .field("firstname", Schema.STRING_SCHEMA)
@@ -1099,10 +1072,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testMultiLevelNestedStructInValue() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = baseConnectorProps(topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
-        connect.configureConnector(CONNECTOR_NAME, props);
-        assertConnectorTaskRunningEventually();
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         Schema nameSchema = SchemaBuilder.struct().name("com.example.Name")
                 .field("firstname", Schema.STRING_SCHEMA)
@@ -1136,41 +1109,5 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         QuestDBUtils.assertSqlEventually(questDBContainer, "\"partner1_name_firstname\",\"partner1_name_lastname\",\"partner2_name_firstname\",\"partner2_name_lastname\"\r\n"
                         + "\"John\",\"Doe\",\"Jane\",\"Doe\"\r\n",
                 "select partner1_name_firstname, partner1_name_lastname, partner2_name_firstname, partner2_name_lastname from " + topicName);
-    }
-
-    private void assertConnectorTaskRunningEventually() {
-        assertConnectorTaskStateEventually(AbstractStatus.State.RUNNING);
-    }
-
-    private void assertConnectorTaskFailedEventually() {
-        assertConnectorTaskStateEventually(AbstractStatus.State.FAILED);
-    }
-
-    private void assertConnectorTaskStateEventually(AbstractStatus.State expectedState) {
-        Awaitility.await().atMost(CONNECTOR_START_TIMEOUT_MS, MILLISECONDS).untilAsserted(() -> assertConnectorTaskState(CONNECTOR_NAME, expectedState));
-    }
-
-    private void assertConnectorTaskState(String connectorName, AbstractStatus.State expectedState) {
-        ConnectorStateInfo info = connect.connectorStatus(connectorName);
-        if (info == null) {
-            fail("Connector " + connectorName + " not found");
-        }
-        List<ConnectorStateInfo.TaskState> taskStates = info.tasks();
-        if (taskStates.size() == 0) {
-            fail("No tasks found for connector " + connectorName);
-        }
-        for (ConnectorStateInfo.TaskState taskState : taskStates) {
-            if (!Objects.equals(taskState.state(), expectedState.toString())) {
-                fail("Task " + taskState.id() + " for connector " + connectorName + " is in state " + taskState.state() + " but expected " + expectedState);
-            }
-        }
-    }
-
-    private static String newTopicName() {
-        return "topic" + ID_GEN.getAndIncrement();
-    }
-
-    private static String newTableName() {
-        return "table" + ID_GEN.getAndIncrement();
     }
 }

@@ -154,7 +154,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     }
 
     public String getToken() {
-        return getString(TOKEN);
+        return getPassword(TOKEN).value();
     }
 
     public boolean isTls() {
