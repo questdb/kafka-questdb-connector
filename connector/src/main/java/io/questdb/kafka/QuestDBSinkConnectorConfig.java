@@ -70,7 +70,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String TIMESTAMP_FORMAT = "timestamp.string.format";
     private static final String TIMESTAMP_FORMAT_DOC = "Timestamp format. Used when parsing timestamp string fields";
 
-    private static final String DEFAULT_TIMESTAMP_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'";
+    private static final String DEFAULT_TIMESTAMP_FORMAT = "yyyy-MM-ddTHH:mm:ss.SSSUUUZ";
 
     public QuestDBSinkConnectorConfig(ConfigDef config, Map<String, String> parsedConfig) {
         super(config, parsedConfig);
