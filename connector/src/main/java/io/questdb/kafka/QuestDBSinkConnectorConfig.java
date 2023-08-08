@@ -6,6 +6,7 @@ import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigDef.Importance;
 import org.apache.kafka.common.config.ConfigDef.Type;
 import org.apache.kafka.common.config.ConfigException;
+import org.apache.kafka.common.config.types.Password;
 import org.apache.kafka.connect.errors.ConnectException;
 
 import java.util.Arrays;
@@ -153,8 +154,8 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
         return getString(USERNAME);
     }
 
-    public String getToken() {
-        return getString(TOKEN);
+    public Password getToken() {
+        return getPassword(TOKEN);
     }
 
     public boolean isTls() {
