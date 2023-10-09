@@ -21,6 +21,7 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 public final class QuestDBSinkTask extends SinkTask {
+    private static final int PROBABLY_SAFE_OFFSET_ROLLBACK = 150_000;
     private static final char STRUCT_FIELD_SEPARATOR = '_';
     private static final String PRIMITIVE_KEY_FALLBACK_NAME = "key";
     private static final String PRIMITIVE_VALUE_FALLBACK_NAME = "value";
@@ -37,6 +38,8 @@ public final class QuestDBSinkTask extends SinkTask {
     private long batchesSinceLastError = 0;
     private DateFormat dataFormat;
     private boolean kafkaTimestampsEnabled;
+//    private final TopicPartitionOffsetTracker tracker = new MultiTopicPartitionOffsetTracker();
+private final TopicPartitionOffsetTracker tracker = new SingleTopicPartitionOffsetTracker();
 
     @Override
     public String version() {
@@ -71,6 +74,16 @@ public final class QuestDBSinkTask extends SinkTask {
         this.timestampColumnName = config.getDesignatedTimestampColumnName();
         this.kafkaTimestampsEnabled = config.isDesignatedTimestampKafkaNative();
         this.timestampUnits = config.getTimestampUnitsOrNull();
+    }
+
+    @Override
+    public void open(Collection<TopicPartition> partitions) {
+        tracker.onPartitionsOpened(partitions);
+    }
+
+    @Override
+    public void close(Collection<TopicPartition> partitions) {
+        tracker.onPartitionsClosed(partitions);
     }
 
     private Sender createSender() {
@@ -140,11 +153,20 @@ public final class QuestDBSinkTask extends SinkTask {
             closeSenderSilently();
             sender = null;
             log.debug("Sender exception, retrying in {} ms", config.getRetryBackoffMs());
+            tracker.configureSafeOffsets(context, PROBABLY_SAFE_OFFSET_ROLLBACK);
             context.timeout(config.getRetryBackoffMs());
             throw new RetriableException(e);
         } else {
             throw new ConnectException("Failed to send data to QuestDB after " + config.getMaxRetries() + " retries");
         }
+    }
+
+
+    @Override
+    public Map<TopicPartition, OffsetAndMetadata> preCommit(Map<TopicPartition, OffsetAndMetadata> currentOffsets) {
+        assert currentOffsets.size() == 1;
+        tracker.transformPreCommit(currentOffsets, PROBABLY_SAFE_OFFSET_ROLLBACK);
+        return currentOffsets;
     }
 
     private void closeSenderSilently() {
@@ -159,6 +181,9 @@ public final class QuestDBSinkTask extends SinkTask {
 
     private void handleSingleRecord(SinkRecord record) {
         assert timestampColumnValue == Long.MIN_VALUE;
+
+        tracker.onObservedOffset(record.kafkaPartition(), record.topic(), record.kafkaOffset());
+
         String explicitTable = config.getTable();
         String tableName = explicitTable == null ? record.topic() : explicitTable;
         sender.table(tableName);

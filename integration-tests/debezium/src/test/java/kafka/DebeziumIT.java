@@ -3,15 +3,9 @@ package kafka;
 import io.debezium.testing.testcontainers.ConnectorConfiguration;
 import io.debezium.testing.testcontainers.DebeziumContainer;
 import io.questdb.client.Sender;
-import io.questdb.kafka.QuestDBSinkConnector;
-import io.questdb.kafka.QuestDBSinkConnectorConfig;
-import io.questdb.kafka.QuestDBSinkTask;
-import io.questdb.kafka.QuestDBUtils;
-import io.questdb.kafka.JarResolverExtension;
+import io.questdb.kafka.*;
 import org.apache.kafka.connect.json.JsonConverter;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.slf4j.LoggerFactory;
@@ -22,21 +16,11 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.lifecycle.Startables;
 import org.testcontainers.utility.DockerImageName;
 import org.testcontainers.utility.MountableFile;
 
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
+import java.sql.*;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.stream.Stream;
-
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.junit.Assert.assertEquals;
 
 @Testcontainers
 public class DebeziumIT {
@@ -117,10 +101,11 @@ public class DebeziumIT {
             ConnectorConfiguration questSinkConfig = newQuestSinkBaseConfig(questTableName);
             debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSinkConfig);
 
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\"\r\n"
+            QuestDBUtils.assertSqlEventually( "\"id\",\"title\"\r\n"
                     + "1,\"Learn CDC\"\r\n"
                     + "2,\"Learn Debezium\"\r\n",
-                    "select id, title from " + questTableName);
+                    "select id, title from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
         }
     }
 
@@ -144,13 +129,14 @@ public class DebeziumIT {
             statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (3, 'PDB', 1.0)");
             statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (4, 'KDB', 1.0)");
 
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"symbol\",\"price\"\r\n"
+            QuestDBUtils.assertSqlEventually( "\"id\",\"symbol\",\"price\"\r\n"
                             + "0,\"TDB\",1.0\r\n"
                             + "1,\"QDB\",1.0\r\n"
                             + "2,\"IDB\",1.0\r\n"
                             + "3,\"PDB\",1.0\r\n"
                             + "4,\"KDB\",1.0\r\n",
-                    "select id, symbol, price from " + questTableName);
+                    "select id, symbol, price from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
 
             try (PreparedStatement preparedStatement = connection.prepareStatement("update " + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " set price = ? where id = ?")) {
                 //a bunch of updates
@@ -171,18 +157,20 @@ public class DebeziumIT {
             }
 
             // all symbols have the last well-known price
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"symbol\",\"last_price\"\r\n"
+            QuestDBUtils.assertSqlEventually("\"id\",\"symbol\",\"last_price\"\r\n"
                             + "0,\"TDB\",42.0\r\n"
                             + "1,\"QDB\",42.0\r\n"
                             + "2,\"IDB\",42.0\r\n"
                             + "3,\"PDB\",42.0\r\n"
                             + "4,\"KDB\",42.0\r\n",
-                    "select id, symbol, last(price) as last_price from " + questTableName);
+                    "select id, symbol, last(price) as last_price from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
 
             // total number of rows is equal to the number of updates and inserts
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"count\"\r\n"
+            QuestDBUtils.assertSqlEventually("\"count\"\r\n"
                             + "200010\r\n",
-                    "select count() from " + questTableName);
+                    "select count() from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
         }
     }
 
@@ -202,17 +190,19 @@ public class DebeziumIT {
             ConnectorConfiguration questSink = newQuestSinkBaseConfig(questTableName);
             debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSink);
 
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\"\r\n"
+            QuestDBUtils.assertSqlEventually( "\"id\",\"title\"\r\n"
                             + "1,\"Learn CDC\"\r\n",
-                    "select id, title from " + questTableName);
+                    "select id, title from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
 
             statement.execute("alter table "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " add column description varchar(255)");
             statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (2, 'Learn Debezium', 'Best book ever')");
 
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\",\"description\"\r\n"
+            QuestDBUtils.assertSqlEventually("\"id\",\"title\",\"description\"\r\n"
                     + "1,\"Learn CDC\",\r\n"
                     + "2,\"Learn Debezium\",\"Best book ever\"\r\n",
-                    "select id, title, description from " + questTableName);
+                    "select id, title, description from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
         }
     }
 
@@ -231,16 +221,18 @@ public class DebeziumIT {
             ConnectorConfiguration questSink = newQuestSinkBaseConfig(questTableName);
             debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSink);
 
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\"\r\n"
+            QuestDBUtils.assertSqlEventually("\"id\",\"title\"\r\n"
                             + "1,\"Learn CDC\"\r\n",
-                    "select id, title from " + questTableName);
+                    "select id, title from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
 
             statement.executeUpdate("update "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " set title = 'Learn Debezium' where id = 1");
 
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\"\r\n"
+            QuestDBUtils.assertSqlEventually( "\"id\",\"title\"\r\n"
                             + "1,\"Learn CDC\"\r\n"
                             + "1,\"Learn Debezium\"\r\n",
-                    "select id, title from " + questTableName);
+                    "select id, title from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
         }
     }
 
@@ -259,17 +251,19 @@ public class DebeziumIT {
             ConnectorConfiguration questSink = newQuestSinkBaseConfig(questTableName);
             debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSink);
 
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\"\r\n"
+            QuestDBUtils.assertSqlEventually( "\"id\",\"title\"\r\n"
                             + "1,\"Learn CDC\"\r\n",
-                    "select id, title from " + questTableName);
+                    "select id, title from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
 
             statement.execute("delete from "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " where id = 1");
             statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (1, 'Learn Debezium')");
 
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\"\r\n"
+            QuestDBUtils.assertSqlEventually( "\"id\",\"title\"\r\n"
                             + "1,\"Learn CDC\"\r\n"
                             + "1,\"Learn Debezium\"\r\n",
-                    "select id, title from " + questTableName);
+                    "select id, title from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
         }
     }
 
@@ -288,9 +282,10 @@ public class DebeziumIT {
             questSink.with(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "created_at");
             debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSink);
 
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\",\"timestamp\"\r\n"
+            QuestDBUtils.assertSqlEventually( "\"id\",\"title\",\"timestamp\"\r\n"
                             + "1,\"Learn CDC\",\"2021-01-02T01:02:03.456000Z\"\r\n",
-                    "select id, title, timestamp from " + questTableName);
+                    "select id, title, timestamp from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
         }
     }
 
@@ -309,9 +304,10 @@ public class DebeziumIT {
             questSink.with(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "created_at");
             debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSink);
 
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\",\"timestamp\"\r\n"
+            QuestDBUtils.assertSqlEventually( "\"id\",\"title\",\"timestamp\"\r\n"
                             + "1,\"Learn CDC\",\"2021-01-02T01:02:03.123456Z\"\r\n",
-                    "select id, title, timestamp from " + questTableName);
+                    "select id, title, timestamp from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
         }
     }
 
@@ -330,9 +326,10 @@ public class DebeziumIT {
             questSink.with(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "created_at");
             debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSink);
 
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\",\"timestamp\"\r\n"
+            QuestDBUtils.assertSqlEventually( "\"id\",\"title\",\"timestamp\"\r\n"
                             + "1,\"Learn CDC\",\"2021-01-02T01:02:03.123457Z\"\r\n",
-                    "select id, title, timestamp from " + questTableName);
+                    "select id, title, timestamp from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
         }
     }
 
@@ -350,9 +347,10 @@ public class DebeziumIT {
             ConnectorConfiguration questSink = newQuestSinkBaseConfig(questTableName);
             debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSink);
 
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\",\"created_at\"\r\n"
+            QuestDBUtils.assertSqlEventually( "\"id\",\"title\",\"created_at\"\r\n"
                             + "1,\"Learn CDC\",\"2021-01-02T01:02:03.456000Z\"\r\n",
-                    "select id, title, created_at from " + questTableName);
+                    "select id, title, created_at from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
         }
     }
 
@@ -370,9 +368,10 @@ public class DebeziumIT {
             ConnectorConfiguration questSink = newQuestSinkBaseConfig(questTableName);
             debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSink);
 
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\",\"created_at\"\r\n"
+            QuestDBUtils.assertSqlEventually( "\"id\",\"title\",\"created_at\"\r\n"
                             + "1,\"Learn CDC\",\"2021-01-02T00:00:00.000000Z\"\r\n",
-                    "select id, title, created_at from " + questTableName);
+                    "select id, title, created_at from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
         }
     }
 
@@ -391,18 +390,20 @@ public class DebeziumIT {
             questSink.with(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "created_at");
             debeziumContainer.registerConnector(QUESTDB_CONNECTOR_NAME, questSink);
 
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\",\"timestamp\"\r\n"
+            QuestDBUtils.assertSqlEventually( "\"id\",\"title\",\"timestamp\"\r\n"
                             + "1,\"Learn CDC\",\"2021-01-02T00:00:00.000000Z\"\r\n",
-                    "select * from " + questTableName);
+                    "select * from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
 
             // delete should be ignored by QuestDB
             statement.execute("delete from "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " where id = 1");
             statement.execute("insert into "  + PG_SCHEMA_NAME + "." + PG_TABLE_NAME + " values (2, 'Learn Debezium', '2021-01-03')");
 
-            QuestDBUtils.assertSqlEventually(questDBContainer, "\"id\",\"title\",\"timestamp\"\r\n"
+            QuestDBUtils.assertSqlEventually( "\"id\",\"title\",\"timestamp\"\r\n"
                             + "1,\"Learn CDC\",\"2021-01-02T00:00:00.000000Z\"\r\n"
                             + "2,\"Learn Debezium\",\"2021-01-03T00:00:00.000000Z\"\r\n",
-                    "select * from " + questTableName);
+                    "select * from " + questTableName,
+                    questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
         }
     }
 

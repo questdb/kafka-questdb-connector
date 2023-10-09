@@ -106,9 +106,9 @@ public class AvroSchemaRegistryIT {
         }
 
         startConnector(topicName);
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"timestamp\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"timestamp\"\r\n"
                         + "\"John\",\"Doe\",\"2000-01-01T00:00:00.000000Z\"\r\n",
-                "select * from " + topicName);
+                "select * from " + topicName, questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
     }
 
     @Test
@@ -124,9 +124,9 @@ public class AvroSchemaRegistryIT {
         }
         startConnector(topicName);
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"timestamp\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"timestamp\"\r\n"
                 + "\"John\",\"Doe\",\"2000-01-01T00:00:00.000000Z\"\r\n",
-                "select * from " + topicName);
+                "select * from " + topicName, questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
 
         try (Producer<String, GenericRecord> producer = new KafkaProducer<>(producerProps())) {
             Schema schema = new org.apache.avro.Schema.Parser().parse(getClass().getResourceAsStream("/avro-runtime/StudentWithExtraColumn.avsc"));
@@ -137,10 +137,10 @@ public class AvroSchemaRegistryIT {
             student.put("active", true);
             producer.send(new ProducerRecord<>(topicName, "foo", student)).get();
         }
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"timestamp\",\"active\"\r\n"
+        QuestDBUtils.assertSqlEventually( "\"firstname\",\"lastname\",\"timestamp\",\"active\"\r\n"
                         + "\"John\",\"Doe\",\"2000-01-01T00:00:00.000000Z\",false\r\n"
                         + "\"Mary\",\"Doe\",\"2005-01-01T00:00:00.000000Z\",true\r\n",
-                "select * from " + topicName);
+                "select * from " + topicName, questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
     }
 
     private void startConnector(String topicName) {
