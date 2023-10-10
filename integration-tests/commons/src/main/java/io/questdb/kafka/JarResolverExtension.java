@@ -37,7 +37,7 @@ public final class JarResolverExtension implements Extension, AfterAllCallback {
         }
         if (resource.getProtocol().equals("file")) {
             String pathString = resource.getPath();
-            return buildJarFromSinglingTarget(pathString);
+            return buildJarFromSiblingTargetDir(pathString);
         } else if (resource.getProtocol().equals("jar")) {
             return getPathToJarWithClass(clazz);
         }
@@ -52,7 +52,7 @@ public final class JarResolverExtension implements Extension, AfterAllCallback {
         return path.toString();
     }
 
-    private String buildJarFromSinglingTarget(String pathString) {
+    private String buildJarFromSiblingTargetDir(String pathString) {
         try {
             tempDir = Files.createTempDirectory("jar-resolver-tmp");
         } catch (IOException e) {

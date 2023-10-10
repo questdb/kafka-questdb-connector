@@ -13,6 +13,7 @@
         <module>debezium</module>
         <module>commons</module>
         <module>avro-schema-registry</module>
+        <module>exactlyonce</module>
     </modules>
 
     <packaging>pom</packaging>
