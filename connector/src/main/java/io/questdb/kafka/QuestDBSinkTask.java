@@ -164,7 +164,6 @@ public final class QuestDBSinkTask extends SinkTask {
 
     @Override
     public Map<TopicPartition, OffsetAndMetadata> preCommit(Map<TopicPartition, OffsetAndMetadata> currentOffsets) {
-        assert currentOffsets.size() == 1;
         tracker.transformPreCommit(currentOffsets, SAFE_OFFSET_ROLLBACK);
         return currentOffsets;
     }
