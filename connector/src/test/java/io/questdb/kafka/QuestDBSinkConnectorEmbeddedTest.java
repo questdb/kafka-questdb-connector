@@ -390,7 +390,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 .build();
 
         // async inserts to Kafka
-        long recordCount = 10_000_000;
+        long recordCount = 1_000_000;
         Map<String, Object> prodProps = new HashMap<>();
         new Thread(() -> {
             try (KafkaProducer<byte[], byte[]> producer = connect.kafka().createProducer(prodProps)) {

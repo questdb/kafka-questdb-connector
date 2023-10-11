@@ -21,7 +21,7 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 public final class QuestDBSinkTask extends SinkTask {
-    private static final int PROBABLY_SAFE_OFFSET_ROLLBACK = 150_000;
+    private static final int SAFE_OFFSET_ROLLBACK = 150_000;
     private static final char STRUCT_FIELD_SEPARATOR = '_';
     private static final String PRIMITIVE_KEY_FALLBACK_NAME = "key";
     private static final String PRIMITIVE_VALUE_FALLBACK_NAME = "value";
@@ -38,8 +38,8 @@ public final class QuestDBSinkTask extends SinkTask {
     private long batchesSinceLastError = 0;
     private DateFormat dataFormat;
     private boolean kafkaTimestampsEnabled;
-//    private final TopicPartitionOffsetTracker tracker = new MultiTopicPartitionOffsetTracker();
-private final TopicPartitionOffsetTracker tracker = new SingleTopicPartitionOffsetTracker();
+    private final TopicPartitionOffsetTracker tracker = new MultiTopicPartitionOffsetTracker();
+//private final TopicPartitionOffsetTracker tracker = new SingleTopicPartitionOffsetTracker();
 
     @Override
     public String version() {
@@ -153,7 +153,7 @@ private final TopicPartitionOffsetTracker tracker = new SingleTopicPartitionOffs
             closeSenderSilently();
             sender = null;
             log.debug("Sender exception, retrying in {} ms", config.getRetryBackoffMs());
-            tracker.configureSafeOffsets(context, PROBABLY_SAFE_OFFSET_ROLLBACK);
+            tracker.configureSafeOffsets(context, SAFE_OFFSET_ROLLBACK);
             context.timeout(config.getRetryBackoffMs());
             throw new RetriableException(e);
         } else {
@@ -165,7 +165,7 @@ private final TopicPartitionOffsetTracker tracker = new SingleTopicPartitionOffs
     @Override
     public Map<TopicPartition, OffsetAndMetadata> preCommit(Map<TopicPartition, OffsetAndMetadata> currentOffsets) {
         assert currentOffsets.size() == 1;
-        tracker.transformPreCommit(currentOffsets, PROBABLY_SAFE_OFFSET_ROLLBACK);
+        tracker.transformPreCommit(currentOffsets, SAFE_OFFSET_ROLLBACK);
         return currentOffsets;
     }
 
