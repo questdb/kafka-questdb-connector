@@ -22,6 +22,7 @@ import org.testcontainers.containers.FixedHostPortGenericContainer;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.containers.wait.strategy.LogMessageWaitStrategy;
+import org.testcontainers.containers.wait.strategy.ShellStrategy;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.math.BigDecimal;
@@ -70,21 +71,22 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         GenericContainer<?> cleanup = new GenericContainer<>("alpine:3.18.4")
                 .withFileSystemBind(dbRoot.toAbsolutePath().toString(), "/var/lib/delete")
                 .withCommand("ls -l /var/lib/delete/")
-                .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("cleanup")));
+                .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("cleanup1")));
         cleanup.start();
         cleanup.stop();
 
         cleanup = new GenericContainer<>("alpine:3.18.4")
                 .withFileSystemBind(dbRoot.toAbsolutePath().toString(), "/var/lib/delete")
                 .withCommand("rm -rf /var/lib/delete/" + directory)
-                .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("cleanup")));
+                .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("cleanup2")))
+                .waitingFor(new ShellStrategy().withCommand("rm -rf /var/lib/delete/" + directory));
         cleanup.start();
         cleanup.stop();
 
         cleanup = new GenericContainer<>("alpine:3.18.4")
                 .withFileSystemBind(dbRoot.toAbsolutePath().toString(), "/var/lib/delete")
                 .withCommand("ls -l /var/lib/delete/")
-                .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("cleanup")));
+                .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("cleanup3")));
         cleanup.start();
         cleanup.stop();
     }
