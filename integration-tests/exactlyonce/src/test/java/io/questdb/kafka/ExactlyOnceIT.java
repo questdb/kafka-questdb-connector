@@ -12,6 +12,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.FixedHostPortGenericContainer;
@@ -56,7 +57,7 @@ public class ExactlyOnceIT {
     private static final int KAFKA_CLUSTER_SIZE = 3;
     private static final int CONNECT_CLUSTER_SIZE = 2;
 
-    @TempDir
+    @TempDir(cleanup = CleanupMode.NEVER)
     static Path persistence;
 
     // we need to locate JARs with QuestDB client and Kafka Connect Connector,
@@ -102,6 +103,8 @@ public class ExactlyOnceIT {
         Stream.of(kafkas).forEach(KafkaContainer::stop);
         Stream.of(connects).forEach(GenericContainer::stop);
         zookeeper.stop();
+
+        io.questdb.std.Files.rmdir(io.questdb.std.str.Path.getThreadLocal(persistence.toAbsolutePath().toString()));
     }
 
     private static GenericContainer<?> newZookeeperContainer() {
