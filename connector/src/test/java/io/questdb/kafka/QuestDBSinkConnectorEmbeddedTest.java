@@ -63,6 +63,20 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @AfterAll
     public static void stopContainer() {
         questDBContainer.stop();
+        deleteFromContainer(questDBDirectory());
+    }
+
+    private static void deleteFromContainer(String directory) {
+        GenericContainer<?> cleanup = new GenericContainer<>("alpine:3.18.4")
+                .withCommand("rm -rf /var/lib/delete")
+                .withFileSystemBind(directory, "/var/lib/delete")
+                .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("cleanup")));
+        cleanup.start();
+        cleanup.stop();
+    }
+
+    private static String questDBDirectory() {
+        return dbRoot.resolve("questdb").toAbsolutePath().toString();
     }
 
     private static GenericContainer<?> questDBContainer;
@@ -79,8 +93,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         } else {
             selfGenericContainer.addExposedPort(QuestDBUtils.QUESTDB_ILP_PORT);
         }
-        String dbRootString = dbRoot.toAbsolutePath().toString();
-        selfGenericContainer = selfGenericContainer.withFileSystemBind(dbRootString, "/var/lib/questdb");
+        selfGenericContainer = selfGenericContainer.withFileSystemBind(questDBDirectory(), "/var/lib/questdb");
         if (DUMP_QUESTDB_CONTAINER_LOGS) {
             selfGenericContainer = selfGenericContainer.withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")));
         }
