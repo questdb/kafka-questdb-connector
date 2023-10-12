@@ -132,8 +132,8 @@ public final class QuestDBSinkTask extends SinkTask {
             if (++batchesSinceLastError == 10) {
                 // why 10? why not to reset the retry counter immediately upon a successful flush()?
                 // there are two reasons for server disconnections:
-                // 1. the server is down / unreachable / other_infrastructure_issues
-                // 2. the client is sending bad data (e.g. pushing a string to a double column)
+                // 1. infrastructure: the server is down / unreachable / other_infrastructure_issues
+                // 2. structural: the client is sending bad data (e.g. pushing a string to a double column)
                 // errors in the latter case are not recoverable. upon receiving bad data the server will *eventually* close the connection,
                 // after a while, the client will notice that the connection is closed and will try to reconnect
                 // if we reset the retry counter immediately upon first successful flush() then we end-up in a loop where we flush bad data,
@@ -434,7 +434,7 @@ public final class QuestDBSinkTask extends SinkTask {
 
     @Override
     public void flush(Map<TopicPartition, OffsetAndMetadata> map) {
-        // not needed as put() flushes after each record
+        // not needed as put() flushes after each batch
     }
 
     @Override
