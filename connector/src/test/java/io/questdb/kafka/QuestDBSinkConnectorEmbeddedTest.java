@@ -63,13 +63,27 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @AfterAll
     public static void stopContainer() {
         questDBContainer.stop();
-        deleteFromContainer(questDBDirectory());
+        deleteFromContainer("questdb");
     }
 
     private static void deleteFromContainer(String directory) {
         GenericContainer<?> cleanup = new GenericContainer<>("alpine:3.18.4")
-                .withCommand("rm -rf /var/lib/delete")
-                .withFileSystemBind(directory, "/var/lib/delete")
+                .withFileSystemBind(dbRoot.toAbsolutePath().toString(), "/var/lib/delete")
+                .withCommand("ls -l /var/lib/delete/")
+                .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("cleanup")));
+        cleanup.start();
+        cleanup.stop();
+
+        cleanup = new GenericContainer<>("alpine:3.18.4")
+                .withFileSystemBind(dbRoot.toAbsolutePath().toString(), "/var/lib/delete")
+                .withCommand("rm -rf /var/lib/delete/" + directory)
+                .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("cleanup")));
+        cleanup.start();
+        cleanup.stop();
+
+        cleanup = new GenericContainer<>("alpine:3.18.4")
+                .withFileSystemBind(dbRoot.toAbsolutePath().toString(), "/var/lib/delete")
+                .withCommand("ls -l /var/lib/delete/")
                 .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("cleanup")));
         cleanup.start();
         cleanup.stop();
