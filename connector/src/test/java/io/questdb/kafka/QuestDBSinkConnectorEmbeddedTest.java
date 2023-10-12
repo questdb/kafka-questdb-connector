@@ -1,5 +1,6 @@
 package io.questdb.kafka;
 
+import io.questdb.std.Files;
 import io.questdb.std.Os;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
@@ -16,6 +17,7 @@ import org.apache.kafka.connect.storage.ConverterType;
 import org.apache.kafka.connect.storage.StringConverter;
 import org.apache.kafka.connect.util.clusters.EmbeddedConnectCluster;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.FixedHostPortGenericContainer;
@@ -53,7 +55,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     private Converter converter;
     private String topicName;
 
-    @TempDir
+    @TempDir(cleanup = CleanupMode.NEVER)
     static Path dbRoot;
 
     @BeforeAll
@@ -64,7 +66,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @AfterAll
     public static void stopContainer() {
         questDBContainer.stop();
-        deleteFromContainer("questdb");
+//        deleteFromContainer("questdb");
+        Files.rmdir(io.questdb.std.str.Path.getThreadLocal(dbRoot.toAbsolutePath().toString()));
     }
 
     private static void deleteFromContainer(String directory) {
