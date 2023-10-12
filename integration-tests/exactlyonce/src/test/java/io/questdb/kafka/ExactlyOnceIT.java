@@ -7,6 +7,7 @@ import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.jetbrains.annotations.NotNull;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -26,6 +27,7 @@ import org.testcontainers.utility.MountableFile;
 
 import java.io.IOException;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -42,6 +44,11 @@ import static java.time.Duration.ofMinutes;
 import static java.time.Duration.ofSeconds;
 
 public class ExactlyOnceIT {
+    private static final int VICTIM_QUESTDB = 0;
+    private static final int VICTIM_CONNECT = 1;
+    private static final int VICTIM_KAFKA = 2;
+    private static final int VICTIMS_TOTAL = VICTIM_KAFKA + 1;
+
     private static final DockerImageName KAFKA_CONTAINER_IMAGE = DockerImageName.parse("confluentinc/cp-kafka:7.5.1");
     private static final DockerImageName ZOOKEEPER_CONTAINER_IMAGE = DockerImageName.parse("confluentinc/cp-zookeeper:7.5.1");
     private static final DockerImageName CONNECT_CONTAINER_IMAGE = DockerImageName.parse("confluentinc/cp-kafka-connect:7.5.1");
@@ -184,7 +191,6 @@ public class ExactlyOnceIT {
     @Test
     public void test() throws Exception {
         String topicName = "mytopic";
-        int recordCount = 5_000_000;
 
         Properties props = new Properties();
         String bootstrapServers = kafkas[0].getBootstrapServers();
@@ -193,46 +199,68 @@ public class ExactlyOnceIT {
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         props.put("include.key", "false");
 
+        int recordCount = 5_000_000;
         new Thread(() -> {
             try (Producer<String, String> producer = new KafkaProducer<>(props)) {
                 for (int i = 0; i < recordCount; i++ ) {
-                    Instant now = Instant.now();
-                    long nanoTs = now.getEpochSecond() * 1_000_000_000 + now.getNano();
-                    UUID uuid = UUID.randomUUID();
-                    int val = ThreadLocalRandom.current().nextInt(100);
-
-                    String jsonVal = "{\"ts\":" + nanoTs + ",\"id\":\"" + uuid + "\",\"val\":" + val + "}";
-                    producer.send(new ProducerRecord<>(topicName, null, jsonVal));
+                    String json = newPayload();
+                    producer.send(new ProducerRecord<>(topicName, null, json));
 
                     // 1% chance of duplicates - we want them to be also deduped by QuestDB
                     if (ThreadLocalRandom.current().nextInt(100) == 0) {
-                        producer.send(new ProducerRecord<>(topicName, null, jsonVal));
+                        producer.send(new ProducerRecord<>(topicName, null, json));
                     }
                 }
             }
         }).start();
 
-        // configure questdb dedups
         QuestDBUtils.assertSql(
                 "{\"ddl\":\"OK\"}",
                 "CREATE TABLE " + topicName + " (ts TIMESTAMP, id UUID, val LONG) timestamp(ts) PARTITION BY DAY WAL DEDUP UPSERT KEYS(ts, id);",
                 questdb.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT),
                 QuestDBUtils.Endpoint.EXEC);
 
+        startConnector();
+
         CyclicBarrier barrier = new CyclicBarrier(2);
+        startKillingRandomContainers(barrier);
+
+        // make sure we have exactly the expected records in QuestDB
+        QuestDBUtils.assertSqlEventually(
+                "\"count\"\r\n"
+                        + recordCount + "\r\n",
+                "select count(*) from " + topicName,
+                600,
+                questHttpPort);
+
+        barrier.await();
+    }
+
+    @NotNull
+    private static String newPayload() {
+        Instant now = Instant.now();
+        long nanoTs = now.getEpochSecond() * 1_000_000_000 + now.getNano();
+        UUID uuid = UUID.randomUUID();
+        int val = ThreadLocalRandom.current().nextInt(100);
+
+        String jsonVal = "{\"ts\":" + nanoTs + ",\"id\":\"" + uuid + "\",\"val\":" + val + "}";
+        return jsonVal;
+    }
+
+    private static void startKillingRandomContainers(CyclicBarrier barrier) {
         new Thread(() -> {
-            while (barrier.getNumberWaiting() == 0) {
+            while (barrier.getNumberWaiting() == 0) { // keep killing them until the checker thread passed the assertion
                 Os.sleep(ThreadLocalRandom.current().nextInt(5_000, 30_000));
-                int victim = ThreadLocalRandom.current().nextInt(3);
+                int victim = ThreadLocalRandom.current().nextInt(VICTIMS_TOTAL);
                 switch (victim) {
-                    case 0: {
+                    case VICTIM_QUESTDB: {
                         questdb.stop();
                         GenericContainer<?> container = newQuestDBContainer();
                         container.start();
                         questdb = container;
                         break;
                     }
-                    case 1: {
+                    case VICTIM_CONNECT: {
                         int n = ThreadLocalRandom.current().nextInt(connects.length);
                         connects[n].stop();
                         GenericContainer<?> container = newConnectContainer(n);
@@ -240,7 +268,7 @@ public class ExactlyOnceIT {
                         connects[n] = container;
                         break;
                     }
-                    case 2: {
+                    case VICTIM_KAFKA: {
                         int n = ThreadLocalRandom.current().nextInt(kafkas.length);
                         kafkas[n].stop();
                         KafkaContainer container = newKafkaContainer(n);
@@ -251,7 +279,7 @@ public class ExactlyOnceIT {
                     }
                 }
             }
-            
+
             try {
                 barrier.await();
             } catch (InterruptedException e) {
@@ -261,7 +289,9 @@ public class ExactlyOnceIT {
                 throw new RuntimeException(e);
             }
         }).start();
+    }
 
+    private static void startConnector() throws IOException, InterruptedException, URISyntaxException {
         String payload = "{\"name\":\"my-connector\",\"config\":{" +
                 "\"tasks.max\":\"4\"," +
                 "\"connector.class\":\"io.questdb.kafka.QuestDBSinkConnector\"," +
@@ -271,7 +301,7 @@ public class ExactlyOnceIT {
                 "\"value.converter.schemas.enable\":\"false\"," +
                 "\"timestamp.field.name\":\"ts\"," +
                 "\"host\":\"questdb:9009\"}" +
-            "}";
+                "}";
 
         HttpResponse<String> response = HttpClient.newBuilder().connectTimeout(ofSeconds(10)).build().send(
                 HttpRequest.newBuilder().POST(HttpRequest.BodyPublishers.ofString(payload))
@@ -283,14 +313,5 @@ public class ExactlyOnceIT {
         if (response.statusCode() != 201) {
             throw new RuntimeException("Failed to create connector: " + response.body());
         }
-
-        QuestDBUtils.assertSqlEventually(
-                "\"count\"\r\n"
-                        + recordCount + "\r\n",
-                "select count(*) from " + topicName,
-                600,
-                questHttpPort);
-
-        barrier.await();
     }
 }
