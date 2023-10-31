@@ -38,7 +38,7 @@ public final class QuestDBSinkTask extends SinkTask {
     private long batchesSinceLastError = 0;
     private DateFormat dataFormat;
     private boolean kafkaTimestampsEnabled;
-    private final TopicPartitionOffsetTracker tracker = new MultiTopicPartitionOffsetTracker();
+    private final OffsetTracker tracker = new MultiOffsetTracker();
 //private final TopicPartitionOffsetTracker tracker = new SingleTopicPartitionOffsetTracker();
 
     @Override

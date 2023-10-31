@@ -7,7 +7,7 @@ import org.apache.kafka.connect.sink.SinkTaskContext;
 import java.util.Collection;
 import java.util.Map;
 
-public interface TopicPartitionOffsetTracker {
+public interface OffsetTracker {
     void onPartitionsOpened(Collection<TopicPartition> partitions);
 
     void onPartitionsClosed(Collection<TopicPartition> partitions);

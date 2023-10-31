@@ -246,8 +246,7 @@ public class ExactlyOnceIT {
         UUID uuid = UUID.randomUUID();
         int val = ThreadLocalRandom.current().nextInt(100);
 
-        String jsonVal = "{\"ts\":" + nanoTs + ",\"id\":\"" + uuid + "\",\"val\":" + val + "}";
-        return jsonVal;
+        return "{\"ts\":" + nanoTs + ",\"id\":\"" + uuid + "\",\"val\":" + val + "}";
     }
 
     private static void startKillingRandomContainers(CyclicBarrier barrier) {

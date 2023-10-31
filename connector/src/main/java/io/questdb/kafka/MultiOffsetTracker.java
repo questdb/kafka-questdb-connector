@@ -10,7 +10,7 @@ import org.apache.kafka.connect.sink.SinkTaskContext;
 import java.util.Collection;
 import java.util.Map;
 
-public final class MultiTopicPartitionOffsetTracker implements TopicPartitionOffsetTracker {
+public final class MultiOffsetTracker implements OffsetTracker {
     private static final int EMPTY = -1;
     private static final int CLOSED = -2;
 
