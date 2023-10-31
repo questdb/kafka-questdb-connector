@@ -97,8 +97,8 @@ public class QuestDBSinkConnectorIT {
 
         connectContainer.registerConnector("my-connector", connector);
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"key\",\"value\"\r\n"
-                + "\"foo\",\"bar\"\r\n", "select key, value from " + topicName);
+        QuestDBUtils.assertSqlEventually( "\"key\",\"value\"\r\n"
+                + "\"foo\",\"bar\"\r\n", "select key, value from " + topicName, questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
 
     }
 }

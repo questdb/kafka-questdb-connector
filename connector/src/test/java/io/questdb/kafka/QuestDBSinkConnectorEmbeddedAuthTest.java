@@ -82,8 +82,9 @@ public class QuestDBSinkConnectorEmbeddedAuthTest {
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\"\r\n"
                         + "\"John\",\"Doe\",42\r\n",
-                "select firstname,lastname,age from " + topicName);
+                "select firstname,lastname,age from " + topicName,
+                questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
     }
 }

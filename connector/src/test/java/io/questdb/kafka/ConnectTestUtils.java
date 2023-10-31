@@ -4,6 +4,7 @@ import org.apache.kafka.connect.json.JsonConverter;
 import org.apache.kafka.connect.runtime.AbstractStatus;
 import org.apache.kafka.connect.runtime.ConnectorConfig;
 import org.apache.kafka.connect.runtime.rest.entities.ConnectorStateInfo;
+import org.apache.kafka.connect.runtime.rest.errors.ConnectRestException;
 import org.apache.kafka.connect.storage.StringConverter;
 import org.apache.kafka.connect.util.clusters.EmbeddedConnectCluster;
 import org.awaitility.Awaitility;
@@ -42,18 +43,22 @@ public final class ConnectTestUtils {
     }
 
     static Map<String, String> baseConnectorProps(GenericContainer<?> questDBContainer, String topicName) {
+        String ilpIUrl = questDBContainer.getHost() + ":" + questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT);
+
         Map<String, String> props = new HashMap<>();
         props.put(ConnectorConfig.CONNECTOR_CLASS_CONFIG, QuestDBSinkConnector.class.getName());
         props.put("topics", topicName);
         props.put(KEY_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
-        props.put("host", questDBContainer.getHost() + ":" + questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT));
+        props.put("host", ilpIUrl);
         return props;
     }
 
     static void assertConnectorTaskState(EmbeddedConnectCluster connect, String connectorName, AbstractStatus.State expectedState) {
-        ConnectorStateInfo info = connect.connectorStatus(connectorName);
-        if (info == null) {
+        ConnectorStateInfo info = null;
+        try {
+            info = connect.connectorStatus(connectorName);
+        } catch (ConnectRestException e) {
             fail("Connector " + connectorName + " not found");
         }
         List<ConnectorStateInfo.TaskState> taskStates = info.tasks();

@@ -1,9 +1,12 @@
 package io.questdb.kafka;
 
+import io.questdb.std.Files;
+import io.questdb.std.Os;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.connect.data.Date;
 import org.apache.kafka.connect.data.*;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.json.JsonConverter;
@@ -13,23 +16,23 @@ import org.apache.kafka.connect.storage.ConverterConfig;
 import org.apache.kafka.connect.storage.ConverterType;
 import org.apache.kafka.connect.storage.StringConverter;
 import org.apache.kafka.connect.util.clusters.EmbeddedConnectCluster;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.io.CleanupMode;
+import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.FixedHostPortGenericContainer;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.containers.wait.strategy.LogMessageWaitStrategy;
-import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.math.BigDecimal;
-import java.util.Calendar;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.TimeZone;
+import java.nio.file.Path;
+import java.time.Instant;
+import java.util.*;
+import java.util.concurrent.BrokenBarrierException;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 import static java.util.Collections.singletonMap;
@@ -42,33 +45,58 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 @Testcontainers
 public final class QuestDBSinkConnectorEmbeddedTest {
+    private static int httpPort = -1;
+    private static int ilpPort = -1;
+    private static final String OFFICIAL_QUESTDB_DOCKER = "questdb/questdb:nightly";
+    private static final boolean DUMP_QUESTDB_CONTAINER_LOGS = true;
+
     private EmbeddedConnectCluster connect;
     private Converter converter;
     private String topicName;
 
-    @Container
-    private static GenericContainer<?> questDBContainer = newQuestDbConnector();
+    @TempDir(cleanup = CleanupMode.NEVER)
+    static Path dbRoot;
 
-    private static GenericContainer<?> newQuestDbConnector() {
-        return newQuestDbConnector(null, null);
+    @BeforeAll
+    public static void createContainer() {
+        questDBContainer = newQuestDbConnector();
     }
 
-    private static GenericContainer<?> newQuestDbConnector(Integer httpPort, Integer ilpPort) {
-        FixedHostPortGenericContainer<?> selfGenericContainer = new FixedHostPortGenericContainer<>("questdb/questdb:6.6.1");
-        if (httpPort != null) {
-            selfGenericContainer.withFixedExposedPort(httpPort, QuestDBUtils.QUESTDB_HTTP_PORT);
+    @AfterAll
+    public static void stopContainer() {
+        questDBContainer.stop();
+        Files.rmdir(io.questdb.std.str.Path.getThreadLocal(dbRoot.toAbsolutePath().toString()));
+    }
+
+    private static String questDBDirectory() {
+        return dbRoot.resolve("questdb").toAbsolutePath().toString();
+    }
+
+    private static GenericContainer<?> questDBContainer;
+
+    private static GenericContainer<?> newQuestDbConnector() {
+        FixedHostPortGenericContainer<?> selfGenericContainer = new FixedHostPortGenericContainer<>(OFFICIAL_QUESTDB_DOCKER);
+        if (httpPort != -1) {
+            selfGenericContainer = selfGenericContainer.withFixedExposedPort(httpPort, QuestDBUtils.QUESTDB_HTTP_PORT);
         } else {
             selfGenericContainer.addExposedPort(QuestDBUtils.QUESTDB_HTTP_PORT);
         }
-        if (ilpPort != null) {
-            selfGenericContainer.withFixedExposedPort(ilpPort, QuestDBUtils.QUESTDB_ILP_PORT);
+        if (ilpPort != -1) {
+            selfGenericContainer = selfGenericContainer.withFixedExposedPort(ilpPort, QuestDBUtils.QUESTDB_ILP_PORT);
         } else {
             selfGenericContainer.addExposedPort(QuestDBUtils.QUESTDB_ILP_PORT);
         }
-        selfGenericContainer.setWaitStrategy(new LogMessageWaitStrategy().withRegEx(".*server-main enjoy.*"));
-        return selfGenericContainer.withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
-                .withEnv("QDB_CAIRO_COMMIT_LAG", "100")
-                .withEnv("JAVA_OPTS", "-Djava.locale.providers=JRE,SPI");
+        selfGenericContainer = selfGenericContainer.withFileSystemBind(questDBDirectory(), "/var/lib/questdb");
+        if (DUMP_QUESTDB_CONTAINER_LOGS) {
+            selfGenericContainer = selfGenericContainer.withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")));
+        }
+        selfGenericContainer.setWaitStrategy(new LogMessageWaitStrategy().withRegEx(".*server-main.*"));
+        selfGenericContainer.start();
+
+        httpPort = selfGenericContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT);
+        ilpPort = selfGenericContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT);
+
+        return selfGenericContainer;
     }
 
     @BeforeEach
@@ -78,8 +106,13 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         jsonConverter.configure(singletonMap(ConverterConfig.TYPE_CONFIG, ConverterType.VALUE.getName()));
         converter = jsonConverter;
 
+
+        Map<String, String> props = new HashMap<>();
+        props.put("connector.client.config.override.policy", "All");
         connect = new EmbeddedConnectCluster.Builder()
                 .name("questdb-connect-cluster")
+                .workerProps(props)
+                .numWorkers(4)
                 .build();
 
         connect.start();
@@ -109,9 +142,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+        QuestDBUtils.assertSqlEventually( "\"firstname\",\"lastname\",\"age\"\r\n"
                         + "\"John\",\"Doe\",42\r\n",
-                "select firstname,lastname,age from " + topicName);
+                "select firstname,lastname,age from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -127,9 +161,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.kafka().produce(topicName, "key", "{\"not valid json}");
         connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\"\r\n"
                         + "\"John\",\"Doe\",42\r\n",
-                "select firstname,lastname,age from " + topicName);
+                "select firstname,lastname,age from " + topicName,
+                httpPort);
 
         ConsumerRecords<byte[], byte[]> fetchedRecords = connect.kafka().consume(1, 5000, "dlq");
         Assertions.assertEquals(1, fetchedRecords.count());
@@ -158,9 +193,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\"\r\n"
                         + "\"John\",\"Doe\",42\r\n",
-                "select firstname,lastname,age from " + topicName);
+                "select firstname,lastname,age from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -176,9 +212,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         // creates a record with 'age' as long
         connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\"\r\n"
                         + "\"John\",\"Doe\",42\r\n",
-                "select firstname,lastname,age from " + topicName);
+                "select firstname,lastname,age from " + topicName,
+                httpPort);
 
         for (int i = 0; i < 50; i++) {
             // injects a record with 'age' as string
@@ -208,14 +245,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.kafka().produce(topicName, "key1", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
 
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\"\r\n"
                         + "\"John\",\"Doe\",42\r\n",
-                "select firstname,lastname,age from " + topicName);
+                "select firstname,lastname,age from " + topicName,
+                httpPort);
 
-        // we need to get mapped ports, becasue we are going to kill the container and restart it again
-        // and we need the same mapping otherwise the Kafka connect will not be able to re-connect to it
-        Integer httpPort = questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT);
-        Integer ilpPort = questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT);
         questDBContainer.stop();
         // insert a few records while the QuestDB is down
         for (int i = 0; i < 10; i++) {
@@ -224,16 +258,16 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         }
 
         // restart QuestDB
-        questDBContainer = newQuestDbConnector(httpPort, ilpPort);
-        questDBContainer.start();
+        questDBContainer = newQuestDbConnector();
         for (int i = 0; i < 50; i++) {
             connect.kafka().produce(topicName, "key3", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":" + i + "}");
             Thread.sleep(100);
         }
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\"\r\n"
                         + "\"John\",\"Doe\",49\r\n",
-                "select firstname,lastname,age from " + topicName + " where age = 49");
+                "select firstname,lastname,age from " + topicName + " where age = 49",
+                httpPort);
     }
 
     @Test
@@ -312,10 +346,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.kafka().produce(topicName, "p1", new String(converter.fromConnectData(topicName, schema, p1)));
         connect.kafka().produce(topicName, "p2", new String(converter.fromConnectData(topicName, schema, p2)));
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\",\"vegan\",\"height\",\"birth\"\r\n"
+        QuestDBUtils.assertSqlEventually( "\"firstname\",\"lastname\",\"age\",\"vegan\",\"height\",\"birth\"\r\n"
                         + "\"John\",\"Doe\",42,true,1.8,\"2022-10-23T13:53:59.123000Z\"\r\n"
                         + "\"Jane\",\"Doe\",41,false,1.6,\"2021-10-23T13:53:59.123000Z\"\r\n",
-                "select firstname,lastname,age,vegan,height,birth from " + topicName);
+                "select firstname,lastname,age,vegan,height,birth from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -336,16 +371,104 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 .put("lastname", "Doe")
                 .put("age", (byte) 42);
 
-        QuestDBUtils.assertSql(questDBContainer,
-                "{\"ddl\":\"OK\"}\n",
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
                 "create table " + topicName + " (firstname symbol, lastname symbol, age int)",
+                httpPort,
                 QuestDBUtils.Endpoint.EXEC);
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\",\"key\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\",\"key\"\r\n"
                         + "\"John\",\"Doe\",42,\"key\"\r\n",
-                "select * from " + topicName);
+                "select * from " + topicName,
+                httpPort);
+    }
+
+    @Test
+    public void testExactlyOnce_withDedup() throws BrokenBarrierException, InterruptedException {
+        connect.kafka().createTopic(topicName, 4);
+
+        Schema schema = SchemaBuilder.struct().name("com.example.Event")
+                .field("ts", Schema.INT64_SCHEMA)
+                .field("id", Schema.STRING_SCHEMA)
+                .field("type", Schema.INT64_SCHEMA)
+                .build();
+
+        // async inserts to Kafka
+        long recordCount = 1_000_000;
+        Map<String, Object> prodProps = new HashMap<>();
+        new Thread(() -> {
+            try (KafkaProducer<byte[], byte[]> producer = connect.kafka().createProducer(prodProps)) {
+                for (long i = 0; i < recordCount; i++) {
+                    Instant now = Instant.now();
+                    long nanoTs = now.getEpochSecond() * 1_000_000_000 + now.getNano();
+                    Struct struct = new Struct(schema)
+                            .put("ts", nanoTs)
+                            .put("id", UUID.randomUUID().toString())
+                            .put("type", (i % 5));
+
+                    byte[] value = new String(converter.fromConnectData(topicName, schema, struct)).getBytes();
+                    producer.send(new ProducerRecord<>(topicName, null, null, value));
+
+                    // 1% chance of duplicates - we want them to be also deduped by QuestDB
+                    if (ThreadLocalRandom.current().nextInt(100) == 0) {
+                        producer.send(new ProducerRecord<>(topicName, null, null, value));
+                    }
+
+                }
+            }
+        }).start();
+
+
+        // configure questdb dedups
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
+                "CREATE TABLE " + topicName + " (ts TIMESTAMP, id UUID, type LONG) timestamp(ts) PARTITION BY DAY WAL DEDUP UPSERT KEYS(ts, id);",
+                httpPort,
+                QuestDBUtils.Endpoint.EXEC);
+
+        // start connector
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "ts");
+        props.put(QuestDBSinkConnectorConfig.DEDUPLICATION_REWIND_CONFIG, "150000");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // restart QuestDB every 15 seconds
+        CyclicBarrier barrier = new CyclicBarrier(2);
+        new Thread(() -> {
+            while (barrier.getNumberWaiting() == 0) {
+                Os.sleep(15_000);
+                restartQuestDB();
+            }
+            try {
+                barrier.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(e);
+            } catch (BrokenBarrierException e) {
+                // shouldn't happen
+                throw new RuntimeException(e);
+            }
+        }).start();
+
+        // make sure we have all records in the table
+        QuestDBUtils.assertSqlEventually(
+                "\"count\"\r\n"
+                        + recordCount + "\r\n",
+                "select count(*) from " + topicName,
+                600,
+                httpPort);
+
+        // await the restarter thread so we don't leave dangling threads behind
+        barrier.await();
+    }
+
+    private static void restartQuestDB() {
+        questDBContainer.stop();
+        questDBContainer = newQuestDbConnector();
     }
 
     @Test
@@ -372,11 +495,12 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.kafka().produce(topicName, "bar", "{\"firstname\":\"Jane\",\"lastname\":\"Doe\",\"birth\":" + birthInMicros + "}");
         connect.kafka().produce(topicName, "baz", "{\"firstname\":\"Jack\",\"lastname\":\"Doe\",\"birth\":" + birthInNanos + "}");
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"timestamp\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"timestamp\"\r\n"
                         + "\"John\",\"Doe\",\"2022-10-23T13:53:59.123000Z\"\r\n"
                         + "\"Jane\",\"Doe\",\"2022-10-23T13:53:59.123000Z\"\r\n"
                         + "\"Jack\",\"Doe\",\"2022-10-23T13:53:59.123000Z\"\r\n",
-                "select firstname,lastname,timestamp from " + topicName);
+                "select firstname,lastname,timestamp from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -428,10 +552,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.kafka().produce(topicName, "foo", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"birth\":0}");
         connect.kafka().produce(topicName, "bar", "{\"firstname\":\"Jane\",\"lastname\":\"Doe\",\"birth\":" + birthTarget + "}");
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"timestamp\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"timestamp\"\r\n"
                         + "\"John\",\"Doe\",\"1970-01-01T00:00:00.000000Z\"\r\n"
                         + "\"Jane\",\"Doe\",\"2206-11-20T17:46:39.999000Z\"\r\n",
-                "select firstname,lastname,timestamp from " + topicName);
+                "select firstname,lastname,timestamp from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -458,9 +583,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
-        QuestDBUtils.assertSql(questDBContainer,
-                "{\"ddl\":\"OK\"}\n",
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
                 "create table " + topicName + " (firstname string, lastname string, born timestamp) timestamp(born)",
+                httpPort,
                 QuestDBUtils.Endpoint.EXEC);
 
         java.util.Date birth = new Calendar.Builder()
@@ -476,9 +602,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
             producer.send(record);
         }
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"born\"\r\n" +
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"born\"\r\n" +
                         "\"John\",\"Doe\",\"2022-10-23T13:53:59.123000Z\"\r\n",
-                "select * from " + topicName);
+                "select * from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -504,9 +631,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
-        QuestDBUtils.assertSql(questDBContainer,
-                "{\"ddl\":\"OK\"}\n",
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
                 "create table " + topicName + " (firstname string, lastname string, death timestamp, born timestamp) timestamp(born)",
+                httpPort,
                 QuestDBUtils.Endpoint.EXEC);
 
         String birthTimestamp = "1985-08-02 16:41:55.402 UTC";
@@ -518,9 +646,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                         + ",\"born\":\"" + birthTimestamp + "\"}"
         );
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"death\",\"born\"\r\n" +
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"death\",\"born\"\r\n" +
                         "\"John\",\"Doe\",\"2023-08-02T16:41:55.402000Z\",\"1985-08-02T16:41:55.402000Z\"\r\n",
-                "select * from " + topicName);
+                "select * from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -560,9 +689,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"death\",\"timestamp\"\r\n" +
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"death\",\"timestamp\"\r\n" +
                         "\"John\",\"Doe\",\"2023-08-02T16:41:55.402000Z\",\"1985-08-02T16:41:55.402000Z\"\r\n",
-                "select * from " + topicName);
+                "select * from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -582,16 +712,18 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 .put("lastname", "Doe")
                 .put("age", (byte) 42);
 
-        QuestDBUtils.assertSql(questDBContainer,
-                "{\"ddl\":\"OK\"}\n",
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
                 "create table " + topicName + " (firstname string, lastname string, age int)",
+                httpPort,
                 QuestDBUtils.Endpoint.EXEC);
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\",\"key\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\",\"key\"\r\n"
                         + "\"John\",\"Doe\",42,\"key\"\r\n",
-                "select * from " + topicName);
+                "select * from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -605,9 +737,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "foo", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"birth\":433774466123}");
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"key\",\"firstname\",\"lastname\",\"timestamp\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"key\",\"firstname\",\"lastname\",\"timestamp\"\r\n"
                         + "\"foo\",\"John\",\"Doe\",\"1983-09-30T12:54:26.123000Z\"\r\n",
-                "select * from " + topicName);
+                "select * from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -626,9 +759,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "foo", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"birth\":\"1989-09-23T10:25:33.107Z\"}");
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"key\",\"firstname\",\"lastname\",\"timestamp\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"key\",\"firstname\",\"lastname\",\"timestamp\"\r\n"
                         + "\"foo\",\"John\",\"Doe\",\"1989-09-23T10:25:33.107000Z\"\r\n",
-                "select * from " + topicName);
+                "select * from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -658,9 +792,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"key\",\"firstname\",\"lastname\",\"timestamp\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"key\",\"firstname\",\"lastname\",\"timestamp\"\r\n"
                         + "\"key\",\"John\",\"Doe\",\"2022-10-23T13:53:59.123000Z\"\r\n",
-                "select * from " + topicName);
+                "select * from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -691,9 +826,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"timestamp\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"timestamp\"\r\n"
                         + "\"John\",\"Doe\",\"2022-10-23T13:53:59.123000Z\"\r\n",
-                "select * from " + topicName);
+                "select * from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -705,9 +841,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\"\r\n"
                         + "\"John\",\"Doe\",42\r\n",
-                "select firstname,lastname,age from " + topicName);
+                "select firstname,lastname,age from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -721,10 +858,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
         connect.kafka().produce(topicName, "key", "{\"firstname\":\"Jane\",\"lastname\":\"Doe\",\"age\":42.5}");
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\"\r\n"
                         + "\"John\",\"Doe\",42.0\r\n"
                         + "\"Jane\",\"Doe\",42.5\r\n",
-                "select firstname,lastname,age from " + topicName);
+                "select firstname,lastname,age from " + topicName,
+                httpPort);
     }
 
 
@@ -759,9 +897,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\",\"key\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\",\"key\"\r\n"
                         + "\"John\",\"Doe\",42,\"key\"\r\n",
-                "select firstname, lastname, age, key from " + topicName);
+                "select firstname, lastname, age, key from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -777,9 +916,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
-        QuestDBUtils.assertSql(questDBContainer,
-                "{\"ddl\":\"OK\"}\n",
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
                 "create table " + topicName + " (firstname string, lastname string, death timestamp, born timestamp) timestamp(born)",
+                httpPort,
                 QuestDBUtils.Endpoint.EXEC);
 
         String birthTimestamp = "1985-08-02 16:41:55.402095 UTC";
@@ -791,9 +931,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                         + ",\"born\":\"" + birthTimestamp + "\"}"
         );
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"death\",\"born\"\r\n" +
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"death\",\"born\"\r\n" +
                         "\"John\",\"Doe\",\"2023-08-02T16:41:55.402095Z\",\"1985-08-02T16:41:55.402095Z\"\r\n",
-                "select * from " + topicName);
+                "select * from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -808,9 +949,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
-        QuestDBUtils.assertSql(questDBContainer,
-                "{\"ddl\":\"OK\"}\n",
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
                 "create table " + topicName + " (firstname string, lastname string, death timestamp, born timestamp) timestamp(born)",
+                httpPort,
                 QuestDBUtils.Endpoint.EXEC);
 
         String birthTimestamp = "1985-08-02T16:41:55.402095Z";
@@ -822,9 +964,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                         + ",\"born\":\"" + birthTimestamp + "\"}"
         );
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"death\",\"born\"\r\n" +
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"death\",\"born\"\r\n" +
                         "\"John\",\"Doe\",\"2023-08-02T16:41:55.402095Z\",\"1985-08-02T16:41:55.402095Z\"\r\n",
-                "select * from " + topicName);
+                "select * from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -841,9 +984,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "foo", "bar");
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"col_key\",\"col_value\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"col_key\",\"col_value\"\r\n"
                         + "\"foo\",\"bar\"\r\n",
-                "select col_key, col_value from " + topicName);
+                "select col_key, col_value from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -866,9 +1010,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"key\",\"firstname\",\"lastname\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"key\",\"firstname\",\"lastname\"\r\n"
                         + "\"key\",\"John\",\"Doe\"\r\n",
-                "select key, firstname, lastname from " + topicName);
+                "select key, firstname, lastname from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -883,9 +1028,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "foo", "bar");
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"key\",\"value\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"key\",\"value\"\r\n"
                         + "\"foo\",\"bar\"\r\n",
-                "select key, value from " + topicName);
+                "select key, value from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -908,9 +1054,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         String json = new String(converter.fromConnectData(topicName, schema, struct));
         connect.kafka().produce(topicName, json, json);
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"key_firstname\",\"key_lastname\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"key_firstname\",\"key_lastname\"\r\n"
                         + "\"John\",\"Doe\",\"John\",\"Doe\"\r\n",
-                "select firstname, lastname, key_firstname, key_lastname from " + topicName);
+                "select firstname, lastname, key_firstname, key_lastname from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -935,9 +1082,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         String json = new String(converter.fromConnectData(topicName, schema, struct));
         connect.kafka().produce(topicName, json, "foo");
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"value\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"value\"\r\n"
                         + "\"John\",\"Doe\",\"foo\"\r\n",
-                "select firstname, lastname, value from " + topicName);
+                "select firstname, lastname, value from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -961,9 +1109,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         String json = new String(converter.fromConnectData(topicName, schema, struct));
         connect.kafka().produce(topicName, json, "foo");
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"key_firstname\",\"key_lastname\",\"value\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"key_firstname\",\"key_lastname\",\"value\"\r\n"
                         + "\"John\",\"Doe\",\"foo\"\r\n",
-                "select key_firstname, key_lastname, value from " + topicName);
+                "select key_firstname, key_lastname, value from " + topicName,
+                httpPort);
     }
 
 
@@ -988,9 +1137,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\"\r\n"
                         + "\"John\",\"Doe\",42\r\n",
-                "select firstname,lastname,age from " + tableName);
+                "select firstname,lastname,age from " + tableName,
+                httpPort);
     }
 
     @Test
@@ -1037,9 +1187,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"firstname\",\"lastname\",\"age\",\"col_timestamp\",\"col_date\",\"col_time\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\",\"col_timestamp\",\"col_date\",\"col_time\"\r\n"
                         + "\"John\",\"Doe\",42,\"2022-10-23T13:53:59.123000Z\",\"2022-10-23T00:00:00.000000Z\",50039123\r\n",
-                "select firstname,lastname,age, col_timestamp, col_date, col_time from " + topicName);
+                "select firstname,lastname,age, col_timestamp, col_date, col_time from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -1093,9 +1244,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         String value = new String(converter.fromConnectData(topicName, personSchema, person));
         connect.kafka().produce(topicName, "key", value);
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"name_firstname\",\"name_lastname\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"name_firstname\",\"name_lastname\"\r\n"
                         + "\"John\",\"Doe\"\r\n",
-                "select name_firstname, name_lastname from " + topicName);
+                "select name_firstname, name_lastname from " + topicName,
+                httpPort);
     }
 
     @Test
@@ -1135,8 +1287,9 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         String value = new String(converter.fromConnectData(topicName, coupleSchema, couple));
         connect.kafka().produce(topicName, "key", value);
 
-        QuestDBUtils.assertSqlEventually(questDBContainer, "\"partner1_name_firstname\",\"partner1_name_lastname\",\"partner2_name_firstname\",\"partner2_name_lastname\"\r\n"
+        QuestDBUtils.assertSqlEventually("\"partner1_name_firstname\",\"partner1_name_lastname\",\"partner2_name_firstname\",\"partner2_name_lastname\"\r\n"
                         + "\"John\",\"Doe\",\"Jane\",\"Doe\"\r\n",
-                "select partner1_name_firstname, partner1_name_lastname, partner2_name_firstname, partner2_name_lastname from " + topicName);
+                "select partner1_name_firstname, partner1_name_lastname, partner2_name_firstname, partner2_name_lastname from " + topicName,
+                httpPort);
     }
 }

@@ -4,7 +4,6 @@ import okhttp3.ConnectionSpec;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
-import org.testcontainers.containers.GenericContainer;
 
 import java.io.IOException;
 import java.net.URLEncoder;
@@ -43,23 +42,32 @@ public final class QuestDBUtils {
 
     }
 
-    public static void assertSqlEventually(GenericContainer<?> questdbContainer, String expectedResult, String query) {
-        await().atMost(QUERY_WAITING_TIME_SECONDS, TimeUnit.SECONDS).untilAsserted(() -> assertSql(questdbContainer, expectedResult, query));
+    public static void assertSqlEventually(String expectedResult, String query, int timeoutSeconds, int port) {
+        await().atMost(timeoutSeconds, TimeUnit.SECONDS).untilAsserted(() -> assertSql(expectedResult, query, port));
     }
 
-    public static void assertSql(GenericContainer<?> questdbContainer, String expectedResult, String query) {
-        assertSql(questdbContainer, expectedResult, query, Endpoint.EXPORT);
+    public static void assertSqlEventually(String expectedResult, String query, int port) {
+        await().atMost(QUERY_WAITING_TIME_SECONDS, TimeUnit.SECONDS).untilAsserted(() -> assertSql(expectedResult, query, port));
     }
 
-    public static void assertSql(GenericContainer<?> questdbContainer, String expectedResult, String query, Endpoint endpoint) {
-        try (Response response = executeQuery(questdbContainer, query, endpoint)) {
+    public static void assertSql(String expectedResult, String query, int port) {
+        assertSql(expectedResult, query, port, Endpoint.EXPORT);
+    }
+
+    public static void assertSql(String expectedResult, String query, int port, Endpoint endpoint) {
+        try (Response response = executeQuery(port, query, endpoint)) {
             if (response.code() != 200) {
                 fail("Query failed, returned code " + response.code());
             }
             try (okhttp3.ResponseBody body = response.body()) {
                 if (body != null) {
                     String bodyString = body.string();
-                    assertEquals(expectedResult, bodyString);
+                    try {
+                        assertEquals(expectedResult, bodyString);
+                    } catch (AssertionError e) {
+                        System.out.println("Received response: " + bodyString);
+                        throw e;
+                    }
                 }
             }
         } catch (IOException e) {
@@ -67,9 +75,9 @@ public final class QuestDBUtils {
         }
     }
 
-    private static Response executeQuery(GenericContainer<?> questContainer, String query, Endpoint endpoint) throws IOException {
+    private static Response executeQuery(int port, String query, Endpoint endpoint) throws IOException {
         String encodedQuery = URLEncoder.encode(query, "UTF-8");
-        String baseUrl = "http://" + questContainer.getHost() + ":" + questContainer.getMappedPort(QUESTDB_HTTP_PORT);
+        String baseUrl = "http://localhost:" + port;
         Request request = new Request.Builder()
                 .url(baseUrl + "/" + endpoint.endpoint + "?query=" + encodedQuery)
                 .build();
