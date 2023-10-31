@@ -301,6 +301,7 @@ public class ExactlyOnceIT {
                 "\"value.converter\":\"org.apache.kafka.connect.json.JsonConverter\"," +
                 "\"topics\":\"mytopic\"," +
                 "\"value.converter.schemas.enable\":\"false\"," +
+                "\"dedup.rewind.offset\":\"150000\"," +
                 "\"timestamp.field.name\":\"ts\"," +
                 "\"host\":\"questdb:9009\"}" +
                 "}";
