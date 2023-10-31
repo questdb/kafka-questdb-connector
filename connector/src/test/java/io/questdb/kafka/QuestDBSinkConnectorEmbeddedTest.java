@@ -432,6 +432,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "ts");
+        props.put(QuestDBSinkConnectorConfig.DEDUPLICATION_REWIND_CONFIG, "150000");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 

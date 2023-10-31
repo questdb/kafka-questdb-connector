@@ -21,7 +21,6 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 public final class QuestDBSinkTask extends SinkTask {
-    private static final int SAFE_OFFSET_ROLLBACK = 150_000;
     private static final char STRUCT_FIELD_SEPARATOR = '_';
     private static final String PRIMITIVE_KEY_FALLBACK_NAME = "key";
     private static final String PRIMITIVE_VALUE_FALLBACK_NAME = "value";
@@ -38,8 +37,8 @@ public final class QuestDBSinkTask extends SinkTask {
     private long batchesSinceLastError = 0;
     private DateFormat dataFormat;
     private boolean kafkaTimestampsEnabled;
-    private final OffsetTracker tracker = new MultiOffsetTracker();
-//private final TopicPartitionOffsetTracker tracker = new SingleTopicPartitionOffsetTracker();
+    private OffsetTracker tracker = new MultiOffsetTracker();
+    private long deduplicationRewindOffset;
 
     @Override
     public String version() {
@@ -49,6 +48,13 @@ public final class QuestDBSinkTask extends SinkTask {
     @Override
     public void start(Map<String, String> map) {
         this.config = new QuestDBSinkConnectorConfig(map);
+        this.deduplicationRewindOffset = config.getDeduplicationRewindOffset();
+        if (deduplicationRewindOffset == 0) {
+            tracker = new EmptyOffsetTracker();
+        } else {
+            tracker = new MultiOffsetTracker();
+        }
+
         String timestampStringFields = config.getTimestampStringFields();
         if (timestampStringFields != null) {
             stringTimestampColumns = new HashSet<>();
@@ -153,7 +159,7 @@ public final class QuestDBSinkTask extends SinkTask {
             closeSenderSilently();
             sender = null;
             log.debug("Sender exception, retrying in {} ms", config.getRetryBackoffMs());
-            tracker.configureSafeOffsets(context, SAFE_OFFSET_ROLLBACK);
+            tracker.configureSafeOffsets(context, deduplicationRewindOffset);
             context.timeout(config.getRetryBackoffMs());
             throw new RetriableException(e);
         } else {
@@ -164,7 +170,7 @@ public final class QuestDBSinkTask extends SinkTask {
 
     @Override
     public Map<TopicPartition, OffsetAndMetadata> preCommit(Map<TopicPartition, OffsetAndMetadata> currentOffsets) {
-        tracker.transformPreCommit(currentOffsets, SAFE_OFFSET_ROLLBACK);
+        tracker.transformPreCommit(currentOffsets, deduplicationRewindOffset);
         return currentOffsets;
     }
 
