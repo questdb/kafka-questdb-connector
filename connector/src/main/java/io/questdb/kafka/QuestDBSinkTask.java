@@ -97,6 +97,9 @@ public final class QuestDBSinkTask extends SinkTask {
         Sender.LineSenderBuilder builder = Sender.builder().address(config.getHost());
         if (config.isTls()) {
             builder.enableTls();
+            if ("insecure".equals(config.getTlsValidationMode())) {
+                builder.advancedTls().disableCertificateValidation();
+            }
         }
         if (config.getToken() != null) {
             String username = config.getUsername();

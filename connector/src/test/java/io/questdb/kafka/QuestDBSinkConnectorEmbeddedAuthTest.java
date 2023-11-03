@@ -8,12 +8,17 @@ import org.apache.kafka.connect.storage.Converter;
 import org.apache.kafka.connect.storage.ConverterConfig;
 import org.apache.kafka.connect.storage.ConverterType;
 import org.apache.kafka.connect.util.clusters.EmbeddedConnectCluster;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.FixedHostPortGenericContainer;
 import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.Network;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
+import org.testcontainers.containers.wait.strategy.HostPortWaitStrategy;
 import org.testcontainers.containers.wait.strategy.LogMessageWaitStrategy;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -33,17 +38,38 @@ public class QuestDBSinkConnectorEmbeddedAuthTest {
     private static final String TEST_USER_TOKEN = "UvuVb1USHGRRT08gEnwN2zGZrvM4MsLQ5brgF6SVkAw=";
     private static final String TEST_USER_NAME = "testUser1";
 
+    private final static Network network = Network.newNetwork();
+
     @Container
-    private static GenericContainer<?> questDBContainer = newQuestDbConnector();
+    private static final GenericContainer<?> questDBContainer = newQuestDbConnector();
+    @Container
+    private static final GenericContainer<?> tlsProxy = newTlsProxyContainer();
 
     private static GenericContainer<?> newQuestDbConnector() {
-        FixedHostPortGenericContainer<?> container = new FixedHostPortGenericContainer<>("questdb/questdb:7.3");
+        FixedHostPortGenericContainer<?> container = new FixedHostPortGenericContainer<>("questdb/questdb:7.3.3");
         container.addExposedPort(QuestDBUtils.QUESTDB_HTTP_PORT);
         container.addExposedPort(QuestDBUtils.QUESTDB_ILP_PORT);
         container.setWaitStrategy(new LogMessageWaitStrategy().withRegEx(".*server-main enjoy.*"));
-        container.withCopyFileToContainer(MountableFile.forClasspathResource("/authDb.txt"), "/var/lib/questdb/conf/authDb.txt");
-        container.withEnv("QDB_LINE_TCP_AUTH_DB_PATH", "conf/authDb.txt");
+        container.withCopyFileToContainer(MountableFile.forClasspathResource("/authDb.txt"), "/var/lib/questdb/conf/authDb.txt")
+                .withEnv("QDB_LINE_TCP_AUTH_DB_PATH", "conf/authDb.txt")
+                .withNetwork(network)
+                .withNetworkAliases("questdb");
         return container.withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")));
+    }
+
+    public static GenericContainer<?> newTlsProxyContainer() {
+        return new GenericContainer<>("hitch")
+                .withCommand("--backend=[questdb]:9009 --write-proxy-v2=off")
+                .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("hitch")))
+                .withExposedPorts(443)
+                .withNetwork(network)
+                .dependsOn(questDBContainer)
+                .waitingFor(new HostPortWaitStrategy().forPorts(443));
+    }
+
+    @AfterAll
+    public static void stopTLS() {
+        tlsProxy.stop();
     }
 
     @BeforeEach
@@ -60,12 +86,25 @@ public class QuestDBSinkConnectorEmbeddedAuthTest {
         connect.start();
     }
 
-    @Test
-    public void testSmoke() {
+    @AfterEach
+    public void tearDown() {
+        connect.stop();
+    }
+
+    @ParameterizedTest(name = "useTls = {0}")
+    @ValueSource(booleans = {false, true})
+    public void testSmoke(boolean useTls) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
         props.put(QuestDBSinkConnectorConfig.USERNAME, TEST_USER_NAME);
         props.put(QuestDBSinkConnectorConfig.TOKEN, TEST_USER_TOKEN);
+
+        if (useTls) {
+            props.put(QuestDBSinkConnectorConfig.TLS, "true");
+            props.put(QuestDBSinkConnectorConfig.TLS_VALIDATION_MODE_CONFIG, "insecure");
+            // override the host to point to the TLS proxy
+            props.put("host", "localhost:" + tlsProxy.getMappedPort(443));
+        }
 
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);

@@ -9,10 +9,7 @@ import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.config.types.Password;
 import org.apache.kafka.connect.errors.ConnectException;
 
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 public final class QuestDBSinkConnectorConfig extends AbstractConfig {
@@ -60,6 +57,9 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public static final String TLS = "tls";
     public static final String TLS_DOC = "Use TLS for connecting to QuestDB";
+
+    public static final String TLS_VALIDATION_MODE_CONFIG = "tls.validation.mode";
+    public static final String TLS_VALIDATION_MODE_DOC = "TLS validation mode. Possible values: default, insecure";
 
     public static final String RETRY_BACKOFF_MS = "retry.backoff.ms";
     private static final String RETRY_BACKOFF_MS_DOC = "The time in milliseconds to wait following an error before a retry attempt is made";
@@ -109,11 +109,16 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(TIMESTAMP_FORMAT, Type.STRING, DEFAULT_TIMESTAMP_FORMAT, TimestampFormatValidator.INSTANCE, Importance.MEDIUM, TIMESTAMP_FORMAT_DOC)
                 .define(TIMESTAMP_STRING_FIELDS, Type.STRING, null, Importance.MEDIUM, TIMESTAMP_STRING_FIELDS_DOC)
                 .define(DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG, Type.BOOLEAN, false, Importance.MEDIUM, DESIGNATED_TIMESTAMP_KAFKA_NATIVE_DOC)
-                .define(DEDUPLICATION_REWIND_CONFIG, Type.LONG, 0, Importance.MEDIUM, DEDUPLICATION_REWIND_DOC);
+                .define(DEDUPLICATION_REWIND_CONFIG, Type.LONG, 0, Importance.MEDIUM, DEDUPLICATION_REWIND_DOC)
+                .define(TLS_VALIDATION_MODE_CONFIG, Type.STRING, "default", ConfigDef.ValidString.in("default", "insecure"), Importance.LOW, TLS_VALIDATION_MODE_DOC);
     }
 
     public long getDeduplicationRewindOffset() {
         return getLong(DEDUPLICATION_REWIND_CONFIG);
+    }
+
+    public String getTlsValidationMode() {
+        return getString(TLS_VALIDATION_MODE_CONFIG).toLowerCase(Locale.ENGLISH);
     }
 
     public String getHost() {

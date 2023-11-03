@@ -15,9 +15,7 @@ import java.util.Map;
 
 import static org.apache.kafka.connect.runtime.ConnectorConfig.KEY_CONVERTER_CLASS_CONFIG;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.VALUE_CONVERTER_CLASS_CONFIG;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assertions.*;
 
 public class QuestDBSinkConnectorConfigTest {
 
@@ -48,6 +46,34 @@ public class QuestDBSinkConnectorConfigTest {
         List<Object> objects = configKey.recommender.validValues(QuestDBSinkConnectorConfig.TIMESTAMP_UNITS_CONFIG, new HashMap<>());
 
         assertEquals(Arrays.asList("auto", "millis", "micros", "nanos"), objects);
+    }
+
+    @Test
+    public void testTlsConfig() {
+        ConfigDef confDef = QuestDBSinkConnectorConfig.conf();
+        Map<String, String> config = baseConnectorProps();
+        config.put("tls", "true");
+        QuestDBSinkConnectorConfig sinkConnectorConfig = new QuestDBSinkConnectorConfig(confDef, config);
+
+        assertTrue(sinkConnectorConfig.isTls());
+    }
+
+    @Test
+    public void testTlsValidationModeValidation() {
+        ConfigDef conf = QuestDBSinkConnectorConfig.conf();
+        ConfigDef.ConfigKey configKey = conf.configKeys().get(QuestDBSinkConnectorConfig.TLS_VALIDATION_MODE_CONFIG);
+
+        // positive cases
+        configKey.validator.ensureValid(QuestDBSinkConnectorConfig.TLS_VALIDATION_MODE_CONFIG, "default");
+        configKey.validator.ensureValid(QuestDBSinkConnectorConfig.TLS_VALIDATION_MODE_CONFIG, "insecure");
+
+        // negative cases
+        try {
+            configKey.validator.ensureValid(QuestDBSinkConnectorConfig.TLS_VALIDATION_MODE_CONFIG, "foo");
+            fail("Expected ConfigException");
+        } catch (ConfigException e) {
+            assertEquals("Invalid value foo for configuration tls.validation.mode: String must be one of: default, insecure", e.getMessage());
+        }
     }
 
     @Test
