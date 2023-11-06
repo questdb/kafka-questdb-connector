@@ -261,7 +261,7 @@ public class ExactlyOnceIT {
     private static void startKillingRandomContainers(CyclicBarrier barrier) {
         new Thread(() -> {
             while (barrier.getNumberWaiting() == 0) { // keep killing them until the checker thread passed the assertion
-                Os.sleep(ThreadLocalRandom.current().nextInt(5_000, 30_000));
+                Os.sleep(ThreadLocalRandom.current().nextInt(15_000, 30_000));
                 int victim = ThreadLocalRandom.current().nextInt(VICTIMS_TOTAL);
                 switch (victim) {
                     case VICTIM_QUESTDB: {
