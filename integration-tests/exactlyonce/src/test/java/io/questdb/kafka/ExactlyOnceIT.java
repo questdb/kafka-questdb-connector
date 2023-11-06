@@ -34,6 +34,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.BrokenBarrierException;
@@ -141,26 +143,34 @@ public class ExactlyOnceIT {
     }
 
     private static KafkaContainer newKafkaContainer(int id) {
-        Path kafkaData;
-        try {
-            kafkaData = Files.createDirectories(persistence.resolve("kafka").resolve("data" + id));
+        try (io.questdb.std.str.Path p = new io.questdb.std.str.Path()){
+            Path kafkaData = persistence.resolve("kafka").resolve("data" + id);
+            Set<PosixFilePermission> rwxrwxrwx = PosixFilePermissions.fromString("rwxrwxrwx");
+
+
+            // create world-writable directory
+            Files.createDirectories(kafkaData, PosixFilePermissions.asFileAttribute(rwxrwxrwx));
+
+
+//            p.of(kafkaData.toAbsolutePath().toString());
+//            io.questdb.std.Files.mkdirs(p, 0_777);
+
+            return new KafkaContainer(KAFKA_CONTAINER_IMAGE)
+                    .withNetwork(network)
+                    .dependsOn(zookeeper)
+                    .withExternalZookeeper("zookeeper:2181")
+                    .withEnv("KAFKA_BROKER_ID", String.valueOf(id))
+                    .withEnv("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "3")
+                    .withEnv("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS", "3")
+                    .withEnv("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "3")
+                    .withEnv("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "2")
+                    .withEnv("KAFKA_NUM_PARTITIONS", "3")
+                    .withFileSystemBind(kafkaData.toAbsolutePath().toString(), "/var/lib/kafka/data")
+                    .withCreateContainerCmdModifier(cmd -> cmd.withHostName("kafka" + id))
+                    .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("kafka" + id)));
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
-
-        return new KafkaContainer(KAFKA_CONTAINER_IMAGE)
-                .withNetwork(network)
-                .dependsOn(zookeeper)
-                .withExternalZookeeper("zookeeper:2181")
-                .withEnv("KAFKA_BROKER_ID", String.valueOf(id))
-                .withEnv("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "3")
-                .withEnv("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS", "3")
-                .withEnv("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "3")
-                .withEnv("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "2")
-                .withEnv("KAFKA_NUM_PARTITIONS", "3")
-                .withFileSystemBind(kafkaData.toAbsolutePath().toString(), "/var/lib/kafka/data")
-                .withCreateContainerCmdModifier(cmd -> cmd.withHostName("kafka" + id))
-                .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("kafka" + id)));
     }
 
     private static GenericContainer<?> newConnectContainer(int id) {
