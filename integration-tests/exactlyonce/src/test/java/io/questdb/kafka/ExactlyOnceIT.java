@@ -32,10 +32,7 @@ import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.PosixFilePermission;
-import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.BrokenBarrierException;
@@ -123,11 +120,12 @@ public class ExactlyOnceIT {
     private static GenericContainer<?> newQuestDBContainer() {
 
         Path dbRoot;
-        try {
-            dbRoot = Files.createDirectories(persistence.resolve("questdb"));
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
+//        try {
+//            dbRoot = Files.createDirectories(persistence.resolve("questdb"));
+            dbRoot = persistence.resolve("questdb");
+//        } catch (IOException e) {
+//            throw new RuntimeException(e);
+//        }
         FixedHostPortGenericContainer<?> container = new FixedHostPortGenericContainer<>(QUESTDB_CONTAINER_IMAGE.asCanonicalNameString())
                 .withNetwork(network)
 //                .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
@@ -144,12 +142,13 @@ public class ExactlyOnceIT {
 
     private static KafkaContainer newKafkaContainer(int id) {
         try (io.questdb.std.str.Path p = new io.questdb.std.str.Path()){
-            Path kafkaData = persistence.resolve("kafka").resolve("data" + id);
-            Set<PosixFilePermission> rwxrwxrwx = PosixFilePermissions.fromString("rwxrwxrwx");
+//            Path kafkaData = persistence.resolve("kafka").resolve("data" + id);
+            Path kafkaData = persistence.resolve("kafka" + id);
+//            Set<PosixFilePermission> rwxrwxrwx = PosixFilePermissions.fromString("rwxrwxrwx");
 
 
             // create world-writable directory
-            Files.createDirectories(kafkaData, PosixFilePermissions.asFileAttribute(rwxrwxrwx));
+//            Files.createDirectories(kafkaData, PosixFilePermissions.asFileAttribute(rwxrwxrwx));
 
 
 //            p.of(kafkaData.toAbsolutePath().toString());
@@ -165,11 +164,11 @@ public class ExactlyOnceIT {
                     .withEnv("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "3")
                     .withEnv("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "2")
                     .withEnv("KAFKA_NUM_PARTITIONS", "3")
-                    .withFileSystemBind(kafkaData.toAbsolutePath().toString(), "/var/lib/kafka/data")
+                    .withFileSystemBind(kafkaData.toAbsolutePath().toString(), "/var/lib/kafka/")
                     .withCreateContainerCmdModifier(cmd -> cmd.withHostName("kafka" + id))
                     .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("kafka" + id)));
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+//        } catch (IOException e) {
+//            throw new RuntimeException(e);
         }
     }
 
