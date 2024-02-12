@@ -61,10 +61,10 @@ public final class QuestDBSinkTask extends SinkTask {
             for (String symbolColumn : timestampStringFields.split(",")) {
                 stringTimestampColumns.add(symbolColumn.trim());
             }
-            dataFormat = TimestampParserCompiler.compilePattern(config.getTimestampFormat());
         } else {
             stringTimestampColumns = Collections.emptySet();
         }
+        dataFormat = TimestampParserCompiler.compilePattern(config.getTimestampFormat());
 
         String doubleColumnsConfig = config.getDoubleColumns();
         if (doubleColumnsConfig == null) {

@@ -904,6 +904,37 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @Test
+    public void testParsingStringTimestamp_designatedTimestampNotListedExplicitly() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_FORMAT, "yyyy-MM-dd HH:mm:ss.SSSUUU z");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
+                "create table " + topicName + " (firstname string, lastname string, born timestamp) timestamp(born)",
+                httpPort,
+                QuestDBUtils.Endpoint.EXEC);
+
+        String birthTimestamp = "1985-08-02 16:41:55.402095 UTC";
+        connect.kafka().produce(topicName, "foo",
+                "{\"firstname\":\"John\""
+                        + ",\"lastname\":\"Doe\""
+                        + ",\"born\":\"" + birthTimestamp + "\"}"
+        );
+
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"born\"\r\n" +
+                        "\"John\",\"Doe\",\"1985-08-02T16:41:55.402095Z\"\r\n",
+                "select * from " + topicName,
+                httpPort);
+    }
+
+    @Test
     public void testParsingStringTimestamp() {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
