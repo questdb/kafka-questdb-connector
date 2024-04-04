@@ -48,6 +48,7 @@ public class QuestDBSinkConnectorIT {
     @Container
     private static final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:7.4.0")
             .withNetwork(network)
+            .withNetworkAliases("questdb")
             .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT)
             .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")));
 
@@ -65,6 +66,7 @@ public class QuestDBSinkConnectorIT {
             .withEnv("CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR", "1")
             .withEnv("CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR", "1")
             .withEnv("CONNECT_STATUS_STORAGE_REPLICATION_FACTOR", "1")
+            .withEnv("QDB_CLIENT_CONF", "http::addr=questdb;auto_flush_rows=1;")
             .withNetwork(network)
             .withExposedPorts(8083)
             .withCopyFileToContainer(MountableFile.forHostPath(connectorJarResolver.getJarPath()), "/usr/share/java/kafka/questdb-connector.jar")
@@ -94,8 +96,7 @@ public class QuestDBSinkConnectorIT {
                 .with("tasks.max", "1")
                 .with("key.converter", "org.apache.kafka.connect.storage.StringConverter")
                 .with("value.converter", "org.apache.kafka.connect.storage.StringConverter")
-                .with("topics", topicName)
-                .with("client.conf.string", "http::addr=" + questDBContainer.getNetworkAliases().get(0) + ":" + QuestDBUtils.QUESTDB_HTTP_PORT + ";auto_flush_rows=1");
+                .with("topics", topicName);
 
         connectContainer.registerConnector("my-connector", connector);
 

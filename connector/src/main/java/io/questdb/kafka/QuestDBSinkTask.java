@@ -10,6 +10,7 @@ import io.questdb.std.datetime.microtime.Timestamps;
 import io.questdb.std.datetime.millitime.DateFormatUtils;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.config.types.Password;
 import org.apache.kafka.connect.data.Date;
 import org.apache.kafka.connect.data.*;
 import org.apache.kafka.connect.errors.ConnectException;
@@ -79,13 +80,18 @@ public final class QuestDBSinkTask extends SinkTask {
 
     private Sender createRawSender() {
         log.debug("Creating a new sender");
-        String confStr = config.getConfigurationString();
+        Password confStrSecret = config.getConfigurationString();
+        String confStr = confStrSecret == null ? null : confStrSecret.value();
+        if (confStr == null || confStr.isEmpty()) {
+            confStr = System.getenv("QDB_CLIENT_CONF");
+        }
         if (confStr != null && !confStr.isEmpty()) {
-            log.debug("Using configuration string: {}", confStr);
+            log.debug("Using client configuration string");
             Sender s = Sender.fromConfig(confStr);
             httpTransport = s instanceof LineHttpSender;
             return s;
         }
+        log.debug("Using legacy client configuration");
         Sender.LineSenderBuilder builder = Sender.builder(Sender.Transport.TCP).address(config.getHost());
         if (config.isTls()) {
             builder.enableTls();

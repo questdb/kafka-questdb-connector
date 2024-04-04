@@ -104,11 +104,11 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(TIMESTAMP_STRING_FIELDS, Type.STRING, null, Importance.MEDIUM, TIMESTAMP_STRING_FIELDS_DOC)
                 .define(DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG, Type.BOOLEAN, false, Importance.MEDIUM, DESIGNATED_TIMESTAMP_KAFKA_NATIVE_DOC)
                 .define(TLS_VALIDATION_MODE_CONFIG, Type.STRING, "default", ConfigDef.ValidString.in("default", "insecure"), Importance.LOW, TLS_VALIDATION_MODE_DOC)
-                .define(CONFIGURATION_STRING_CONFIG, Type.STRING, null, Importance.HIGH, CONFIGURATION_STRING_DOC);
+                .define(CONFIGURATION_STRING_CONFIG, Type.PASSWORD, null, Importance.HIGH, CONFIGURATION_STRING_DOC);
     }
 
-    public String getConfigurationString() {
-        return getString(CONFIGURATION_STRING_CONFIG);
+    public Password getConfigurationString() {
+        return getPassword(CONFIGURATION_STRING_CONFIG);
     }
 
     public String getTlsValidationMode() {
