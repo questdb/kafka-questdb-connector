@@ -1,7 +1,9 @@
 package io.questdb.kafka;
 
 import io.questdb.client.Sender;
+import io.questdb.cutlass.http.client.HttpClientException;
 import io.questdb.cutlass.line.LineSenderException;
+import io.questdb.cutlass.line.http.LineHttpSender;
 import io.questdb.std.NumericException;
 import io.questdb.std.datetime.DateFormat;
 import io.questdb.std.datetime.microtime.Timestamps;
@@ -17,6 +19,7 @@ import org.apache.kafka.connect.sink.SinkTask;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
@@ -37,8 +40,7 @@ public final class QuestDBSinkTask extends SinkTask {
     private long batchesSinceLastError = 0;
     private DateFormat dataFormat;
     private boolean kafkaTimestampsEnabled;
-    private OffsetTracker tracker = new MultiOffsetTracker();
-    private long deduplicationRewindOffset;
+    private boolean httpTransport;
 
     @Override
     public String version() {
@@ -48,13 +50,6 @@ public final class QuestDBSinkTask extends SinkTask {
     @Override
     public void start(Map<String, String> map) {
         this.config = new QuestDBSinkConnectorConfig(map);
-        this.deduplicationRewindOffset = config.getDeduplicationRewindOffset();
-        if (deduplicationRewindOffset == 0) {
-            tracker = new EmptyOffsetTracker();
-        } else {
-            tracker = new MultiOffsetTracker();
-        }
-
         String timestampStringFields = config.getTimestampStringFields();
         if (timestampStringFields != null) {
             stringTimestampColumns = new HashSet<>();
@@ -82,19 +77,16 @@ public final class QuestDBSinkTask extends SinkTask {
         this.timestampUnits = config.getTimestampUnitsOrNull();
     }
 
-    @Override
-    public void open(Collection<TopicPartition> partitions) {
-        tracker.onPartitionsOpened(partitions);
-    }
-
-    @Override
-    public void close(Collection<TopicPartition> partitions) {
-        tracker.onPartitionsClosed(partitions);
-    }
-
-    private Sender createSender() {
+    private Sender createRawSender() {
         log.debug("Creating a new sender");
-        Sender.LineSenderBuilder builder = Sender.builder().address(config.getHost());
+        String confStr = config.getConfigurationString();
+        if (confStr != null && !confStr.isEmpty()) {
+            log.debug("Using configuration string: {}", confStr);
+            Sender s = Sender.fromConfig(confStr);
+            httpTransport = s instanceof LineHttpSender;
+            return s;
+        }
+        Sender.LineSenderBuilder builder = Sender.builder(Sender.Transport.TCP).address(config.getHost());
         if (config.isTls()) {
             builder.enableTls();
             if ("insecure".equals(config.getTlsValidationMode())) {
@@ -108,7 +100,11 @@ public final class QuestDBSinkTask extends SinkTask {
             }
             builder.enableAuth(username).authToken(config.getToken().value());
         }
-        Sender rawSender = builder.build();
+        return builder.build();
+    }
+
+    private Sender createSender() {
+        Sender rawSender = createRawSender();
         String symbolColumns = config.getSymbolColumns();
         if (symbolColumns == null) {
             log.debug("No symbol columns configured. Using raw sender");
@@ -136,45 +132,45 @@ public final class QuestDBSinkTask extends SinkTask {
             for (SinkRecord record : collection) {
                 handleSingleRecord(record);
             }
-            sender.flush();
-            log.debug("Successfully sent {} records", collection.size());
-            if (++batchesSinceLastError == 10) {
-                // why 10? why not to reset the retry counter immediately upon a successful flush()?
-                // there are two reasons for server disconnections:
-                // 1. infrastructure: the server is down / unreachable / other_infrastructure_issues
-                // 2. structural: the client is sending bad data (e.g. pushing a string to a double column)
-                // errors in the latter case are not recoverable. upon receiving bad data the server will *eventually* close the connection,
-                // after a while, the client will notice that the connection is closed and will try to reconnect
-                // if we reset the retry counter immediately upon first successful flush() then we end-up in a loop where we flush bad data,
-                // the server closes the connection, the client reconnects, reset the retry counter, and sends bad data again, etc.
-                // to avoid this, we only reset the retry counter after a few successful flushes.
-                log.debug("Successfully sent 10 batches in a row. Resetting retry counter");
-                remainingRetries = config.getMaxRetries();
+
+            if (!httpTransport) {
+                log.debug("Sending {} records", collection.size());
+                sender.flush();
+                log.debug("Successfully sent {} records", collection.size());
+                if (++batchesSinceLastError == 10) {
+                    // why 10? why not to reset the retry counter immediately upon a successful flush()?
+                    // there are two reasons for server disconnections:
+                    // 1. infrastructure: the server is down / unreachable / other_infrastructure_issues
+                    // 2. structural: the client is sending bad data (e.g. pushing a string to a double column)
+                    // errors in the latter case are not recoverable. upon receiving bad data the server will *eventually* close the connection,
+                    // after a while, the client will notice that the connection is closed and will try to reconnect
+                    // if we reset the retry counter immediately upon first successful flush() then we end-up in a loop where we flush bad data,
+                    // the server closes the connection, the client reconnects, reset the retry counter, and sends bad data again, etc.
+                    // to avoid this, we only reset the retry counter after a few successful flushes.
+                    log.debug("Successfully sent 10 batches in a row. Resetting retry counter");
+                    remainingRetries = config.getMaxRetries();
+                }
             }
-        } catch (LineSenderException e) {
+        } catch (LineSenderException | HttpClientException e) {
             onSenderException(e);
         }
     }
 
-    private void onSenderException(LineSenderException e) {
+    private void onSenderException(Exception e) {
+        if (httpTransport) {
+            throw new ConnectException("Failed to send data to QuestDB", e);
+        }
+
         batchesSinceLastError = 0;
         if (--remainingRetries > 0) {
             closeSenderSilently();
             sender = null;
             log.debug("Sender exception, retrying in {} ms", config.getRetryBackoffMs());
-            tracker.configureSafeOffsets(context, deduplicationRewindOffset);
             context.timeout(config.getRetryBackoffMs());
             throw new RetriableException(e);
         } else {
             throw new ConnectException("Failed to send data to QuestDB after " + config.getMaxRetries() + " retries");
         }
-    }
-
-
-    @Override
-    public Map<TopicPartition, OffsetAndMetadata> preCommit(Map<TopicPartition, OffsetAndMetadata> currentOffsets) {
-        tracker.transformPreCommit(currentOffsets, deduplicationRewindOffset);
-        return currentOffsets;
     }
 
     private void closeSenderSilently() {
@@ -189,8 +185,6 @@ public final class QuestDBSinkTask extends SinkTask {
 
     private void handleSingleRecord(SinkRecord record) {
         assert timestampColumnValue == Long.MIN_VALUE;
-
-        tracker.onObservedOffset(record.kafkaPartition(), record.topic(), record.kafkaOffset());
 
         String explicitTable = config.getTable();
         String tableName = explicitTable == null ? record.topic() : explicitTable;
@@ -208,7 +202,7 @@ public final class QuestDBSinkTask extends SinkTask {
             sender.atNow();
         } else {
             try {
-                sender.at(timestampColumnValue);
+                sender.at(timestampColumnValue, ChronoUnit.NANOS);
             } finally {
                 timestampColumnValue = Long.MIN_VALUE;
             }
@@ -310,7 +304,7 @@ public final class QuestDBSinkTask extends SinkTask {
             String stringVal = (String) value;
             if (stringTimestampColumns.contains(actualName)) {
                 long timestamp = parseToMicros(stringVal);
-                sender.timestampColumn(actualName, timestamp);
+                sender.timestampColumn(actualName, timestamp, ChronoUnit.MICROS);
             } else {
                 sender.stringColumn(actualName, stringVal);
             }
@@ -336,7 +330,7 @@ public final class QuestDBSinkTask extends SinkTask {
             handleMap(name, (Map<?, ?>) value, fallbackName);
         } else if (value instanceof java.util.Date) {
             long epochMillis = ((java.util.Date) value).getTime();
-            sender.timestampColumn(actualName, TimeUnit.MILLISECONDS.toMicros(epochMillis));
+            sender.timestampColumn(actualName, TimeUnit.MILLISECONDS.toMicros(epochMillis), ChronoUnit.MICROS);
         } else {
             onUnsupportedType(actualName, value.getClass().getName());
         }
@@ -344,7 +338,7 @@ public final class QuestDBSinkTask extends SinkTask {
 
     private long parseToMicros(String timestamp) {
         try {
-            return dataFormat.parse(timestamp, DateFormatUtils.enLocale);
+            return dataFormat.parse(timestamp, DateFormatUtils.EN_LOCALE);
         } catch (NumericException e) {
             throw new ConnectException("Cannot parse timestamp: " + timestamp + " with the configured format '" + config.getTimestampFormat() +"' use '"
                     + QuestDBSinkConnectorConfig.TIMESTAMP_FORMAT + "' to configure the right timestamp format. " +
@@ -385,7 +379,7 @@ public final class QuestDBSinkTask extends SinkTask {
                 String s = (String) value;
                 if (stringTimestampColumns.contains(primitiveTypesName)) {
                     long timestamp = parseToMicros(s);
-                    sender.timestampColumn(sanitizedName, timestamp);
+                    sender.timestampColumn(sanitizedName, timestamp, ChronoUnit.MICROS);
                 } else {
                     sender.stringColumn(sanitizedName, s);
                 }
@@ -417,18 +411,18 @@ public final class QuestDBSinkTask extends SinkTask {
         switch (schema.name()) {
             case "io.debezium.time.MicroTimestamp":
                 long l = (Long) value;
-                sender.timestampColumn(name, l);
+                sender.timestampColumn(name, l, ChronoUnit.MICROS);
                 return true;
             case "io.debezium.time.Date":
                 int i = (Integer) value;
                 long micros = Timestamps.addDays(0, i);
-                sender.timestampColumn(name, micros);
+                sender.timestampColumn(name, micros, ChronoUnit.MICROS);
                 return true;
             case Timestamp.LOGICAL_NAME:
             case Date.LOGICAL_NAME:
                 java.util.Date d = (java.util.Date) value;
                 long epochMillis = d.getTime();
-                sender.timestampColumn(name, TimeUnit.MILLISECONDS.toMicros(epochMillis));
+                sender.timestampColumn(name, epochMillis, ChronoUnit.MILLIS);
                 return true;
             case Time.LOGICAL_NAME:
                 d = (java.util.Date) value;
@@ -443,7 +437,16 @@ public final class QuestDBSinkTask extends SinkTask {
 
     @Override
     public void flush(Map<TopicPartition, OffsetAndMetadata> map) {
-        // not needed as put() flushes after each batch
+        if (httpTransport) {
+            try {
+                log.info("Flushing data to QuestDB");
+                sender.flush();
+            } catch (LineSenderException | HttpClientException e) {
+                onSenderException(e);
+                throw new ConnectException("Failed to flush data to QuestDB", e);
+            }
+        }
+        // TCP transport flushes after each batch so no need to flush here
     }
 
     @Override

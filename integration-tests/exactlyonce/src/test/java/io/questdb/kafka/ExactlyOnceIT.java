@@ -3,7 +3,6 @@ package io.questdb.kafka;
 import io.questdb.client.Sender;
 import io.questdb.std.Os;
 import org.apache.kafka.clients.producer.KafkaProducer;
-import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.StringSerializer;
@@ -36,7 +35,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
-import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.CyclicBarrier;
@@ -52,10 +50,9 @@ public class ExactlyOnceIT {
     private static final int VICTIM_KAFKA = 2;
     private static final int VICTIMS_TOTAL = VICTIM_KAFKA + 1;
 
-    private static final DockerImageName KAFKA_CONTAINER_IMAGE = DockerImageName.parse("confluentinc/cp-kafka:7.5.1");
-    private static final DockerImageName ZOOKEEPER_CONTAINER_IMAGE = DockerImageName.parse("confluentinc/cp-zookeeper:7.5.1");
-    private static final DockerImageName CONNECT_CONTAINER_IMAGE = DockerImageName.parse("confluentinc/cp-kafka-connect:7.5.1");
-    private static final DockerImageName QUESTDB_CONTAINER_IMAGE = DockerImageName.parse("questdb/questdb:7.3.3");
+    private static final DockerImageName KAFKA_CONTAINER_IMAGE = DockerImageName.parse("confluentinc/cp-kafka:7.6.0");
+    private static final DockerImageName CONNECT_CONTAINER_IMAGE = DockerImageName.parse("confluentinc/cp-kafka-connect:7.6.0");
+    private static final DockerImageName QUESTDB_CONTAINER_IMAGE = DockerImageName.parse("questdb/questdb:7.4.0");
     private static final int KAFKA_CLUSTER_SIZE = 3;
     private static final int CONNECT_CLUSTER_SIZE = 2;
 
@@ -71,7 +68,7 @@ public class ExactlyOnceIT {
 
     private final static Network network = Network.newNetwork();
 
-    private static GenericContainer<?> zookeeper;
+//    private static GenericContainer<?> zookeeper;
     private static KafkaContainer[] kafkas = new KafkaContainer[KAFKA_CLUSTER_SIZE];
     private static GenericContainer[] connects = new GenericContainer[CONNECT_CLUSTER_SIZE];
     private static GenericContainer<?> questdb;
@@ -80,7 +77,6 @@ public class ExactlyOnceIT {
 
     @BeforeAll
     public static void createContainers() {
-        zookeeper = newZookeeperContainer();
         questdb = newQuestDBContainer();
         for (int i = 0; i < KAFKA_CLUSTER_SIZE; i++) {
             kafkas[i] = newKafkaContainer(i);
@@ -93,7 +89,7 @@ public class ExactlyOnceIT {
                 Stream.concat(
                         Stream.of(kafkas), Stream.of(connects)
                 ),
-                Stream.of(zookeeper, questdb)
+                Stream.of(questdb)
         );
         Startables.deepStart(containers).join();
         questHttpPort = questdb.getMappedPort(9000);
@@ -104,20 +100,7 @@ public class ExactlyOnceIT {
         questdb.stop();
         Stream.of(kafkas).forEach(KafkaContainer::stop);
         Stream.of(connects).forEach(GenericContainer::stop);
-        zookeeper.stop();
-
-        io.questdb.std.Files.rmdir(io.questdb.std.str.Path.getThreadLocal(persistence.toAbsolutePath().toString()));
-    }
-
-    private static GenericContainer<?> newZookeeperContainer() {
-         return new GenericContainer<>(ZOOKEEPER_CONTAINER_IMAGE)
-                .withNetwork(network)
-                .withNetworkAliases("zookeeper")
-                .withEnv("ZOOKEEPER_CLIENT_PORT", "2181")
-                .withEnv("ZOOKEEPER_TICK_TIME", "300")
-                .withEnv("ZOOKEEPER_INIT_LIMIT", "10")
-                .withEnv("ZOOKEEPER_SYNC_LIMIT", "5")
-                .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("zookeeper")));
+        io.questdb.std.Files.rmdir(io.questdb.std.str.Path.getThreadLocal(persistence.toAbsolutePath().toString()), true);
     }
 
     private static GenericContainer<?> newQuestDBContainer() {
@@ -132,6 +115,7 @@ public class ExactlyOnceIT {
                 .withNetwork(network)
 //                .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
                 .withFileSystemBind(dbRoot.toAbsolutePath().toString(), "/var/lib/questdb")
+//                .withEnv("QDB_DEBUG", "true")
                 .withCreateContainerCmdModifier(cmd -> cmd.withHostName("questdb"));
 
         if (questHttpPort == 0) {
@@ -150,24 +134,23 @@ public class ExactlyOnceIT {
 
             // create world-writable directory
             Files.createDirectories(kafkaData, PosixFilePermissions.asFileAttribute(rwxrwxrwx));
-
-
 //            p.of(kafkaData.toAbsolutePath().toString());
 //            io.questdb.std.Files.mkdirs(p, 0_777);
-
+            String voters = "0@kafka0:9094,1@kafka1:9094,2@kafka2:9094"; // todo: make it configurable
             return new KafkaContainer(KAFKA_CONTAINER_IMAGE)
                     .withNetwork(network)
-                    .dependsOn(zookeeper)
-                    .withExternalZookeeper("zookeeper:2181")
+                    .withNetworkAliases("kafka" + id)
+                    .withKraft()
                     .withEnv("KAFKA_BROKER_ID", String.valueOf(id))
                     .withEnv("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "3")
                     .withEnv("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS", "3")
                     .withEnv("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "3")
                     .withEnv("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "2")
                     .withEnv("KAFKA_NUM_PARTITIONS", "3")
+                    .withEnv("KAFKA_CONTROLLER_QUORUM_VOTERS", voters)
                     .withFileSystemBind(kafkaData.toAbsolutePath().toString(), "/var/lib/kafka/data")
-                    .withCreateContainerCmdModifier(cmd -> cmd.withHostName("kafka" + id))
-                    .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("kafka" + id)));
+                    .withCreateContainerCmdModifier(cmd -> cmd.withHostName("kafka" + id));
+//                    .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("kafka" + id)));
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -176,16 +159,19 @@ public class ExactlyOnceIT {
     private static GenericContainer<?> newConnectContainer(int id) {
         List<Startable> dependencies = new ArrayList<>(Arrays.asList(kafkas));
         dependencies.add(questdb);
-
         return new GenericContainer<>(CONNECT_CONTAINER_IMAGE)
                 .withEnv("CONNECT_BOOTSTRAP_SERVERS", "kafka0:9092")
                 .withEnv("CONNECT_GROUP_ID", "test")
+                .withEnv("CONNECT_OFFSET_FLUSH_INTERVAL_MS", "5000")
+                .withEnv("CONNECT_CONNECTOR_CLIENT_CONFIG_OVERRIDE_POLICY", "All")
                 .withEnv("CONNECT_OFFSET_STORAGE_TOPIC", "connect-storage-topic")
                 .withEnv("CONNECT_CONFIG_STORAGE_TOPIC", "connect-config-topic")
                 .withEnv("CONNECT_STATUS_STORAGE_TOPIC", "connect-status-topic")
                 .withEnv("CONNECT_KEY_CONVERTER", "org.apache.kafka.connect.storage.StringConverter")
                 .withEnv("CONNECT_VALUE_CONVERTER", "org.apache.kafka.connect.json.JsonConverter")
                 .withEnv("CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE", "false")
+//                .withEnv("CONNECT_LOG4J_LOGGERS", "io.questdb.kafka=ALL")
+//                .withEnv("QDB_DEBUG", "true")
                 .withEnv("CONNECT_REST_ADVERTISED_HOST_NAME", "connect" + id)
                 .withNetwork(network)
                 .withExposedPorts(8083)
@@ -213,10 +199,10 @@ public class ExactlyOnceIT {
         props.put("include.key", "false");
 
         int recordCount = 5_000_000;
-        new Thread(() -> {
-            try (Producer<String, String> producer = new KafkaProducer<>(props)) {
-                for (int i = 0; i < recordCount; i++ ) {
-                    String json = newPayload();
+        Thread producerThread = new Thread(() -> {
+            try (KafkaProducer<String, String> producer = new KafkaProducer<>(props)) {
+                for (int i = 0; i < recordCount; i++) {
+                    String json = newPayload(i);
                     producer.send(new ProducerRecord<>(topicName, null, json));
 
                     // 1% chance of duplicates - we want them to be also deduped by QuestDB
@@ -225,11 +211,12 @@ public class ExactlyOnceIT {
                     }
                 }
             }
-        }).start();
+        });
+        producerThread.start();
 
         QuestDBUtils.assertSql(
                 "{\"ddl\":\"OK\"}",
-                "CREATE TABLE " + topicName + " (ts TIMESTAMP, id UUID, val LONG) timestamp(ts) PARTITION BY DAY WAL DEDUP UPSERT KEYS(ts, id);",
+                "CREATE TABLE " + topicName + " (ts TIMESTAMP, id UUID, val LONG) timestamp(ts) PARTITION BY DAY WAL DEDUP UPSERT KEYS(ts);",
                 questdb.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT),
                 QuestDBUtils.Endpoint.EXEC);
 
@@ -250,9 +237,8 @@ public class ExactlyOnceIT {
     }
 
     @NotNull
-    private static String newPayload() {
-        Instant now = Instant.now();
-        long nanoTs = now.getEpochSecond() * 1_000_000_000 + now.getNano();
+    private static String newPayload(int i) {
+        long nanoTs = i * 1_000_000_000L;
         UUID uuid = UUID.randomUUID();
         int val = ThreadLocalRandom.current().nextInt(100);
 
@@ -262,7 +248,7 @@ public class ExactlyOnceIT {
     private static void startKillingRandomContainers(CyclicBarrier barrier) {
         new Thread(() -> {
             while (barrier.getNumberWaiting() == 0) { // keep killing them until the checker thread passed the assertion
-                Os.sleep(ThreadLocalRandom.current().nextInt(5_000, 30_000));
+                Os.sleep(ThreadLocalRandom.current().nextInt(5_000, 10_000));
                 int victim = ThreadLocalRandom.current().nextInt(VICTIMS_TOTAL);
                 switch (victim) {
                     case VICTIM_QUESTDB: {
@@ -284,7 +270,6 @@ public class ExactlyOnceIT {
                         int n = ThreadLocalRandom.current().nextInt(kafkas.length);
                         kafkas[n].stop();
                         KafkaContainer container = newKafkaContainer(n);
-                        Os.sleep(5000); // wait for zookeeper to detect the previous kafka container was stopped
                         container.start();
                         kafkas[n] = container;
                         break;
@@ -304,16 +289,20 @@ public class ExactlyOnceIT {
     }
 
     private static void startConnector() throws IOException, InterruptedException, URISyntaxException {
+        String confString = "http::addr=questdb:9000;auto_flush_rows=10000;";
+
+
         String payload = "{\"name\":\"my-connector\",\"config\":{" +
                 "\"tasks.max\":\"4\"," +
                 "\"connector.class\":\"io.questdb.kafka.QuestDBSinkConnector\"," +
                 "\"key.converter\":\"org.apache.kafka.connect.storage.StringConverter\"," +
                 "\"value.converter\":\"org.apache.kafka.connect.json.JsonConverter\"," +
                 "\"topics\":\"mytopic\"," +
+                "\"consumer.override.max.poll.records\":\"10000\"," +
                 "\"value.converter.schemas.enable\":\"false\"," +
-                "\"dedup.rewind.offset\":\"150000\"," +
                 "\"timestamp.field.name\":\"ts\"," +
-                "\"host\":\"questdb:9009\"}" +
+                "\"timestamp.units\":\"nanos\"," +
+                "\"client.conf.string\":\""+ confString + "\"}" +
                 "}";
 
         HttpResponse<String> response = HttpClient.newBuilder().connectTimeout(ofSeconds(10)).build().send(

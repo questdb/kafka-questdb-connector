@@ -42,15 +42,24 @@ public final class ConnectTestUtils {
         Awaitility.await().atMost(CONNECTOR_START_TIMEOUT_MS, MILLISECONDS).untilAsserted(() -> assertConnectorTaskState(connect, CONNECTOR_NAME, expectedState));
     }
 
-    static Map<String, String> baseConnectorProps(GenericContainer<?> questDBContainer, String topicName) {
-        String ilpIUrl = questDBContainer.getHost() + ":" + questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT);
+    static Map<String, String> baseConnectorProps(GenericContainer<?> questDBContainer, String topicName, boolean useHttp) {
+        String host = questDBContainer.getHost();
 
         Map<String, String> props = new HashMap<>();
         props.put(ConnectorConfig.CONNECTOR_CLASS_CONFIG, QuestDBSinkConnector.class.getName());
         props.put("topics", topicName);
         props.put(KEY_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
-        props.put("host", ilpIUrl);
+
+        String confString;
+        if (!useHttp) {
+            String ilpIUrl = host + ":" + questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT);
+            props.put("host", ilpIUrl);
+        } else {
+            int port = questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT);
+            confString = "http::addr="+host+":"+ port + ";";
+            props.put("client.conf.string", confString);
+        }
         return props;
     }
 

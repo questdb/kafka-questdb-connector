@@ -9,7 +9,7 @@ It also uses the [Kafka UI](https://github.com/provectus/kafka-ui) project for K
 
 ## Prerequisites:
 - Git
-- Working Docker environment, including docker-compose
+- Working Docker environment, including docker-compose[..](..)
 - Internet access to download dependencies
 
 ## Usage:

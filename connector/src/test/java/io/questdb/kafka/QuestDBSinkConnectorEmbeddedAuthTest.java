@@ -95,7 +95,7 @@ public class QuestDBSinkConnectorEmbeddedAuthTest {
     @ValueSource(booleans = {false, true})
     public void testSmoke(boolean useTls) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, false);
         props.put(QuestDBSinkConnectorConfig.USERNAME, TEST_USER_NAME);
         props.put(QuestDBSinkConnectorConfig.TOKEN, TEST_USER_TOKEN);
 

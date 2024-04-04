@@ -61,6 +61,9 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String TLS_VALIDATION_MODE_CONFIG = "tls.validation.mode";
     public static final String TLS_VALIDATION_MODE_DOC = "TLS validation mode. Possible values: default, insecure";
 
+    public static final String CONFIGURATION_STRING_CONFIG = "client.conf.string";
+    public static final String CONFIGURATION_STRING_DOC = "Configuration string for QuestDB client";
+
     public static final String RETRY_BACKOFF_MS = "retry.backoff.ms";
     private static final String RETRY_BACKOFF_MS_DOC = "The time in milliseconds to wait following an error before a retry attempt is made";
 
@@ -69,15 +72,6 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public static final String TIMESTAMP_FORMAT = "timestamp.string.format";
     private static final String TIMESTAMP_FORMAT_DOC = "Timestamp format. Used when parsing timestamp string fields";
-
-    public static final String DEDUPLICATION_REWIND_CONFIG = "dedup.rewind.offset";
-    private static final String DEDUPLICATION_REWIND_DOC = "Rewind offset for deduplication. " +
-            "On failure, the connector will rewind the offset by this amount and retry. This is designed to work in concert with QuestDB " +
-            "deduplication feature. The rewind offset must be greater than or equal to the maximum number of records that can lost in the event of a failure. " +
-            "If the rewind is too small, some events might be missing from QuestDB. If the rewind is too large, the connector will be slower to recover " +
-            "as it will have to reprocess a large number of records and QuestDB will have to do extra work with deduplication. If you are testing this " +
-            "feature for the first time then 150000 is a good starting point.";
-
 
     private static final String DEFAULT_TIMESTAMP_FORMAT = "yyyy-MM-ddTHH:mm:ss.SSSUUUZ";
 
@@ -91,7 +85,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public static ConfigDef conf() {
         return new ConfigDef()
-                .define(HOST_CONFIG, Type.STRING, Importance.HIGH, HOST_DOC)
+                .define(HOST_CONFIG, Type.STRING, null, Importance.HIGH, HOST_DOC)
                 .define(TABLE_CONFIG, Type.STRING, null, TablenameValidator.INSTANCE, Importance.HIGH, TABLE_DOC)
                 .define(KEY_PREFIX_CONFIG, Type.STRING, "key", Importance.MEDIUM, KEY_PREFIX_DOC)
                 .define(VALUE_PREFIX_CONFIG, Type.STRING, "", Importance.MEDIUM, VALUE_PREFIX_DOC)
@@ -109,12 +103,12 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(TIMESTAMP_FORMAT, Type.STRING, DEFAULT_TIMESTAMP_FORMAT, TimestampFormatValidator.INSTANCE, Importance.MEDIUM, TIMESTAMP_FORMAT_DOC)
                 .define(TIMESTAMP_STRING_FIELDS, Type.STRING, null, Importance.MEDIUM, TIMESTAMP_STRING_FIELDS_DOC)
                 .define(DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG, Type.BOOLEAN, false, Importance.MEDIUM, DESIGNATED_TIMESTAMP_KAFKA_NATIVE_DOC)
-                .define(DEDUPLICATION_REWIND_CONFIG, Type.LONG, 0, Importance.MEDIUM, DEDUPLICATION_REWIND_DOC)
-                .define(TLS_VALIDATION_MODE_CONFIG, Type.STRING, "default", ConfigDef.ValidString.in("default", "insecure"), Importance.LOW, TLS_VALIDATION_MODE_DOC);
+                .define(TLS_VALIDATION_MODE_CONFIG, Type.STRING, "default", ConfigDef.ValidString.in("default", "insecure"), Importance.LOW, TLS_VALIDATION_MODE_DOC)
+                .define(CONFIGURATION_STRING_CONFIG, Type.STRING, null, Importance.HIGH, CONFIGURATION_STRING_DOC);
     }
 
-    public long getDeduplicationRewindOffset() {
-        return getLong(DEDUPLICATION_REWIND_CONFIG);
+    public String getConfigurationString() {
+        return getString(CONFIGURATION_STRING_CONFIG);
     }
 
     public String getTlsValidationMode() {
