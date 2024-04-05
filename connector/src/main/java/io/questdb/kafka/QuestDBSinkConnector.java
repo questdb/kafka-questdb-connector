@@ -49,9 +49,46 @@ public final class QuestDBSinkConnector extends SinkConnector {
     public Config validate(Map<String, String> connectorConfigs) {
         String s = connectorConfigs.get(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG);
         if (Boolean.parseBoolean(s) && connectorConfigs.get(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG) != null) {
-            throw new IllegalArgumentException("Cannot use " + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG
-                    + " with " + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG +". These options are mutually exclusive.");
+            throw new IllegalArgumentException("Cannot use '" + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG
+                    + "' with '" + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG +"'. These options are mutually exclusive.");
         }
+
+        validateClientConfiguration(connectorConfigs);
         return super.validate(connectorConfigs);
+    }
+
+    private static void validateClientConfiguration(Map<String, String> connectorConfigs) {
+        String host = connectorConfigs.get(QuestDBSinkConnectorConfig.HOST_CONFIG);
+        String confString = connectorConfigs.get(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG);
+        String envConfString = System.getenv("QDB_CLIENT_CONF");
+
+        // cannot set client configuration string via both explicit config and environment variable
+        if (confString != null && envConfString != null) {
+            throw new IllegalArgumentException("Only one of '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' or QDB_CLIENT_CONF environment variable must be set. They cannot be used together.");
+        }
+
+        if (confString == null && envConfString == null) {
+            if (host == null) {
+                throw new IllegalArgumentException("Either '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' or '" + QuestDBSinkConnectorConfig.HOST_CONFIG + "' must be set.");
+            }
+            return; // configuration string is not used, nothing else to validate
+        }
+
+        // configuration string is used, let's validate no other client configuration is set
+        if (host != null) {
+            throw new IllegalArgumentException("Only one of '" + QuestDBSinkConnectorConfig.HOST_CONFIG + "' or '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' must be set.");
+        }
+        if (connectorConfigs.get(QuestDBSinkConnectorConfig.TLS) != null) {
+            throw new IllegalArgumentException("Only one of '" + QuestDBSinkConnectorConfig.TLS + "' or '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' must be set.");
+        }
+        if (connectorConfigs.get(QuestDBSinkConnectorConfig.TLS_VALIDATION_MODE_CONFIG) != null) {
+            throw new IllegalArgumentException("Only one of '" + QuestDBSinkConnectorConfig.TLS_VALIDATION_MODE_CONFIG + "' or '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' must be set.");
+        }
+        if (connectorConfigs.get(QuestDBSinkConnectorConfig.TOKEN) != null) {
+            throw new IllegalArgumentException("Only one of '" + QuestDBSinkConnectorConfig.TOKEN + "' or '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' must be set.");
+        }
+        if (connectorConfigs.get(QuestDBSinkConnectorConfig.USERNAME) != null) {
+            throw new IllegalArgumentException("Only one of '" + QuestDBSinkConnectorConfig.USERNAME + "' or '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' must be set.");
+        }
     }
 }

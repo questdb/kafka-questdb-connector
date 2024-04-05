@@ -20,7 +20,7 @@ It also uses the [Kafka UI](https://github.com/provectus/kafka-ui) project for K
 - The previous command will generate a lot of log messages. Eventually logging should cease. This means both Apache Kafka and QuestDB are running.
 - Go to http://localhost:8080/ui/clusters/kafka/connectors and click on the “Create Connector” button.
     ![screenshot of Kafka UI, with the Create Connector button highlighted](img/create.png)
-- The connector name should be QuestDB, use the following configuration and click at Submit:
+- The connector name should be 'questdb', use the following configuration and click at Submit:
     ```json
   {
     "connector.class": "io.questdb.kafka.QuestDBSinkConnector",

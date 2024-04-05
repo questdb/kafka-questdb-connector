@@ -38,19 +38,22 @@ public class QuestDBSinkConnectorIT {
     private final static Network network = Network.newNetwork();
 
     @Container
-    private static final KafkaContainer kafkaContainer = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.2.0"))
-            .withNetwork(network);
-
-    @Container
-    private static final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:6.5.3")
+    private static final KafkaContainer kafkaContainer = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.0"))
             .withNetwork(network)
-            .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT)
-            .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
-            .withEnv("QDB_CAIRO_COMMIT_LAG", "100")
-            .withEnv("JAVA_OPTS", "-Djava.locale.providers=JRE,SPI");
+            .withNetworkAliases("kafka")
+            .withKraft()
+            .withEnv("KAFKA_BROKER_ID", "0")
+            .withEnv("KAFKA_CONTROLLER_QUORUM_VOTERS", "0@kafka:9094");
 
     @Container
-    private static final DebeziumContainer connectContainer = new DebeziumContainer("confluentinc/cp-kafka-connect:7.2.1")
+    private static final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:7.4.0")
+            .withNetwork(network)
+            .withNetworkAliases("questdb")
+            .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT)
+            .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")));
+
+    @Container
+    private static final DebeziumContainer connectContainer = new DebeziumContainer("confluentinc/cp-kafka-connect:7.6.0")
             .withEnv("CONNECT_BOOTSTRAP_SERVERS", kafkaContainer.getNetworkAliases().get(0) + ":9092")
             .withEnv("CONNECT_GROUP_ID", "test")
             .withEnv("CONNECT_OFFSET_STORAGE_TOPIC", "connect-storage-topic")
@@ -63,6 +66,7 @@ public class QuestDBSinkConnectorIT {
             .withEnv("CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR", "1")
             .withEnv("CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR", "1")
             .withEnv("CONNECT_STATUS_STORAGE_REPLICATION_FACTOR", "1")
+            .withEnv("QDB_CLIENT_CONF", "http::addr=questdb;auto_flush_rows=1;")
             .withNetwork(network)
             .withExposedPorts(8083)
             .withCopyFileToContainer(MountableFile.forHostPath(connectorJarResolver.getJarPath()), "/usr/share/java/kafka/questdb-connector.jar")
@@ -92,8 +96,7 @@ public class QuestDBSinkConnectorIT {
                 .with("tasks.max", "1")
                 .with("key.converter", "org.apache.kafka.connect.storage.StringConverter")
                 .with("value.converter", "org.apache.kafka.connect.storage.StringConverter")
-                .with("topics", topicName)
-                .with("host", questDBContainer.getNetworkAliases().get(0) + ":" + QuestDBUtils.QUESTDB_ILP_PORT);
+                .with("topics", topicName);
 
         connectContainer.registerConnector("my-connector", connector);
 

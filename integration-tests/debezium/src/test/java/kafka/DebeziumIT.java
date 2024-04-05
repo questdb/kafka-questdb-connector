@@ -40,8 +40,12 @@ public class DebeziumIT {
     private static final Network network = Network.newNetwork();
 
     @Container
-    private final KafkaContainer kafkaContainer = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.2.2"))
-            .withNetwork(network);
+    private final KafkaContainer kafkaContainer = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.0"))
+            .withNetwork(network)
+            .withNetworkAliases("kafka")
+            .withKraft()
+            .withEnv("KAFKA_BROKER_ID", "0")
+            .withEnv("KAFKA_CONTROLLER_QUORUM_VOTERS", "0@kafka:9094");
 
     @Container
     public PostgreSQLContainer<?> postgresContainer =
@@ -59,10 +63,11 @@ public class DebeziumIT {
                     .dependsOn(kafkaContainer)
                     .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("debezium")))
                     .withEnv("CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE", "true")
-                    .withEnv("CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE", "true");
+                    .withEnv("CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE", "true")
+                    .withEnv("OFFSET_FLUSH_INTERVAL_MS", "1000");
 
     @Container
-    private final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:6.5.3")
+    private final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:7.4.0")
             .withNetwork(network)
             .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT)
             .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
@@ -71,9 +76,10 @@ public class DebeziumIT {
 
 
     private ConnectorConfiguration newQuestSinkBaseConfig(String questTableName) {
-        ConnectorConfiguration questSink = ConnectorConfiguration.create()
+        String confString = "http::addr=" + questDBContainer.getNetworkAliases().get(0) + ":9000;auto_flush_rows=1000;";
+        return ConnectorConfiguration.create()
                 .with("connector.class", QuestDBSinkConnector.class.getName())
-                .with("host", questDBContainer.getNetworkAliases().get(0))
+                .with("client.conf.string", confString)
                 .with("tasks.max", "1")
                 .with("topics", PG_SERVER_NAME + "."+ PG_SCHEMA_NAME + "." + PG_TABLE_NAME)
                 .with(QuestDBSinkConnectorConfig.TABLE_CONFIG, questTableName)
@@ -82,7 +88,6 @@ public class DebeziumIT {
                 .with("transforms", "unwrap")
                 .with("transforms.unwrap.type", "io.debezium.transforms.ExtractNewRecordState")
                 .with(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
-        return questSink;
     }
 
     @Test

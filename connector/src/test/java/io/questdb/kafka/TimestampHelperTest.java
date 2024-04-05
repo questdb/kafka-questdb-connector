@@ -49,4 +49,9 @@ public class TimestampHelperTest {
         assertEquals(TimeUnit.NANOSECONDS, TimestampHelper.getTimestampUnits(TimeUnit.NANOSECONDS, Long.MAX_VALUE));
     }
 
+    @Test
+    public void testSlack() {
+        assertEquals(TimeUnit.MILLISECONDS, TimestampHelper.getTimestampUnits(null, 1712188800));
+    }
+
 }

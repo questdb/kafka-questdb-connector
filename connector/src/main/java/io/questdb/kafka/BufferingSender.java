@@ -4,6 +4,8 @@ import io.questdb.client.Sender;
 import io.questdb.std.BoolList;
 import io.questdb.std.LongList;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -96,15 +98,20 @@ final class BufferingSender implements Sender {
     }
 
     @Override
-    public Sender timestampColumn(CharSequence name, long value) {
+    public Sender timestampColumn(CharSequence name, long value, ChronoUnit unit) {
         if (symbolColumns.contains(name)) {
             symbolColumnNames.add(name);
             symbolColumnValues.add(String.valueOf(value));
         } else {
             timestampNames.add(name);
-            timestampValues.add(value);
+            timestampValues.add(unitToMicros(value, unit));
         }
         return this;
+    }
+
+    @Override
+    public Sender timestampColumn(CharSequence charSequence, Instant instant) {
+        throw new UnsupportedOperationException("Not implemented");
     }
 
     @Override
@@ -164,16 +171,36 @@ final class BufferingSender implements Sender {
         for (int i = 0, n = timestampNames.size(); i < n; i++) {
             CharSequence fieldName = timestampNames.get(i);
             long fieldValue = timestampValues.get(i);
-            sender.timestampColumn(fieldName, fieldValue);
+            sender.timestampColumn(fieldName, fieldValue, ChronoUnit.MICROS);
         }
         timestampNames.clear();
         timestampValues.clear();
     }
 
+    private static long unitToMicros(long value, ChronoUnit unit) {
+        switch (unit) {
+            case NANOS:
+                return value / 1000L;
+            case MICROS:
+                return value;
+            case MILLIS:
+                return value * 1000L;
+            case SECONDS:
+                return value * 1_000_000L;
+            default:
+                throw new IllegalArgumentException("Unsupported unit: " + unit);
+        }
+    }
+
     @Override
-    public void at(long timestamp) {
+    public void at(long timestamp, ChronoUnit unit) {
         transferFields();
-        sender.at(timestamp);
+        sender.at(timestamp, unit);
+    }
+
+    @Override
+    public void at(Instant instant) {
+        throw new UnsupportedOperationException();
     }
 
     @Override

@@ -46,11 +46,15 @@ public class AvroSchemaRegistryIT {
     private final static Network network = Network.newNetwork();
 
     @Container
-    private final KafkaContainer kafkaContainer = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.2.0"))
-            .withNetwork(network);
+    private final KafkaContainer kafkaContainer = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.0"))
+            .withNetwork(network)
+            .withNetworkAliases("kafka")
+            .withKraft()
+            .withEnv("KAFKA_BROKER_ID", "0")
+            .withEnv("KAFKA_CONTROLLER_QUORUM_VOTERS", "0@kafka:9094");
 
     @Container
-    private final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:6.5.3")
+    private final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:7.4.0")
             .withNetwork(network)
             .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT)
             .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
@@ -58,7 +62,7 @@ public class AvroSchemaRegistryIT {
             .withEnv("JAVA_OPTS", "-Djava.locale.providers=JRE,SPI");
 
     @Container
-    private final DebeziumContainer connectContainer = new DebeziumContainer("confluentinc/cp-kafka-connect:7.2.1")
+    private final DebeziumContainer connectContainer = new DebeziumContainer("confluentinc/cp-kafka-connect:7.6.0")
             .withEnv("CONNECT_BOOTSTRAP_SERVERS", kafkaContainer.getNetworkAliases().get(0) + ":9092")
             .withEnv("CONNECT_GROUP_ID", "test")
             .withEnv("CONNECT_OFFSET_STORAGE_TOPIC", "connect-storage-topic")
@@ -71,6 +75,7 @@ public class AvroSchemaRegistryIT {
             .withEnv("CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR", "1")
             .withEnv("CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR", "1")
             .withEnv("CONNECT_STATUS_STORAGE_REPLICATION_FACTOR", "1")
+//            .withEnv("QDB_DEBUG", "true")
             .withNetwork(network)
             .withExposedPorts(8083)
             .withCopyFileToContainer(MountableFile.forHostPath(connectorJarResolver.getJarPath()), "/usr/share/java/kafka/questdb-connector.jar")
@@ -84,7 +89,7 @@ public class AvroSchemaRegistryIT {
                     .withStartupTimeout(ofMinutes(5)));
 
     @Container
-    private GenericContainer<?> schemaRegistry = new GenericContainer<>(DockerImageName.parse("confluentinc/cp-schema-registry:7.2.2"))
+    private GenericContainer<?> schemaRegistry = new GenericContainer<>(DockerImageName.parse("confluentinc/cp-schema-registry:7.6.0"))
             .withNetwork(network)
             .withNetworkAliases("schema-registry")
             .withEnv("SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS", kafkaContainer.getNetworkAliases().get(0) + ":9092")
@@ -144,6 +149,7 @@ public class AvroSchemaRegistryIT {
     }
 
     private void startConnector(String topicName) {
+        String confString = "http::addr=" + questDBContainer.getNetworkAliases().get(0) + ":" + QuestDBUtils.QUESTDB_HTTP_PORT + ";auto_flush_rows=1;";
         ConnectorConfiguration connector = ConnectorConfiguration.create()
                 .with("connector.class", QuestDBSinkConnector.class.getName())
                 .with("tasks.max", "1")
@@ -153,7 +159,7 @@ public class AvroSchemaRegistryIT {
                 .with("topics", topicName)
                 .with(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birthday")
                 .with(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false")
-                .with("host", questDBContainer.getNetworkAliases().get(0) + ":" + QuestDBUtils.QUESTDB_ILP_PORT);
+                .with("client.conf.string", confString);
         connectContainer.registerConnector("my-connector", connector);
     }
 
