@@ -136,7 +136,13 @@ public class ExactlyOnceIT {
             Files.createDirectories(kafkaData, PosixFilePermissions.asFileAttribute(rwxrwxrwx));
 //            p.of(kafkaData.toAbsolutePath().toString());
 //            io.questdb.std.Files.mkdirs(p, 0_777);
-            String voters = "0@kafka0:9094,1@kafka1:9094,2@kafka2:9094"; // todo: make it configurable
+            StringBuilder votersBuilder = new StringBuilder();
+            for (int i = 0; i < KAFKA_CLUSTER_SIZE; i++) {
+                if (i > 0) {
+                    votersBuilder.append(',');
+                }
+                votersBuilder.append(i).append("@kafka").append(i).append(":9094");
+            }
             return new KafkaContainer(KAFKA_CONTAINER_IMAGE)
                     .withNetwork(network)
                     .withNetworkAliases("kafka" + id)
@@ -147,7 +153,7 @@ public class ExactlyOnceIT {
                     .withEnv("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "3")
                     .withEnv("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "2")
                     .withEnv("KAFKA_NUM_PARTITIONS", "3")
-                    .withEnv("KAFKA_CONTROLLER_QUORUM_VOTERS", voters)
+                    .withEnv("KAFKA_CONTROLLER_QUORUM_VOTERS", votersBuilder.toString())
                     .withFileSystemBind(kafkaData.toAbsolutePath().toString(), "/var/lib/kafka/data")
                     .withCreateContainerCmdModifier(cmd -> cmd.withHostName("kafka" + id));
 //                    .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("kafka" + id)));
@@ -297,7 +303,6 @@ public class ExactlyOnceIT {
                 "\"key.converter\":\"org.apache.kafka.connect.storage.StringConverter\"," +
                 "\"value.converter\":\"org.apache.kafka.connect.json.JsonConverter\"," +
                 "\"topics\":\"mytopic\"," +
-                "\"consumer.override.max.poll.records\":\"10000\"," +
                 "\"value.converter.schemas.enable\":\"false\"," +
                 "\"timestamp.field.name\":\"ts\"," +
                 "\"timestamp.units\":\"nanos\"," +
