@@ -164,13 +164,13 @@ public final class QuestDBSinkTask extends SinkTask {
 
     private void onSenderException(Exception e) {
         if (httpTransport) {
+            closeSenderSilently();
             throw new ConnectException("Failed to send data to QuestDB", e);
         }
 
         batchesSinceLastError = 0;
         if (--remainingRetries > 0) {
             closeSenderSilently();
-            sender = null;
             log.debug("Sender exception, retrying in {} ms", config.getRetryBackoffMs());
             context.timeout(config.getRetryBackoffMs());
             throw new RetriableException(e);
@@ -180,12 +180,14 @@ public final class QuestDBSinkTask extends SinkTask {
     }
 
     private void closeSenderSilently() {
-        try {
-            if (sender != null) {
+        if (sender != null) {
+            try {
                 sender.close();
+            } catch (Exception ex) {
+                log.warn("Failed to close sender", ex);
+            } finally {
+                sender = null;
             }
-        } catch (Exception ex) {
-            log.warn("Failed to close sender", ex);
         }
     }
 
@@ -445,7 +447,7 @@ public final class QuestDBSinkTask extends SinkTask {
     public void flush(Map<TopicPartition, OffsetAndMetadata> map) {
         if (httpTransport) {
             try {
-                log.info("Flushing data to QuestDB");
+                log.debug("Flushing data to QuestDB");
                 sender.flush();
             } catch (LineSenderException | HttpClientException e) {
                 onSenderException(e);

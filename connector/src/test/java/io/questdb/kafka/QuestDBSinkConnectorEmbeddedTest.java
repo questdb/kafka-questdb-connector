@@ -307,7 +307,9 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\"\r\n"
                         + "\"John\",\"Doe\",49\r\n",
                 "select firstname,lastname,age from " + topicName + " where age = 49",
-                httpPort);
+                20,
+                httpPort
+        );
     }
 
     @ParameterizedTest
