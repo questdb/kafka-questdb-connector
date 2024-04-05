@@ -168,7 +168,8 @@ public class DebeziumIT {
                             + "2,\"IDB\",42.0\r\n"
                             + "3,\"PDB\",42.0\r\n"
                             + "4,\"KDB\",42.0\r\n",
-                    "select id, symbol, last(price) as last_price from " + questTableName,
+                    "select id, symbol, last(price) as last_price from " + questTableName + " order by id",
+                    120,
                     questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
 
             // total number of rows is equal to the number of updates and inserts
