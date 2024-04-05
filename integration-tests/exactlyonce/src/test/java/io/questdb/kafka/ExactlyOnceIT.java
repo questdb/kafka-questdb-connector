@@ -155,8 +155,8 @@ public class ExactlyOnceIT {
                     .withEnv("KAFKA_NUM_PARTITIONS", "3")
                     .withEnv("KAFKA_CONTROLLER_QUORUM_VOTERS", votersBuilder.toString())
                     .withFileSystemBind(kafkaData.toAbsolutePath().toString(), "/var/lib/kafka/data")
-                    .withCreateContainerCmdModifier(cmd -> cmd.withHostName("kafka" + id));
-//                    .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("kafka" + id)));
+                    .withCreateContainerCmdModifier(cmd -> cmd.withHostName("kafka" + id))
+                    .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("kafka" + id)));
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
