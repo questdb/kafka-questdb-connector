@@ -20,6 +20,43 @@ import static org.junit.jupiter.api.Assertions.*;
 public class QuestDBSinkConnectorConfigTest {
 
     @Test
+    public void testClientConfigurationStringCannotBeCombinedWithExplicitClientConfig() {
+        assertCannotBeSetTogetherWithConfigString(QuestDBSinkConnectorConfig.HOST_CONFIG, "localhost");
+        assertCannotBeSetTogetherWithConfigString(QuestDBSinkConnectorConfig.USERNAME, "joe");
+        assertCannotBeSetTogetherWithConfigString(QuestDBSinkConnectorConfig.TOKEN, "secret");
+        assertCannotBeSetTogetherWithConfigString(QuestDBSinkConnectorConfig.TLS, "true");
+        assertCannotBeSetTogetherWithConfigString(QuestDBSinkConnectorConfig.TLS, "false");
+        assertCannotBeSetTogetherWithConfigString(QuestDBSinkConnectorConfig.TLS_VALIDATION_MODE_CONFIG, "default");
+        assertCannotBeSetTogetherWithConfigString(QuestDBSinkConnectorConfig.TLS_VALIDATION_MODE_CONFIG, "insecure");
+    }
+
+    @Test
+    public void testEitherHostOrClientConfigStringMustBeSet() {
+        Map<String, String> config = baseConnectorProps();
+        QuestDBSinkConnector connector = new QuestDBSinkConnector();
+        try {
+            connector.validate(config);
+            fail("Expected IllegalArgumentException");
+        } catch (IllegalArgumentException e) {
+            assertEquals("Either 'client.conf.string' or 'host' must be set.", e.getMessage());
+        }
+    }
+
+    private void assertCannotBeSetTogetherWithConfigString(String configKey, String configValue) {
+        Map<String, String> config = baseConnectorProps();
+        config.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, "http::addr=localhost;");
+        config.put(configKey, configValue);
+
+        QuestDBSinkConnector connector = new QuestDBSinkConnector();
+        try {
+            connector.validate(config);
+            fail("Expected IllegalArgumentException");
+        } catch (IllegalArgumentException e) {
+            assertEquals("Only one of '" + configKey + "' or 'client.conf.string' must be set.", e.getMessage());
+        }
+    }
+
+    @Test
     public void testTimeunitsValidator() {
         ConfigDef conf = QuestDBSinkConnectorConfig.conf();
         ConfigDef.ConfigKey configKey = conf.configKeys().get(QuestDBSinkConnectorConfig.TIMESTAMP_UNITS_CONFIG);
@@ -52,6 +89,7 @@ public class QuestDBSinkConnectorConfigTest {
     public void testTlsConfig() {
         ConfigDef confDef = QuestDBSinkConnectorConfig.conf();
         Map<String, String> config = baseConnectorProps();
+        config.put("client.conf.string", "http::addr=localhost;tls=true");
         config.put("tls", "true");
         QuestDBSinkConnectorConfig sinkConnectorConfig = new QuestDBSinkConnectorConfig(confDef, config);
 
@@ -80,18 +118,21 @@ public class QuestDBSinkConnectorConfigTest {
     public void testExplicitTablenameValidation() {
         ConfigDef confDef = QuestDBSinkConnectorConfig.conf();
         Map<String, String> config = baseConnectorProps();
+        config.put("client.conf.string", "http::addr=localhost;tls=true");
         // positive case I - valid explicit table name
         ConfigValue configValue = confDef.validate(config).stream().filter(c -> c.name().equals(QuestDBSinkConnectorConfig.TABLE_CONFIG)).findFirst().get();
         assertTrue(configValue.errorMessages().isEmpty());
 
         // positive case II - missing explicit table name
         config = baseConnectorProps();
+        config.put("client.conf.string", "http::addr=localhost;tls=true");
         config.remove(QuestDBSinkConnectorConfig.TABLE_CONFIG);
         configValue = confDef.validate(config).stream().filter(c -> c.name().equals(QuestDBSinkConnectorConfig.TABLE_CONFIG)).findFirst().get();
         assertTrue(configValue.errorMessages().isEmpty());
 
         // negative case - invalid characters in explicit table name
         config = baseConnectorProps();
+        config.put("client.conf.string", "http::addr=localhost;tls=true");
         config.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, "not?valid");
         configValue = confDef.validate(config).stream().filter(c -> c.name().equals(QuestDBSinkConnectorConfig.TABLE_CONFIG)).findFirst().get();
         assertEquals(1, configValue.errorMessages().size());
@@ -104,7 +145,6 @@ public class QuestDBSinkConnectorConfigTest {
         props.put("topics", "myTopic");
         props.put(KEY_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
-        props.put("host", "localhost");
         return props;
     }
 }

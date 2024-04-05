@@ -617,7 +617,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
             connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
             fail("Expected ConnectException");
         } catch (ConnectException e) {
-            assertThat(e.getMessage(), containsString("timestamp.field.name with timestamp.kafka.native"));
+            assertThat(e.getMessage(), containsString("'timestamp.field.name' with 'timestamp.kafka.native'"));
         }
     }
 
