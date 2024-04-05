@@ -1,7 +1,7 @@
 version: '2.1'
 services:
   questdb:
-    image: questdb/questdb:6.6.1
+    image: questdb/questdb:7.4.0
     expose:
       - "9009"
     ports:
