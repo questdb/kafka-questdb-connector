@@ -17,11 +17,9 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.jetbrains.annotations.NotNull;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
-import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.KafkaContainer;
 import org.testcontainers.containers.Network;
-import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.containers.wait.strategy.HttpWaitStrategy;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
@@ -57,7 +55,7 @@ public class AvroSchemaRegistryIT {
     private final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:7.4.0")
             .withNetwork(network)
             .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT)
-            .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
+//            .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
             .withEnv("QDB_CAIRO_COMMIT_LAG", "100")
             .withEnv("JAVA_OPTS", "-Djava.locale.providers=JRE,SPI");
 
@@ -80,7 +78,7 @@ public class AvroSchemaRegistryIT {
             .withExposedPorts(8083)
             .withCopyFileToContainer(MountableFile.forHostPath(connectorJarResolver.getJarPath()), "/usr/share/java/kafka/questdb-connector.jar")
             .withCopyFileToContainer(MountableFile.forHostPath(questdbJarResolver.getJarPath()), "/usr/share/java/kafka/questdb.jar")
-            .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("connect")))
+//            .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("connect")))
             .dependsOn(kafkaContainer, questDBContainer)
             .waitingFor(new HttpWaitStrategy()
                     .forPath("/connectors")

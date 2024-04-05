@@ -20,7 +20,7 @@
         <kafka.scala.version>2.13</kafka.scala.version>
         <kafka.version>3.3.1</kafka.version>
         <junit.version>5.9.0</junit.version>
-        <testcontainers.version>1.19.1</testcontainers.version>
+        <testcontainers.version>1.19.7</testcontainers.version>
         <slf4j.version>1.7.36</slf4j.version>
         <awaitability.version>4.1.0</awaitability.version>
         <okhttp.version>4.10.0</okhttp.version>
