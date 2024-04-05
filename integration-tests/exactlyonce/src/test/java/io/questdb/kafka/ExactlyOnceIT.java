@@ -134,6 +134,9 @@ public class ExactlyOnceIT {
 
             // create world-writable directory
             Files.createDirectories(kafkaData, PosixFilePermissions.asFileAttribute(rwxrwxrwx));
+            Files.setPosixFilePermissions(kafkaData, rwxrwxrwx);
+            Files.setPosixFilePermissions(kafkaData.getParent(), rwxrwxrwx);
+            Files.setPosixFilePermissions(kafkaData.getParent().getParent(), rwxrwxrwx);
 //            p.of(kafkaData.toAbsolutePath().toString());
 //            io.questdb.std.Files.mkdirs(p, 0_777);
             StringBuilder votersBuilder = new StringBuilder();
