@@ -111,7 +111,7 @@ final class BufferingSender implements Sender {
 
     @Override
     public Sender timestampColumn(CharSequence charSequence, Instant instant) {
-        return null;
+        throw new UnsupportedOperationException("Not implemented");
     }
 
     @Override
