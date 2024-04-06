@@ -42,6 +42,7 @@ public final class QuestDBSinkTask extends SinkTask {
     private DateFormat dataFormat;
     private boolean kafkaTimestampsEnabled;
     private boolean httpTransport;
+    private int allowedLag;
 
     @Override
     public String version() {
@@ -76,6 +77,7 @@ public final class QuestDBSinkTask extends SinkTask {
         this.timestampColumnName = config.getDesignatedTimestampColumnName();
         this.kafkaTimestampsEnabled = config.isDesignatedTimestampKafkaNative();
         this.timestampUnits = config.getTimestampUnitsOrNull();
+        this.allowedLag = config.getAllowedLag();
     }
 
     private Sender createRawSender() {
@@ -142,7 +144,7 @@ public final class QuestDBSinkTask extends SinkTask {
             // there are some records to send. good.
             // let's set a timeout so Kafka Connect will call us again in time
             // even if there are no new records to send. this gives us a chance to flush the buffer.
-            context.timeout(1000);
+            context.timeout(allowedLag);
         }
 
         if (log.isDebugEnabled()) {

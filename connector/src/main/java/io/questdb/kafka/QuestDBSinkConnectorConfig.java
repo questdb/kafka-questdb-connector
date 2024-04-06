@@ -64,6 +64,12 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String CONFIGURATION_STRING_CONFIG = "client.conf.string";
     public static final String CONFIGURATION_STRING_DOC = "Configuration string for QuestDB client";
 
+    public static final String ALLOWED_LAG_CONFIG = "allowed.lag";
+    public static final String ALLOWED_LAG_DOC = "The maximum lag in milliseconds allowed for the connector to keep buffered data in memory " +
+            "if there are no new records in Kafka topics. Higher lag allows more batching and improves throughput, but increase the time " +
+            "it takes to detect new data in Kafka topics. Low lag reduces the time it takes to detect new data in Kafka topics, but may " +
+            "reduce throughput. The default value is 1000 ms.";
+
     public static final String RETRY_BACKOFF_MS = "retry.backoff.ms";
     private static final String RETRY_BACKOFF_MS_DOC = "The time in milliseconds to wait following an error before a retry attempt is made";
 
@@ -104,11 +110,16 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(TIMESTAMP_STRING_FIELDS, Type.STRING, null, Importance.MEDIUM, TIMESTAMP_STRING_FIELDS_DOC)
                 .define(DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG, Type.BOOLEAN, false, Importance.MEDIUM, DESIGNATED_TIMESTAMP_KAFKA_NATIVE_DOC)
                 .define(TLS_VALIDATION_MODE_CONFIG, Type.STRING, "default", ConfigDef.ValidString.in("default", "insecure"), Importance.LOW, TLS_VALIDATION_MODE_DOC)
-                .define(CONFIGURATION_STRING_CONFIG, Type.PASSWORD, null, Importance.HIGH, CONFIGURATION_STRING_DOC);
+                .define(CONFIGURATION_STRING_CONFIG, Type.PASSWORD, null, Importance.HIGH, CONFIGURATION_STRING_DOC)
+                .define(ALLOWED_LAG_CONFIG, Type.INT, 1000, ConfigDef.Range.between(1, Integer.MAX_VALUE), Importance.LOW, ALLOWED_LAG_DOC);
     }
 
     public Password getConfigurationString() {
         return getPassword(CONFIGURATION_STRING_CONFIG);
+    }
+
+    public int getAllowedLag() {
+        return getInt(ALLOWED_LAG_CONFIG);
     }
 
     public String getTlsValidationMode() {
