@@ -20,6 +20,7 @@ import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.FixedHostPortGenericContainer;
@@ -40,6 +41,7 @@ import java.util.concurrent.TimeUnit;
 
 import static java.util.Collections.singletonMap;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.KEY_CONVERTER_CLASS_CONFIG;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.VALUE_CONVERTER_CLASS_CONFIG;
 import static org.hamcrest.CoreMatchers.containsString;
@@ -301,7 +303,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         questDBContainer = newQuestDbConnector();
         for (int i = 0; i < 50; i++) {
             connect.kafka().produce(topicName, "key3", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":" + i + "}");
-            Thread.sleep(100);
         }
 
         QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\"\r\n"
@@ -310,6 +311,33 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 20,
                 httpPort
         );
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testJsonNestedLongTimestampInSeconds(boolean useHttp) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "timeseriesElement_observationDateTime");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+        connect.kafka().produce(topicName, "key",
+                "{\"timeseriesElement\":{\n" +
+                "\"open\":65994.204593157,\n" +
+                "\"close\":66213.0396203394,\n" +
+                "\"low\":65106.5637640695,\n" +
+                "\"high\":66467.4682495325,\n" +
+                "\"observationDateTime\":1712185812,\n" +
+                "\"volume\":104734.408713828\n" +
+                "}}"
+        );
+
+        QuestDBUtils.assertSqlEventually(
+                "\"key\",\"timeseriesElement_volume\",\"timeseriesElement_high\",\"timeseriesElement_low\",\"timeseriesElement_close\",\"timeseriesElement_open\",\"timestamp\"\r\n" +
+                        "\"key\",104734.408713828,66467.4682495325,65106.5637640695,66213.0396203394,65994.204593157,\"2024-04-03T23:10:12.000000Z\"\r\n",
+                "select * from " + topicName,
+                httpPort);
     }
 
     @ParameterizedTest
@@ -550,24 +578,17 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testTimestampUnitResolution_millis(boolean useHttp) {
-        testTimestampUnitResolution0("millis", useHttp);
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testTimestampUnitResolution_micros(boolean useHttp) {
-        testTimestampUnitResolution0("micros", useHttp);
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testTimestampUnitResolution_nanos(boolean useHttp) {
-        testTimestampUnitResolution0("nanos", useHttp);
-    }
-
-    private void testTimestampUnitResolution0(String mode, boolean useHttp) {
+    @CsvSource({
+            "seconds, true",
+            "seconds, false",
+            "millis, true",
+            "millis, false",
+            "micros, true",
+            "micros, false",
+            "nanos, true",
+            "nanos, false",
+    })
+    public void testTimestampUnitResolution0(String mode, boolean useHttp) {
         TimeUnit unit;
         switch (mode) {
             case "nanos":
@@ -578,6 +599,9 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 break;
             case "millis":
                 unit = TimeUnit.MILLISECONDS;
+                break;
+            case "seconds":
+                unit = TimeUnit.SECONDS;
                 break;
             default:
                 throw new IllegalArgumentException("Unknown mode: " + mode);
@@ -601,9 +625,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.kafka().produce(topicName, "foo", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"birth\":0}");
         connect.kafka().produce(topicName, "bar", "{\"firstname\":\"Jane\",\"lastname\":\"Doe\",\"birth\":" + birthTarget + "}");
 
+
+        String upperBound = unit == SECONDS ? "2206-11-20T17:46:39.000000Z" : "2206-11-20T17:46:39.999000Z";
         QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"timestamp\"\r\n"
                         + "\"John\",\"Doe\",\"1970-01-01T00:00:00.000000Z\"\r\n"
-                        + "\"Jane\",\"Doe\",\"2206-11-20T17:46:39.999000Z\"\r\n",
+                        + "\"Jane\",\"Doe\",\""+ upperBound + "\"\r\n",
                 "select firstname,lastname,timestamp from " + topicName,
                 httpPort);
     }
