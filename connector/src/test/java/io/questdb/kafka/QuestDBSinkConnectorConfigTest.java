@@ -72,7 +72,7 @@ public class QuestDBSinkConnectorConfigTest {
             configKey.validator.ensureValid(QuestDBSinkConnectorConfig.TIMESTAMP_UNITS_CONFIG, "foo");
             fail("Expected ConfigException");
         } catch (ConfigException e) {
-            assertEquals("Invalid value foo for configuration timestamp.units: String must be one of: auto, millis, micros, nanos", e.getMessage());
+            assertEquals("Invalid value foo for configuration timestamp.units: String must be one of: auto, seconds, millis, micros, nanos", e.getMessage());
         }
     }
 

@@ -38,7 +38,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     private static final String TIMESTAMP_STRING_FIELDS_DOC = "Comma-separated list of string fields that should be parsed as timestamps.";
 
     public static final String TIMESTAMP_UNITS_CONFIG = "timestamp.units";
-    private static final String TIMESTAMP_UNITS_DOC = "Units of designated timestamp field. Possible values: auto, millis, micros, nanos";
+    private static final String TIMESTAMP_UNITS_DOC = "Units of designated timestamp field. Possible values: auto, seconds, millis, micros, nanos";
 
     public static final String INCLUDE_KEY_CONFIG = "include.key";
     private static final String INCLUDE_KEY_DOC = "Include key in the table";
@@ -97,7 +97,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(USERNAME, Type.STRING, "admin", Importance.MEDIUM, USERNAME_DOC)
                 .define(TOKEN, Type.PASSWORD, null, Importance.MEDIUM, TOKEN_DOC)
                 .define(TLS, Type.BOOLEAN, false, Importance.MEDIUM, TLS_DOC)
-                .define(TIMESTAMP_UNITS_CONFIG, Type.STRING, "auto", ConfigDef.ValidString.in("auto", "millis", "micros", "nanos"), Importance.LOW, TIMESTAMP_UNITS_DOC, null, -1, ConfigDef.Width.NONE, TIMESTAMP_UNITS_CONFIG, Collections.emptyList(), TimestampUnitsRecommender.INSTANCE)
+                .define(TIMESTAMP_UNITS_CONFIG, Type.STRING, "auto", ConfigDef.ValidString.in("auto", "seconds", "millis", "micros", "nanos"), Importance.LOW, TIMESTAMP_UNITS_DOC, null, -1, ConfigDef.Width.NONE, TIMESTAMP_UNITS_CONFIG, Collections.emptyList(), TimestampUnitsRecommender.INSTANCE)
                 .define(RETRY_BACKOFF_MS, Type.LONG, 3_000, Importance.LOW, RETRY_BACKOFF_MS_DOC)
                 .define(MAX_RETRIES, Type.INT, 10, Importance.LOW, MAX_RETRIES_DOC)
                 .define(TIMESTAMP_FORMAT, Type.STRING, DEFAULT_TIMESTAMP_FORMAT, TimestampFormatValidator.INSTANCE, Importance.MEDIUM, TIMESTAMP_FORMAT_DOC)
@@ -178,6 +178,8 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public TimeUnit getTimestampUnitsOrNull() {
         String configured = getString(TIMESTAMP_UNITS_CONFIG);
         switch (configured) {
+            case "seconds":
+                return TimeUnit.SECONDS;
             case "millis":
                 return TimeUnit.MILLISECONDS;
             case "micros":
@@ -187,7 +189,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
             case "auto":
                 return null;
             default:
-                throw new ConnectException("Unknown timestamp units mode: " + configured + ". Possible values: auto, millis, micros, nanos");
+                throw new ConnectException("Unknown timestamp units mode: " + configured + ". Possible values: auto, seconds, millis, micros, nanos");
         }
     }
 

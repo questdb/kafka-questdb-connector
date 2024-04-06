@@ -27,6 +27,9 @@ public class TimestampHelperTest {
                 .setTimeOfDay(17, 46, 39, 999)
                 .build().getTime();
 
+        assertEquals(TimeUnit.SECONDS, TimestampHelper.getTimestampUnits(null, lowerBound.getTime() / 1000));
+        assertEquals(TimeUnit.SECONDS, TimestampHelper.getTimestampUnits(null, upperBound.getTime() / 1000));
+
         assertEquals(TimeUnit.MILLISECONDS, TimestampHelper.getTimestampUnits(null, lowerBound.getTime()));
         assertEquals(TimeUnit.MILLISECONDS, TimestampHelper.getTimestampUnits(null, upperBound.getTime()));
 
@@ -39,6 +42,9 @@ public class TimestampHelperTest {
 
     @Test
     public void testBoundaries_explicit() {
+        assertEquals(TimeUnit.SECONDS, TimestampHelper.getTimestampUnits(TimeUnit.SECONDS, 0));
+        assertEquals(TimeUnit.SECONDS, TimestampHelper.getTimestampUnits(TimeUnit.SECONDS, Long.MAX_VALUE));
+
         assertEquals(TimeUnit.MILLISECONDS, TimestampHelper.getTimestampUnits(TimeUnit.MILLISECONDS, 0));
         assertEquals(TimeUnit.MILLISECONDS, TimestampHelper.getTimestampUnits(TimeUnit.MILLISECONDS, Long.MAX_VALUE));
 
@@ -51,7 +57,7 @@ public class TimestampHelperTest {
 
     @Test
     public void testSlack() {
-        assertEquals(TimeUnit.MILLISECONDS, TimestampHelper.getTimestampUnits(null, 1712188800));
+        assertEquals(TimeUnit.SECONDS, TimestampHelper.getTimestampUnits(null, 1712188800));
     }
 
 }
