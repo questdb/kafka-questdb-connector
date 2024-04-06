@@ -3,7 +3,7 @@
     <parent>
         <artifactId>kafka-questdb-connector-root</artifactId>
         <groupId>org.questdb</groupId>
-        <version>0.10-SNAPSHOT</version>
+        <version>0.10</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
@@ -167,7 +167,7 @@
         <connection>scm:git:https://github.com/questdb/kafka-questdb-connector.git</connection>
         <developerConnection>scm:git:https://github.com/questdb/kafka-questdb-connector.git</developerConnection>
         <url>https://github.com/questdb/kafka-questdb-connector</url>
-        <tag>HEAD</tag>
+        <tag>v0.10</tag>
     </scm>
 
 </project>
