@@ -29,7 +29,7 @@ Bear in mind the sample starts multiple containers. It's running fine on my mach
    It starts the Debezium connector that will capture changes from Postgres and feed them to Kafka.
 8. Execute following command to start QuestDB Kafka Connect sink:
     ```shell
-    curl -X POST -H "Content-Type: application/json" -d '{"name":"questdb-connect","config":{"topics":"dbserver1.public.stock","table":"stock", "connector.class":"io.questdb.kafka.QuestDBSinkConnector","tasks.max":"1","key.converter":"org.apache.kafka.connect.storage.StringConverter","value.converter":"org.apache.kafka.connect.json.JsonConverter","client.conf.string":"http::addr=questdb;auto_flush_interval=1000000;", "transforms":"unwrap", "transforms.unwrap.type":"io.debezium.transforms.ExtractNewRecordState", "include.key": "false", "symbols": "symbol", "timestamp.field.name": "last_update"}}' localhost:8083/connectors
+    curl -X POST -H "Content-Type: application/json" -d '{"name":"questdb-connect","config":{"topics":"dbserver1.public.stock","table":"stock", "connector.class":"io.questdb.kafka.QuestDBSinkConnector","tasks.max":"1","key.converter":"org.apache.kafka.connect.storage.StringConverter","value.converter":"org.apache.kafka.connect.json.JsonConverter","client.conf.string":"http::addr=questdb;", "transforms":"unwrap", "transforms.unwrap.type":"io.debezium.transforms.ExtractNewRecordState", "include.key": "false", "symbols": "symbol", "timestamp.field.name": "last_update"}}' localhost:8083/connectors
     ```
    It starts the QuestDB Kafka Connect sink that will read changes from Kafka and write them to QuestDB.
 9. Go to QuestDB Web Console running at http://localhost:19000/ and execute following query:
@@ -129,7 +129,7 @@ Most of the fields are self-explanatory. The only non-obvious one is `database.s
 ### Kafka QuestDB connector
 The Kafka QuestDB connector re-uses the same Kafka Connect runtime as the Debezium connector. It's also started using `curl` command. This is how we started the QuestDB connector:
 ```shell
-curl -X POST -H "Content-Type: application/json" -d '{"name":"questdb-connect","config":{"topics":"dbserver1.public.stock","table":"stock", "connector.class":"io.questdb.kafka.QuestDBSinkConnector","tasks.max":"1","key.converter":"org.apache.kafka.connect.storage.StringConverter","value.converter":"org.apache.kafka.connect.json.JsonConverter","client.conf.string":"http::addr=questdb;auto_flush_interval=1000000;", "transforms":"unwrap", "transforms.unwrap.type":"io.debezium.transforms.ExtractNewRecordState", "include.key": "false", "symbols": "symbol", "timestamp.field.name": "last_update"}}' localhost:8083/connectors
+curl -X POST -H "Content-Type: application/json" -d '{"name":"questdb-connect","config":{"topics":"dbserver1.public.stock","table":"stock", "connector.class":"io.questdb.kafka.QuestDBSinkConnector","tasks.max":"1","key.converter":"org.apache.kafka.connect.storage.StringConverter","value.converter":"org.apache.kafka.connect.json.JsonConverter","client.conf.string":"http::addr=questdb;", "transforms":"unwrap", "transforms.unwrap.type":"io.debezium.transforms.ExtractNewRecordState", "include.key": "false", "symbols": "symbol", "timestamp.field.name": "last_update"}}' localhost:8083/connectors
 ```
 This is the connector JSON configuration nicely formatted:
 ```json
@@ -142,7 +142,7 @@ This is the connector JSON configuration nicely formatted:
     "tasks.max": "1",
     "key.converter": "org.apache.kafka.connect.storage.StringConverter",
     "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-    "client.conf.string": "http::addr=questdb;auto_flush_interval=1000000;",
+    "client.conf.string": "http::addr=questdb;",
     "transforms": "unwrap",
     "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
     "include.key": "false",
@@ -153,7 +153,7 @@ This is the connector JSON configuration nicely formatted:
 ```
 Again, most of the fields are obvious. Let's focus on the non-obvious ones.
 1. `"symbols": "symbol"` this instruct to connector to use the [QuestDB symbol type](https://questdb.io/docs/concept/symbol/) for a column named "symbols". This column has low cardinality thus it's a good candidate for symbol type.
-2. `"client.conf.string": "http::addr=questdb;auto_flush_interval=1000000;"` this configures the QuestDB client to use the HTTP transport and connect to a hostname `questdb`. The hostname is defined in the [docker-compose.yml](docker-compose.yml) file. The `auto_flush_interval=1000000` controls frequency of automatic flushing data to QuestDB. It's set to 1000 seconds which effectively disables automatic interval-based flushing.
+2. `"client.conf.string": "http::addr=questdb;"` this configures the QuestDB client to use the HTTP transport and connect to a hostname `questdb`. The hostname is defined in the [docker-compose.yml](docker-compose.yml) file.
 3. `"timestamp.field.name": "last_update"` this instructs the connector to use the `last_update` column as the [designated timestamp](https://questdb.io/docs/concept/designated-timestamp/) column.
 4. `"transforms":"unwrap"` and `"transforms.unwrap.type"` this instructs the connector to use Debezium's ExtractNewRecordState. 
 
