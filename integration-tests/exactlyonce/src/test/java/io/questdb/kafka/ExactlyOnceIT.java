@@ -297,7 +297,7 @@ public class ExactlyOnceIT {
     }
 
     private static void startConnector() throws IOException, InterruptedException, URISyntaxException {
-        String confString = "http::addr=questdb:9000;auto_flush_rows=10000;auto_flush_interval=" + Integer.MAX_VALUE + ";retry_timeout=60000;";
+        String confString = "http::addr=questdb:9000;auto_flush_rows=10000;retry_timeout=60000;";
 
         String payload = "{\"name\":\"my-connector\",\"config\":{" +
                 "\"tasks.max\":\"4\"," +
