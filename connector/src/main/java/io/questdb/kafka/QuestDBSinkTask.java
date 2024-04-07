@@ -3,11 +3,11 @@ package io.questdb.kafka;
 import io.questdb.client.Sender;
 import io.questdb.cutlass.http.client.HttpClientException;
 import io.questdb.cutlass.line.LineSenderException;
-import io.questdb.cutlass.line.http.LineHttpSender;
 import io.questdb.std.NumericException;
 import io.questdb.std.datetime.DateFormat;
 import io.questdb.std.datetime.microtime.Timestamps;
 import io.questdb.std.datetime.millitime.DateFormatUtils;
+import io.questdb.std.str.StringSink;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.types.Password;
@@ -89,9 +89,9 @@ public final class QuestDBSinkTask extends SinkTask {
         }
         if (confStr != null && !confStr.isEmpty()) {
             log.debug("Using client configuration string");
-            Sender s = Sender.fromConfig(confStr);
-            httpTransport = s instanceof LineHttpSender;
-            return s;
+            StringSink sink = new StringSink();
+            httpTransport = ClientConfUtils.patchConfStr(confStr, sink);
+            return Sender.fromConfig(sink);
         }
         log.debug("Using legacy client configuration");
         Sender.LineSenderBuilder builder = Sender.builder(Sender.Transport.TCP).address(config.getHost());
@@ -128,8 +128,8 @@ public final class QuestDBSinkTask extends SinkTask {
             if (httpTransport) {
                 log.debug("Received empty collection, let's flush the buffer");
                 // Ok, there are no new records to send. Let's flush! Why?
-                // We do not want locally buffered row to be stuck in the buffer for too long. Increases latency
-                // between the time the record is produced and the time it is visible in QuestDB.
+                // We do not want locally buffered row to be stuck in the buffer for too long. It increases
+                // latency between the time the record is produced and the time it is visible in QuestDB.
                 // If the local buffer is empty then flushing is a cheap no-op.
                 try {
                     sender.flush();
@@ -140,11 +140,6 @@ public final class QuestDBSinkTask extends SinkTask {
                 log.debug("Received empty collection, nothing to do");
             }
             return;
-        } if (httpTransport) {
-            // there are some records to send. good.
-            // let's set a timeout so Kafka Connect will call us again in time
-            // even if there are no new records to send. this gives us a chance to flush the buffer.
-            context.timeout(allowedLag);
         }
 
         if (log.isDebugEnabled()) {
@@ -180,6 +175,13 @@ public final class QuestDBSinkTask extends SinkTask {
             }
         } catch (LineSenderException | HttpClientException e) {
             onSenderException(e);
+        }
+
+        if (httpTransport) {
+            // we successfully added some rows to the local buffer.
+            // let's set a timeout so Kafka Connect will call us again in time even if there are
+            // no new records to send. this gives us a chance to flush the buffer.
+            context.timeout(allowedLag);
         }
     }
 
