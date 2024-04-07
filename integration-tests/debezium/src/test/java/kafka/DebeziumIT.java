@@ -70,13 +70,11 @@ public class DebeziumIT {
     private final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:7.4.0")
             .withNetwork(network)
             .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT)
-            .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
-            .withEnv("QDB_CAIRO_COMMIT_LAG", "100")
-            .withEnv("JAVA_OPTS", "-Djava.locale.providers=JRE,SPI");
+            .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")));
 
 
     private ConnectorConfiguration newQuestSinkBaseConfig(String questTableName) {
-        String confString = "http::addr=" + questDBContainer.getNetworkAliases().get(0) + ":9000;auto_flush_rows=1000;";
+        String confString = "http::addr=" + questDBContainer.getNetworkAliases().get(0) + ":9000;";
         return ConnectorConfiguration.create()
                 .with("connector.class", QuestDBSinkConnector.class.getName())
                 .with("client.conf.string", confString)

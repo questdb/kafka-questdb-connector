@@ -64,7 +64,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @BeforeAll
     public static void createContainer() {
-        questDBContainer = newQuestDbConnector();
+        questDBContainer = newQuestDbContainer();
     }
 
     @AfterAll
@@ -85,7 +85,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     private static GenericContainer<?> questDBContainer;
 
-    private static GenericContainer<?> newQuestDbConnector() {
+    private static GenericContainer<?> newQuestDbContainer() {
         FixedHostPortGenericContainer<?> selfGenericContainer = new FixedHostPortGenericContainer<>(OFFICIAL_QUESTDB_DOCKER);
         if (httpPort != -1) {
             selfGenericContainer = selfGenericContainer.withFixedExposedPort(httpPort, QuestDBUtils.QUESTDB_HTTP_PORT);
@@ -120,7 +120,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         Map<String, String> props = new HashMap<>();
         props.put("connector.client.config.override.policy", "All");
-        props.put("offset.flush.interval.ms", "1000");
         connect = new EmbeddedConnectCluster.Builder()
                 .name("questdb-connect-cluster")
                 .workerProps(props)
@@ -300,7 +299,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         }
 
         // restart QuestDB
-        questDBContainer = newQuestDbConnector();
+        questDBContainer = newQuestDbContainer();
         for (int i = 0; i < 50; i++) {
             connect.kafka().produce(topicName, "key3", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":" + i + "}");
         }
@@ -541,7 +540,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     private static void restartQuestDB() {
         questDBContainer.stop();
-        questDBContainer = newQuestDbConnector();
+        questDBContainer = newQuestDbContainer();
     }
 
     @ParameterizedTest
