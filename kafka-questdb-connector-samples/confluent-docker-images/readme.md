@@ -25,7 +25,8 @@ It also uses the [Kafka UI](https://github.com/provectus/kafka-ui) project for K
   {
     "connector.class": "io.questdb.kafka.QuestDBSinkConnector",
     "topics": "Orders",
-    "host": "questdb:9009",
+    "client.conf.string": "http::addr=questdb:9000;",
+    "timestamp.kafka.native": true,
     "name": "questdb",
     "value.converter": "org.apache.kafka.connect.json.JsonConverter",
     "include.key": false,
@@ -56,8 +57,8 @@ The Docker Compose file starts the following containers:
 
 The Kafka Connect container is built from the [Confluent CP Kafka Connect](https://hub.docker.com/r/confluentinc/cp-kafka-connect-base) by image by using the following Dockerfile:
 ```dockerfile
-FROM confluentinc/cp-kafka-connect-base:7.3.2
-RUN confluent-hub install --no-prompt questdb/kafka-questdb-connector:0.6
+FROM confluentinc/cp-kafka-connect-base:7.6.0
+RUN confluent-hub install --no-prompt questdb/kafka-questdb-connector:0.11
 ```
 The `confluent-hub` command installs the QuestDB Kafka connector from the [Confluent Hub](https://www.confluent.io/hub/questdb/kafka-questdb-connector).
 

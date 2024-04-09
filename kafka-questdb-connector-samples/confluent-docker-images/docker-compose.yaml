@@ -17,9 +17,7 @@ services:
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: connect
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
   questdb:
-    image: questdb/questdb:7.0.1
-    expose:
-      - "9009"
+    image: questdb/questdb:7.4.0
     ports:
       - "9000:9000"
     environment:
