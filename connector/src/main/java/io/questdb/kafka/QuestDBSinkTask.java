@@ -51,6 +51,7 @@ public final class QuestDBSinkTask extends SinkTask {
 
     @Override
     public void start(Map<String, String> map) {
+        log.info("Starting QuestDB sink task [version={}, commit={}]", VersionUtil.getVersion(), VersionUtil.getGitHash());
         this.config = new QuestDBSinkConnectorConfig(map);
         String timestampStringFields = config.getTimestampStringFields();
         if (timestampStringFields != null) {
