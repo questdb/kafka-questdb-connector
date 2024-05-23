@@ -28,6 +28,7 @@ public final class QuestDBSinkTask extends SinkTask {
     private static final char STRUCT_FIELD_SEPARATOR = '_';
     private static final String PRIMITIVE_KEY_FALLBACK_NAME = "key";
     private static final String PRIMITIVE_VALUE_FALLBACK_NAME = "value";
+    private static final long FLUSH_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(1);
 
     private static final Logger log = LoggerFactory.getLogger(QuestDBSinkTask.class);
     private Sender sender;
@@ -43,6 +44,10 @@ public final class QuestDBSinkTask extends SinkTask {
     private boolean kafkaTimestampsEnabled;
     private boolean httpTransport;
     private int allowedLag;
+    private long nextFlushNanos;
+    private int pendingRows;
+    private final int maxPendingRows = 75_000;
+    private FlushConfig flushConfig = new FlushConfig();
 
     @Override
     public String version() {
@@ -79,6 +84,7 @@ public final class QuestDBSinkTask extends SinkTask {
         this.kafkaTimestampsEnabled = config.isDesignatedTimestampKafkaNative();
         this.timestampUnits = config.getTimestampUnitsOrNull();
         this.allowedLag = config.getAllowedLag();
+        this.nextFlushNanos = System.nanoTime() + FLUSH_INTERVAL_NANOS;
     }
 
     private Sender createRawSender() {
@@ -91,7 +97,7 @@ public final class QuestDBSinkTask extends SinkTask {
         if (confStr != null && !confStr.isEmpty()) {
             log.debug("Using client configuration string");
             StringSink sink = new StringSink();
-            httpTransport = ClientConfUtils.patchConfStr(confStr, sink);
+            httpTransport = ClientConfUtils.patchConfStr(confStr, sink, flushConfig);
             return Sender.fromConfig(sink);
         }
         log.debug("Using legacy client configuration");
@@ -132,11 +138,7 @@ public final class QuestDBSinkTask extends SinkTask {
                 // We do not want locally buffered row to be stuck in the buffer for too long. It increases
                 // latency between the time the record is produced and the time it is visible in QuestDB.
                 // If the local buffer is empty then flushing is a cheap no-op.
-                try {
-                    sender.flush();
-                } catch (LineSenderException | HttpClientException e) {
-                    onSenderException(e);
-                }
+                flushAndResetCounters();
             } else {
                 log.debug("Received empty collection, nothing to do");
             }
@@ -156,7 +158,27 @@ public final class QuestDBSinkTask extends SinkTask {
                 handleSingleRecord(record);
             }
 
-            if (!httpTransport) {
+            if (httpTransport) {
+                if (pendingRows >= maxPendingRows) {
+                    log.debug("Flushing data to QuestDB due to auto_flush_rows limit [pending-rows={}, max-pending-rows={}]",
+                            pendingRows, maxPendingRows);
+                    flushAndResetCounters();
+                } else {
+                    long remainingNanos = nextFlushNanos - System.nanoTime();
+                    long remainingMs = TimeUnit.NANOSECONDS.toMillis(remainingNanos);
+                    if (remainingMs <= 0) {
+                        log.debug("Flushing data to QuestDB due to auto_flush_interval timeout");
+                        flushAndResetCounters();
+                    } if (allowedLag == 0) {
+                        log.debug("Flushing data to QuestDB due to zero allowed lag");
+                        flushAndResetCounters();
+                    } else {
+                        log.debug("Flushing data to QuestDB in {} ms", remainingMs);
+                        long maxWaitTime = Math.min(remainingMs, allowedLag);
+                        context.timeout(maxWaitTime);
+                    }
+                }
+            } else {
                 log.debug("Sending {} records", collection.size());
                 sender.flush();
                 log.debug("Successfully sent {} records", collection.size());
@@ -177,18 +199,24 @@ public final class QuestDBSinkTask extends SinkTask {
         } catch (LineSenderException | HttpClientException e) {
             onSenderException(e);
         }
+    }
 
-        if (httpTransport) {
-            // we successfully added some rows to the local buffer.
-            // let's set a timeout so Kafka Connect will call us again in time even if there are
-            // no new records to send. this gives us a chance to flush the buffer.
-            context.timeout(allowedLag);
+    private void flushAndResetCounters() {
+        log.debug("Flushing data to QuestDB");
+        try {
+            sender.flush();
+            nextFlushNanos = System.nanoTime() + FLUSH_INTERVAL_NANOS;
+            pendingRows = 0;
+        } catch (LineSenderException | HttpClientException e) {
+            onSenderException(e);
         }
     }
 
     private void onSenderException(Exception e) {
         if (httpTransport) {
             closeSenderSilently();
+            nextFlushNanos = System.nanoTime() + FLUSH_INTERVAL_NANOS;
+            pendingRows = 0;
             throw new ConnectException("Failed to send data to QuestDB", e);
         }
 
@@ -239,6 +267,7 @@ public final class QuestDBSinkTask extends SinkTask {
                 timestampColumnValue = Long.MIN_VALUE;
             }
         }
+        pendingRows++;
     }
 
     private void handleStruct(String parentName, Struct value, Schema schema) {
@@ -470,13 +499,7 @@ public final class QuestDBSinkTask extends SinkTask {
     @Override
     public void flush(Map<TopicPartition, OffsetAndMetadata> map) {
         if (httpTransport) {
-            try {
-                log.debug("Flushing data to QuestDB");
-                sender.flush();
-            } catch (LineSenderException | HttpClientException e) {
-                onSenderException(e);
-                throw new ConnectException("Failed to flush data to QuestDB", e);
-            }
+            flushAndResetCounters();
         }
         // TCP transport flushes after each batch so no need to flush here
     }

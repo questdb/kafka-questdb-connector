@@ -66,7 +66,7 @@ public class QuestDBSinkConnectorIT {
             .withEnv("CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR", "1")
             .withEnv("CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR", "1")
             .withEnv("CONNECT_STATUS_STORAGE_REPLICATION_FACTOR", "1")
-            .withEnv("QDB_CLIENT_CONF", "http::addr=questdb;auto_flush=off;") // intentionally disabled auto-flush
+            .withEnv("QDB_CLIENT_CONF", "http::addr=questdb;")
             .withNetwork(network)
             .withExposedPorts(8083)
             .withCopyFileToContainer(MountableFile.forHostPath(connectorJarResolver.getJarPath()), "/usr/share/java/kafka/questdb-connector.jar")

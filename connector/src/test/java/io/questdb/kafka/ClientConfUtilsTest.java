@@ -1,55 +1,89 @@
 package io.questdb.kafka;
 
-import io.questdb.std.Chars;
 import io.questdb.std.str.StringSink;
+import org.apache.kafka.common.config.ConfigException;
+import org.junit.Assert;
 import org.junit.Test;
+
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 public class ClientConfUtilsTest {
+    private static final int DEFAULT_MAX_PENDING_ROWS = 75_000;
+    private static final long DEFAULT_FLUSH_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(1);
 
     @Test
     public void testHttpTransportIsResolved() {
         StringSink sink = new StringSink();
-        assertTrue(ClientConfUtils.patchConfStr("http::addr=localhost:9000;", sink));
-        assertTrue(ClientConfUtils.patchConfStr("https::addr=localhost:9000;", sink));
-        assertTrue(ClientConfUtils.patchConfStr("https::addr=localhost:9000;", sink));
-        assertFalse(ClientConfUtils.patchConfStr("tcp::addr=localhost:9000;", sink));
-        assertFalse(ClientConfUtils.patchConfStr("tcps::addr=localhost:9000;", sink));
+        FlushConfig flushConfig = new FlushConfig();
+        assertTrue(ClientConfUtils.patchConfStr("http::addr=localhost:9000;", sink, flushConfig));
+        assertTrue(ClientConfUtils.patchConfStr("https::addr=localhost:9000;", sink, flushConfig));
+        assertTrue(ClientConfUtils.patchConfStr("https::addr=localhost:9000;", sink, flushConfig));
+        assertFalse(ClientConfUtils.patchConfStr("tcp::addr=localhost:9000;", sink, flushConfig));
+        assertFalse(ClientConfUtils.patchConfStr("tcps::addr=localhost:9000;", sink, flushConfig));
     }
 
     @Test
-    public void testHttpTransportTimeBasedFlushesDisabledByDefault() {
-        assertConfStringIsPatched("http::addr=localhost:9000;");
-        assertConfStringIsPatched("https::addr=localhost:9000;foo=bar;");
-        assertConfStringIsPatched("https::addr=localhost:9000;auto_flush_rows=1;");
-        assertConfStringIsPatched("https::addr=localhost:9000;auto_flush=on;");
+    public void testClientConfPatching() {
+        assertConfStringIsPatched("http::addr=localhost:9000;", "http::addr=localhost:9000;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
+        assertConfStringIsPatched("https::addr=localhost:9000;foo=bar;", "https::addr=localhost:9000;foo=bar;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
+        assertConfStringIsPatched("https::addr=localhost:9000;auto_flush_rows=1;", "https::addr=localhost:9000;auto_flush=off;",1, DEFAULT_FLUSH_INTERVAL_NANOS);
+        assertConfStringIsPatched("https::addr=localhost:9000;auto_flush=on;", "https::addr=localhost:9000;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
+        assertConfStringIsPatched("https::addr=localhost:9000;foo=bar;auto_flush_interval=100;", "https::addr=localhost:9000;foo=bar;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, TimeUnit.MILLISECONDS.toNanos(100));
+        assertConfStringIsPatched("https::addr=localhost:9000;foo=bar;auto_flush_interval=100;auto_flush_rows=42;", "https::addr=localhost:9000;foo=bar;auto_flush=off;",42, TimeUnit.MILLISECONDS.toNanos(100));
 
-        assertConfStringIsNotPatched("https::addr=localhost:9000;foo=bar;auto_flush_interval=100;");
-        assertConfStringIsNotPatched("https::addr=localhost:9000;foo=bar;auto_flush=off;");
-        assertConfStringIsNotPatched("https::addr=localhost:9000;foo=bar");
+        // with escaped semi-colon
+        assertConfStringIsPatched("https::addr=localhost:9000;foo=b;;ar;auto_flush_interval=100;auto_flush_rows=42;", "https::addr=localhost:9000;foo=b;;ar;auto_flush=off;",42, TimeUnit.MILLISECONDS.toNanos(100));
+
+
+        assertConfStringIsNotPatched("https::addr=localhost:9000;auto_flush_interval=");
+        assertConfStringIsNotPatched("https::addr=localhost:9000;auto_flush_rows=");
+        assertConfStringIsNotPatched("https::addr=localhost:9000;auto_flush=");
+        assertConfStringIsNotPatched("https::addr=localhost:9000;foo=bar"); // missing trailing semicolon
+        assertConfStringIsNotPatched("https::addr=");
         assertConfStringIsNotPatched("https::addr");
         assertConfStringIsNotPatched("https");
+        assertConfStringIsNotPatched("http!");
         assertConfStringIsNotPatched("tcp::addr=localhost:9000;");
         assertConfStringIsNotPatched("tcps::addr=localhost:9000;foo=bar;");
         assertConfStringIsNotPatched("tcps::addr=localhost:9000;auto_flush_rows=1;");
         assertConfStringIsNotPatched("tcps::addr=localhost:9000;auto_flush=on;");
         assertConfStringIsNotPatched("unknown::addr=localhost:9000;auto_flush=on;");
+
+        assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush=foo;", "Unknown auto_flush value [auto_flush=foo]");
+        assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush_interval=foo;", "Invalid auto_flush_interval value [auto_flush_interval=foo]");
+        assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush_rows=foo;", "Invalid auto_flush_rows value [auto_flush_rows=foo]");
+        assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush=off;", "QuestDB Kafka connector cannot have auto_flush disabled");
+        assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush_interval=off;", "QuestDB Kafka connector cannot have auto_flush_interval disabled");
+        assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush_rows=off;", "QuestDB Kafka connector cannot have auto_flush_rows disabled");
     }
 
-    private static void assertConfStringIsPatched(String confStr) {
+    private static void assertConfStringIsPatched(String confStr, String expectedPatchedConfStr, long expectedMaxPendingRows, long expectedFlushNanos) {
         StringSink sink = new StringSink();
-        ClientConfUtils.patchConfStr(confStr, sink);
+        FlushConfig flushConfig = new FlushConfig();
+        ClientConfUtils.patchConfStr(confStr, sink, flushConfig);
 
-        String expected = confStr + "auto_flush_interval=" + Integer.MAX_VALUE + ";";
-        assertTrue(Chars.equals(expected, sink), "Conf string = " + confStr + ", expected = " + expected + ", actual = " + sink);
+        Assert.assertEquals(expectedPatchedConfStr, sink.toString());
     }
 
     private static void assertConfStringIsNotPatched(String confStr) {
         StringSink sink = new StringSink();
-        ClientConfUtils.patchConfStr(confStr, sink);
+        FlushConfig flushConfig = new FlushConfig();
+        ClientConfUtils.patchConfStr(confStr, sink, flushConfig);
 
         assertEquals(confStr, sink.toString());
+    }
+
+    private static void assertConfStringPatchingThrowsConfigException(String confStr, String expectedMsg) {
+        StringSink sink = new StringSink();
+        FlushConfig flushConfig = new FlushConfig();
+        try {
+            ClientConfUtils.patchConfStr(confStr, sink, flushConfig);
+            Assert.fail("Expected ConfigException");
+        } catch (ConfigException e) {
+            assertEquals(expectedMsg, e.getMessage());
+        }
     }
 
 }
