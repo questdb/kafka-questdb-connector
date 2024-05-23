@@ -805,6 +805,87 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 httpPort);
     }
 
+    @Test
+    public void testContentBasedRouting_extractFromValueStruct() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("transforms", "route");
+        props.put("transforms.route.type", "io.github.rerorero.kafka.smt.PayloadBasisRouter$Value");
+        props.put("transforms.route.replacement", topicName + "-{$.firstname}");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .field("age", Schema.INT8_SCHEMA)
+                .build();
+
+        Struct john = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe")
+                .put("age", (byte) 42);
+
+        Struct joe = new Struct(schema)
+                .put("firstname", "Joe")
+                .put("lastname", "Doe")
+                .put("age", (byte) 41);
+
+
+        connect.kafka().produce(topicName, "john", new String(converter.fromConnectData(topicName, schema, john)));
+        connect.kafka().produce(topicName, "joe", new String(converter.fromConnectData(topicName, schema, joe)));
+
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\",\"key\"\r\n"
+                        + "\"John\",\"Doe\",42,\"john\"\r\n",
+                "select firstname, lastname, age, key from '" + topicName + "-John'",
+                httpPort);
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\",\"key\"\r\n"
+                        + "\"Joe\",\"Doe\",41,\"joe\"\r\n",
+                "select firstname, lastname, age, key from '" + topicName + "-Joe'",
+                httpPort);
+    }
+
+    @Test
+    public void testContentBasedRouting_extractFromKey() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put(KEY_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        props.put("key.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put("transforms", "route");
+        props.put("transforms.route.type", "io.github.rerorero.kafka.smt.PayloadBasisRouter$Key");
+        props.put("transforms.route.replacement", topicName + "-{$.name}");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .field("age", Schema.INT8_SCHEMA)
+                .build();
+
+        Struct john = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe")
+                .put("age", (byte) 42);
+
+        Struct joe = new Struct(schema)
+                .put("firstname", "Joe")
+                .put("lastname", "Doe")
+                .put("age", (byte) 41);
+
+
+        connect.kafka().produce(topicName, "{\"name\": \"john\"}", new String(converter.fromConnectData(topicName, schema, john)));
+        connect.kafka().produce(topicName, "{\"name\": \"joe\"}", new String(converter.fromConnectData(topicName, schema, joe)));
+
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\"\r\n"
+                        + "\"John\",\"Doe\",42\r\n",
+                "select firstname, lastname, age from '" + topicName + "-john'",
+                httpPort);
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\"\r\n"
+                        + "\"Joe\",\"Doe\",41\r\n",
+                "select firstname, lastname, age from '" + topicName + "-joe'",
+                httpPort);
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     public void testDesignatedTimestamp_noSchema_unixEpochMillis(boolean useHttp) {

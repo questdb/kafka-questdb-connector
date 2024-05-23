@@ -11,6 +11,12 @@
 
     <dependencies>
         <dependency>
+            <groupId>com.github.rerorero</groupId>
+            <artifactId>kafka-smt-jsonpath-tools</artifactId>
+            <version>0.2.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>org.apache.kafka</groupId>
             <artifactId>kafka-clients</artifactId>
             <version>${kafka.version}</version>
@@ -169,5 +175,12 @@
         <url>https://github.com/questdb/kafka-questdb-connector</url>
         <tag>HEAD</tag>
     </scm>
+
+    <repositories>
+        <repository>
+            <id>jitpack.io</id>
+            <url>https://jitpack.io</url>
+        </repository>
+    </repositories>
 
 </project>
