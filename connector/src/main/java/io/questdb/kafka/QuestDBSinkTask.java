@@ -468,6 +468,18 @@ public final class QuestDBSinkTask extends SinkTask {
     }
 
     @Override
+    public Map<TopicPartition, OffsetAndMetadata> preCommit(Map<TopicPartition, OffsetAndMetadata> currentOffsets) {
+        if (sender != null) {
+            flush(currentOffsets);
+            return currentOffsets;
+        } else {
+            // null sender indicates there was an error and we cannot guarantee that the data was actually sent
+            // returning empty map will cause the task to avoid committing offsets to Kafka
+            return Collections.emptyMap();
+        }
+    }
+
+    @Override
     public void flush(Map<TopicPartition, OffsetAndMetadata> map) {
         if (httpTransport) {
             try {
