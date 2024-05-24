@@ -169,7 +169,7 @@ public final class QuestDBSinkTask extends SinkTask {
                     if (remainingMs <= 0) {
                         log.debug("Flushing data to QuestDB due to auto_flush_interval timeout");
                         flushAndResetCounters();
-                    } if (allowedLag == 0) {
+                    } else if (allowedLag == 0) {
                         log.debug("Flushing data to QuestDB due to zero allowed lag");
                         flushAndResetCounters();
                     } else {
