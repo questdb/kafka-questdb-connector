@@ -997,7 +997,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @Test
-    public void testExtractKafkaIngestionTimestampAsField() {
+    public void testExtractKafkaIngestionTimestampAsField_designated() {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth"); // the field is injected via InsertField SMT
@@ -1032,6 +1032,48 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"timestamp\"\r\n"
                         + "\"John\",\"Doe\",\"2022-10-23T13:53:59.123000Z\"\r\n",
                 "select * from " + topicName,
+                httpPort);
+    }
+
+    @Test
+    public void testExtractKafkaIngestionTimestampAsField_nondesignated_schemaless() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put("value.converter.schemas.enable", "false");
+        props.put("transforms", "InsertField,TimestampConverter");
+        props.put("transforms.InsertField.type", "org.apache.kafka.connect.transforms.InsertField$Value");
+        props.put("transforms.InsertField.timestamp.field", "birth");
+        props.put("transforms.TimestampConverter.type", "org.apache.kafka.connect.transforms.TimestampConverter$Value");
+        props.put("transforms.TimestampConverter.field", "birth");
+        props.put("transforms.TimestampConverter.target.type", "Timestamp");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
+                "create table " + topicName + " (firstname string, lastname string, birth timestamp, ts timestamp) timestamp(ts) partition by day wal",
+                httpPort,
+                QuestDBUtils.Endpoint.EXEC);
+
+        // note: there is no birth field in the message payload
+        String personJson = "{\"firstname\":\"John\",\"lastname\":\"Doe\"}";
+
+        Map<String, Object> prodProps = new HashMap<>();
+        try (KafkaProducer<byte[], byte[]> producer = connect.kafka().createProducer(prodProps)) {
+            java.util.Date birth = new Calendar.Builder()
+                    .setTimeZone(TimeZone.getTimeZone("UTC"))
+                    .setDate(2022, 9, 23) // note: month is 0-based
+                    .setTimeOfDay(13, 53, 59, 123)
+                    .build().getTime();
+            long kafkaTimestamp = birth.getTime();
+            ProducerRecord<byte[], byte[]> producerRecord = new ProducerRecord<>(topicName, null, kafkaTimestamp, "key".getBytes(), personJson.getBytes());
+            producer.send(producerRecord);
+        }
+
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"birth\"\r\n"
+                        + "\"John\",\"Doe\",\"2022-10-23T13:53:59.123000Z\"\r\n",
+                "select firstname, lastname, birth from " + topicName,
                 httpPort);
     }
 
