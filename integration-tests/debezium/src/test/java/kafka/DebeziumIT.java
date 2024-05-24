@@ -63,8 +63,7 @@ public class DebeziumIT {
                     .dependsOn(kafkaContainer)
                     .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("debezium")))
                     .withEnv("CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE", "true")
-                    .withEnv("CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE", "true")
-                    .withEnv("OFFSET_FLUSH_INTERVAL_MS", "1000");
+                    .withEnv("CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE", "true");
 
     @Container
     private final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:7.4.0")

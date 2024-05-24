@@ -171,7 +171,6 @@ public class ExactlyOnceIT {
         return new GenericContainer<>(CONNECT_CONTAINER_IMAGE)
                 .withEnv("CONNECT_BOOTSTRAP_SERVERS", "kafka0:9092")
                 .withEnv("CONNECT_GROUP_ID", "test")
-                .withEnv("CONNECT_OFFSET_FLUSH_INTERVAL_MS", "5000")
                 .withEnv("CONNECT_OFFSET_STORAGE_TOPIC", "connect-storage-topic")
                 .withEnv("CONNECT_CONFIG_STORAGE_TOPIC", "connect-config-topic")
                 .withEnv("CONNECT_STATUS_STORAGE_TOPIC", "connect-status-topic")
@@ -297,7 +296,7 @@ public class ExactlyOnceIT {
     }
 
     private static void startConnector() throws IOException, InterruptedException, URISyntaxException {
-        String confString = "http::addr=questdb:9000;auto_flush_rows=10000;retry_timeout=60000;";
+        String confString = "http::addr=questdb:9000;retry_timeout=60000;";
 
         String payload = "{\"name\":\"my-connector\",\"config\":{" +
                 "\"tasks.max\":\"4\"," +
