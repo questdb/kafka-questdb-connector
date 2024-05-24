@@ -3,7 +3,7 @@
 
     <groupId>org.questdb</groupId>
     <artifactId>kafka-questdb-connector-root</artifactId>
-    <version>0.12-SNAPSHOT</version>
+    <version>0.12</version>
     <modules>
         <module>connector</module>
         <module>integration-tests</module>
@@ -145,7 +145,7 @@
         <connection>scm:git:https://github.com/questdb/kafka-questdb-connector.git</connection>
         <developerConnection>scm:git:https://github.com/questdb/kafka-questdb-connector.git</developerConnection>
         <url>https://github.com/questdb/kafka-questdb-connector</url>
-        <tag>HEAD</tag>
+        <tag>v0.12</tag>
     </scm>
 
     <licenses>
