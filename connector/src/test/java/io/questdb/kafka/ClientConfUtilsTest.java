@@ -65,6 +65,8 @@ public class ClientConfUtilsTest {
         ClientConfUtils.patchConfStr(confStr, sink, flushConfig);
 
         Assert.assertEquals(expectedPatchedConfStr, sink.toString());
+        Assert.assertEquals(expectedMaxPendingRows, flushConfig.autoFlushRows);
+        Assert.assertEquals(expectedFlushNanos, flushConfig.autoFlushNanos);
     }
 
     private static void assertConfStringIsNotPatched(String confStr) {

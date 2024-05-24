@@ -2,7 +2,7 @@ package io.questdb.kafka;
 
 import java.util.concurrent.TimeUnit;
 
-class FlushConfig {
+final class FlushConfig {
     int autoFlushRows;
     long autoFlushNanos;
 

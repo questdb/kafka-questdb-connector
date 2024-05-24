@@ -8,6 +8,8 @@ import io.questdb.std.NumericException;
 import io.questdb.std.str.StringSink;
 import org.apache.kafka.common.config.ConfigException;
 
+import java.util.concurrent.TimeUnit;
+
 final class ClientConfUtils {
     private ClientConfUtils() {
     }
@@ -53,7 +55,7 @@ final class ClientConfUtils {
                     throw new ConfigException("QuestDB Kafka connector cannot have auto_flush_interval disabled");
                 }
                 try {
-                    flushConfig.autoFlushNanos = Numbers.parseLong(tmpSink);
+                    flushConfig.autoFlushNanos = TimeUnit.MILLISECONDS.toNanos(Numbers.parseLong(tmpSink));
                 } catch (NumericException e) {
                     throw new ConfigException("Invalid auto_flush_interval value [auto_flush_interval=" + tmpSink + ']');
                 }

@@ -52,13 +52,13 @@ public final class ConnectTestUtils {
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
 
         String confString;
-        if (!useHttp) {
-            String ilpIUrl = host + ":" + questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT);
-            props.put("host", ilpIUrl);
-        } else {
+        if (useHttp) {
             int port = questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT);
             confString = "http::addr=" + host + ":" + port + ";";
             props.put("client.conf.string", confString);
+        } else {
+            String ilpIUrl = host + ":" + questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT);
+            props.put("host", ilpIUrl);
         }
         return props;
     }

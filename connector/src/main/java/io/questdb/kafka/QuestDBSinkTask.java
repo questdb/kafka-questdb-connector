@@ -28,7 +28,6 @@ public final class QuestDBSinkTask extends SinkTask {
     private static final char STRUCT_FIELD_SEPARATOR = '_';
     private static final String PRIMITIVE_KEY_FALLBACK_NAME = "key";
     private static final String PRIMITIVE_VALUE_FALLBACK_NAME = "value";
-    private static final long FLUSH_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(1);
 
     private static final Logger log = LoggerFactory.getLogger(QuestDBSinkTask.class);
     private Sender sender;
@@ -46,8 +45,7 @@ public final class QuestDBSinkTask extends SinkTask {
     private int allowedLag;
     private long nextFlushNanos;
     private int pendingRows;
-    private final int maxPendingRows = 75_000;
-    private FlushConfig flushConfig = new FlushConfig();
+    private final FlushConfig flushConfig = new FlushConfig();
 
     @Override
     public String version() {
@@ -84,7 +82,7 @@ public final class QuestDBSinkTask extends SinkTask {
         this.kafkaTimestampsEnabled = config.isDesignatedTimestampKafkaNative();
         this.timestampUnits = config.getTimestampUnitsOrNull();
         this.allowedLag = config.getAllowedLag();
-        this.nextFlushNanos = System.nanoTime() + FLUSH_INTERVAL_NANOS;
+        this.nextFlushNanos = System.nanoTime() + flushConfig.autoFlushNanos;
     }
 
     private Sender createRawSender() {
@@ -98,9 +96,12 @@ public final class QuestDBSinkTask extends SinkTask {
             log.debug("Using client configuration string");
             StringSink sink = new StringSink();
             httpTransport = ClientConfUtils.patchConfStr(confStr, sink, flushConfig);
+            if (!httpTransport) {
+                log.info("Using TCP transport, consider using HTTP transport for improved fault tolerance and error handling");
+            }
             return Sender.fromConfig(sink);
         }
-        log.debug("Using legacy client configuration");
+        log.warn("Configuration options 'host', 'tsl', 'token' and 'username' are deprecated and will be removed in the future. Use 'client.conf.string' instead. See: https://questdb.io/docs/third-party-tools/kafka/questdb-kafka/#configuration-options");
         Sender.LineSenderBuilder builder = Sender.builder(Sender.Transport.TCP).address(config.getHost());
         if (config.isTls()) {
             builder.enableTls();
@@ -159,9 +160,9 @@ public final class QuestDBSinkTask extends SinkTask {
             }
 
             if (httpTransport) {
-                if (pendingRows >= maxPendingRows) {
+                if (pendingRows >= flushConfig.autoFlushRows) {
                     log.debug("Flushing data to QuestDB due to auto_flush_rows limit [pending-rows={}, max-pending-rows={}]",
-                            pendingRows, maxPendingRows);
+                            pendingRows, flushConfig.autoFlushRows);
                     flushAndResetCounters();
                 } else {
                     long remainingNanos = nextFlushNanos - System.nanoTime();
@@ -205,7 +206,7 @@ public final class QuestDBSinkTask extends SinkTask {
         log.debug("Flushing data to QuestDB");
         try {
             sender.flush();
-            nextFlushNanos = System.nanoTime() + FLUSH_INTERVAL_NANOS;
+            nextFlushNanos = System.nanoTime() + flushConfig.autoFlushNanos;
             pendingRows = 0;
         } catch (LineSenderException | HttpClientException e) {
             onSenderException(e);
@@ -215,7 +216,7 @@ public final class QuestDBSinkTask extends SinkTask {
     private void onSenderException(Exception e) {
         if (httpTransport) {
             closeSenderSilently();
-            nextFlushNanos = System.nanoTime() + FLUSH_INTERVAL_NANOS;
+            nextFlushNanos = System.nanoTime() + flushConfig.autoFlushNanos;
             pendingRows = 0;
             throw new ConnectException("Failed to send data to QuestDB", e);
         }
