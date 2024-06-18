@@ -23,12 +23,14 @@ import org.slf4j.LoggerFactory;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 public final class QuestDBSinkTask extends SinkTask {
     private static final char STRUCT_FIELD_SEPARATOR = '_';
     private static final String PRIMITIVE_KEY_FALLBACK_NAME = "key";
     private static final String PRIMITIVE_VALUE_FALLBACK_NAME = "value";
 
+    private Function<SinkRecord, ? extends CharSequence> recordToTable;
     private static final Logger log = LoggerFactory.getLogger(QuestDBSinkTask.class);
     private Sender sender;
     private QuestDBSinkConnectorConfig config;
@@ -83,6 +85,7 @@ public final class QuestDBSinkTask extends SinkTask {
         this.timestampUnits = config.getTimestampUnitsOrNull();
         this.allowedLag = config.getAllowedLag();
         this.nextFlushNanos = System.nanoTime() + flushConfig.autoFlushNanos;
+        this.recordToTable = Templating.newTableTableFn(config.getTable());
     }
 
     private Sender createRawSender() {
@@ -247,8 +250,7 @@ public final class QuestDBSinkTask extends SinkTask {
     private void handleSingleRecord(SinkRecord record) {
         assert timestampColumnValue == Long.MIN_VALUE;
 
-        String explicitTable = config.getTable();
-        String tableName = explicitTable == null ? record.topic() : explicitTable;
+        CharSequence tableName = recordToTable.apply(record);
         sender.table(tableName);
 
         if (config.isIncludeKey()) {
