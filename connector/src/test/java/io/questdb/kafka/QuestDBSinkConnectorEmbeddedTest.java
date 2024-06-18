@@ -162,6 +162,68 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
+    public void testTableTemplateWithKey_withSchema(boolean useHttp) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, "${topic}.${key}");
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .field("age", Schema.INT8_SCHEMA)
+                .build();
+
+        Struct john = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe")
+                .put("age", (byte) 42);
+
+        Struct jane = new Struct(schema)
+                .put("firstname", "Jane")
+                .put("lastname", "Doe")
+                .put("age", (byte) 41);
+
+        connect.kafka().produce(topicName, "john", new String(converter.fromConnectData(topicName, schema, john)));
+        connect.kafka().produce(topicName, "jane", new String(converter.fromConnectData(topicName, schema, jane)));
+
+        QuestDBUtils.assertSqlEventually( "\"firstname\",\"lastname\",\"age\"\r\n"
+                        + "\"John\",\"Doe\",42\r\n",
+                "select firstname,lastname,age from " + topicName + "." + "john",
+                httpPort);
+        QuestDBUtils.assertSqlEventually( "\"firstname\",\"lastname\",\"age\"\r\n"
+                        + "\"Jane\",\"Doe\",41\r\n",
+                "select firstname,lastname,age from " + topicName + "." + "jane",
+                httpPort);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testTableTemplateWithKey_schemaless(boolean useHttp) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, "literal_${topic}_literal_${key}_literal");
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put("value.converter.schemas.enable", "false");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        connect.kafka().produce(topicName, "john", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
+        connect.kafka().produce(topicName, "jane", "{\"firstname\":\"Jane\",\"lastname\":\"Doe\",\"age\":41}");
+
+        QuestDBUtils.assertSqlEventually( "\"firstname\",\"lastname\",\"age\"\r\n"
+                        + "\"John\",\"Doe\",42\r\n",
+                "select firstname,lastname,age from literal_" + topicName + "_literal_" + "john_literal",
+                httpPort);
+        QuestDBUtils.assertSqlEventually( "\"firstname\",\"lastname\",\"age\"\r\n"
+                        + "\"Jane\",\"Doe\",41\r\n",
+                "select firstname,lastname,age from literal_" + topicName + "_literal_" + "jane_literal",
+                httpPort);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
     public void testDeadLetterQueue_wrongJson(boolean useHttp) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
