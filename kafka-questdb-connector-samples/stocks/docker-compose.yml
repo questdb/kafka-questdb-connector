@@ -1,19 +1,13 @@
-version: '2.1'
 services:
   questdb:
-    image: questdb/questdb:7.4.0
+    image: questdb/questdb:8.1.0
     expose:
-      - "9009"
+      - "9000"
     ports:
       - "19000:9000"
     environment:
-      - JAVA_OPTS=-Djava.locale.providers=JRE,SPI
       - QDB_LINE_DEFAULT_PARTITION_BY=YEAR
       - QDB_PG_SELECT_CACHE_ENABLED=false
-  zookeeper:
-    image: zookeeper:3.6.2
-    ports:
-      - "2181:2181"
   grafana:
     image: grafana/grafana-oss:9.2.1
     ports:
@@ -35,19 +29,21 @@ services:
         - GF_AUTH_ANONYMOUS_ORG_NAME=Main Org.
         - GF_AUTH_ANONYMOUS_ORG_ID=1
   kafka:
-    image: wurstmeister/kafka:2.13-2.8.1
-    ports:
-      - "9092:9092"
-    depends_on:
-      - zookeeper
-    links:
-      - zookeeper:zookeeper
+    image: apache/kafka:latest
+    container_name: broker
     environment:
-      KAFKA_ADVERTISED_HOST_NAME: "kafka"
-      KAFKA_ADVERTISED_PORT: "9092"
-      HOSTNAME_COMMAND: "route -n | awk '/UG[ \t]/{print $$2}'"
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_CREATE_TOPICS: "dbserver1.public.stock:1:1"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
   postgres:
     image: debezium/postgres:14-alpine
     ports:
