@@ -1,30 +1,28 @@
 services:
   questdb:
-    image: questdb/questdb:7.4.0
+    image: questdb/questdb:8.1.0
     expose:
-      - "9009"
+      - "9000"
     ports:
       - "19000:9000"
     environment:
       - QDB_LINE_DEFAULT_PARTITION_BY=YEAR
-  zookeeper:
-    image: zookeeper:3.6.2
-    ports:
-      - "2181:2181"
   kafka:
-    image: wurstmeister/kafka:2.13-2.8.1
-    ports:
-      - "9092:9092"
-    depends_on:
-      - zookeeper
-    links:
-      - zookeeper:zookeeper
+    image: apache/kafka:latest
+    container_name: broker
     environment:
-      KAFKA_ADVERTISED_HOST_NAME: "kafka"
-      KAFKA_ADVERTISED_PORT: "9092"
-      HOSTNAME_COMMAND: "route -n | awk '/UG[ \t]/{print $$2}'"
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_CREATE_TOPICS: "People:1:1"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
   producer:
     image: kafka-questdb-connector-samples-faker-generator
     build:
@@ -35,7 +33,7 @@ services:
       - kafka:kafka
       - questdb:questdb
   connect:
-    image: kafka-questdb-connector-samples-debezium
+    image: kafka-questdb-connector-samples-connect
     build:
       dockerfile: ./Dockerfile-Connect
     ports:
