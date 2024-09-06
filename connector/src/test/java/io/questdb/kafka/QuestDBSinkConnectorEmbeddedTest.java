@@ -223,7 +223,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true/*, false*/})
+    @ValueSource(booleans = {true, false})
     public void testDeadLetterQueue_wrongJson(boolean useHttp) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
