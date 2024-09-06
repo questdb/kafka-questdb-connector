@@ -265,18 +265,31 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 httpPort,
                 QuestDBUtils.Endpoint.EXEC);
 
-        connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d041\"}");
-        connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"Invalid UUID\"}");
+        String goodRecordA = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d041\"}";
+        String goodRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d042\"}";
+        String goodRecordC = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d043\"}";
+        String badRecordA = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"Invalid UUID\"}";
+        String badRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":\"not a number\",\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d041\"}";
 
-        ConsumerRecords<byte[], byte[]> fetchedRecords = connect.kafka().consume(1, 60_000, "dlq");
-        Assertions.assertEquals(1, fetchedRecords.count());
-        ConsumerRecord<byte[], byte[]> dqlRecord = fetchedRecords.iterator().next();
-        Assertions.assertEquals("{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"Invalid UUID\"}", new String(dqlRecord.value()));
+        // interleave good and bad records
+        connect.kafka().produce(topicName, "key", goodRecordA);
+        connect.kafka().produce(topicName, "key", badRecordA);
+        connect.kafka().produce(topicName, "key", goodRecordB);
+        connect.kafka().produce(topicName, "key", badRecordB);
+        connect.kafka().produce(topicName, "key", goodRecordC);
 
-        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\"\r\n"
-                        + "\"John\",\"Doe\",42\r\n",
-                "select firstname,lastname,age from " + topicName,
-                1000, httpPort);
+        ConsumerRecords<byte[], byte[]> fetchedRecords = connect.kafka().consume(2, 60_000, "dlq");
+        Assertions.assertEquals(2, fetchedRecords.count());
+        Iterator<ConsumerRecord<byte[], byte[]>> iterator = fetchedRecords.iterator();
+        Assertions.assertEquals(badRecordA, new String(iterator.next().value()));
+        Assertions.assertEquals(badRecordB, new String(iterator.next().value()));
+
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\",\"id\"\r\n"
+                        + "\"John\",\"Doe\",42,ad956a45-a55b-441e-b80d-023a2bf5d041\r\n"
+                        + "\"John\",\"Doe\",42,ad956a45-a55b-441e-b80d-023a2bf5d042\r\n"
+                        + "\"John\",\"Doe\",42,ad956a45-a55b-441e-b80d-023a2bf5d043\r\n",
+                "select firstname,lastname,age, id from " + topicName,
+                httpPort);
 
     }
 

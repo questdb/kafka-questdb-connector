@@ -247,7 +247,7 @@ public final class QuestDBSinkTask extends SinkTask {
 
     private void onHttpSenderException(Exception e) {
         closeSenderSilently();
-        if (e.getMessage().contains("failed to parse line protocol")) { // hack to detect data parsing errors
+        if (e.getMessage() != null && e.getMessage().contains("failed to parse line protocol") || e.getMessage().contains("cast error")) { // hack to detect data parsing errors
             // ok, we have a parsing error, let's try to send records one by one to find the problematic record
             // and we will report it to the error handler. the rest of the records will make it to QuestDB
             sender = createSender();
