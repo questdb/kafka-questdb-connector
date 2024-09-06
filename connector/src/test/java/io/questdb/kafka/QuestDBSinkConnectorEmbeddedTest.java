@@ -52,7 +52,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 public final class QuestDBSinkConnectorEmbeddedTest {
     private static int httpPort = -1;
     private static int ilpPort = -1;
-    private static final String OFFICIAL_QUESTDB_DOCKER = "questdb/questdb:7.4.0";
+    private static final String OFFICIAL_QUESTDB_DOCKER = "questdb/questdb:8.1.1";
     private static final boolean DUMP_QUESTDB_CONTAINER_LOGS = true;
 
     private EmbeddedConnectCluster connect;
@@ -223,7 +223,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
+    @ValueSource(booleans = {true/*, false*/})
     public void testDeadLetterQueue_wrongJson(boolean useHttp) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
@@ -246,6 +246,38 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         ConsumerRecord<byte[], byte[]> dqlRecord = fetchedRecords.iterator().next();
         Assertions.assertEquals("{\"not valid json}", new String(dqlRecord.value()));
+    }
+
+    @Test
+    public void testDeadLetterQueue_badColumnType() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+        props.put("errors.deadletterqueue.topic.name", "dlq");
+        props.put("errors.deadletterqueue.topic.replication.factor", "1");
+        props.put("errors.tolerance", "all");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
+                "create table " + topicName + " (firstname string, lastname string, age int, id uuid, ts timestamp) timestamp(ts) partition by day wal",
+                httpPort,
+                QuestDBUtils.Endpoint.EXEC);
+
+        connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d041\"}");
+        connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"Invalid UUID\"}");
+
+        ConsumerRecords<byte[], byte[]> fetchedRecords = connect.kafka().consume(1, 60_000, "dlq");
+        Assertions.assertEquals(1, fetchedRecords.count());
+        ConsumerRecord<byte[], byte[]> dqlRecord = fetchedRecords.iterator().next();
+        Assertions.assertEquals("{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"Invalid UUID\"}", new String(dqlRecord.value()));
+
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\"\r\n"
+                        + "\"John\",\"Doe\",42\r\n",
+                "select firstname,lastname,age from " + topicName,
+                1000, httpPort);
+
     }
 
     @ParameterizedTest

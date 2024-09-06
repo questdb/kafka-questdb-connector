@@ -4,6 +4,7 @@ import io.questdb.client.Sender;
 import io.questdb.cutlass.http.client.HttpClientException;
 import io.questdb.cutlass.line.LineSenderException;
 import io.questdb.std.NumericException;
+import io.questdb.std.ObjList;
 import io.questdb.std.datetime.DateFormat;
 import io.questdb.std.datetime.microtime.Timestamps;
 import io.questdb.std.datetime.millitime.DateFormatUtils;
@@ -48,6 +49,7 @@ public final class QuestDBSinkTask extends SinkTask {
     private long nextFlushNanos;
     private int pendingRows;
     private final FlushConfig flushConfig = new FlushConfig();
+    private final ObjList<SinkRecord> inflightSinkRecords = new ObjList<>();
 
     @Override
     public String version() {
@@ -159,6 +161,9 @@ public final class QuestDBSinkTask extends SinkTask {
                 sender = createSender();
             }
             for (SinkRecord record : collection) {
+                if (httpTransport) {
+                    inflightSinkRecords.add(record);
+                }
                 handleSingleRecord(record);
             }
 
@@ -208,22 +213,27 @@ public final class QuestDBSinkTask extends SinkTask {
     private void flushAndResetCounters() {
         log.debug("Flushing data to QuestDB");
         try {
-            sender.flush();
+            if (sender != null) {
+                sender.flush();
+            }
             nextFlushNanos = System.nanoTime() + flushConfig.autoFlushNanos;
             pendingRows = 0;
         } catch (LineSenderException | HttpClientException e) {
             onSenderException(e);
+        } finally {
+            inflightSinkRecords.clear();
         }
     }
 
     private void onSenderException(Exception e) {
         if (httpTransport) {
-            closeSenderSilently();
-            nextFlushNanos = System.nanoTime() + flushConfig.autoFlushNanos;
-            pendingRows = 0;
-            throw new ConnectException("Failed to send data to QuestDB", e);
+            onHttpSenderException(e);
+        } else {
+            onTcpSenderException(e);
         }
+    }
 
+    private void onTcpSenderException(Exception e) {
         batchesSinceLastError = 0;
         if (--remainingRetries > 0) {
             closeSenderSilently();
@@ -232,6 +242,33 @@ public final class QuestDBSinkTask extends SinkTask {
             throw new RetriableException(e);
         } else {
             throw new ConnectException("Failed to send data to QuestDB after " + config.getMaxRetries() + " retries");
+        }
+    }
+
+    private void onHttpSenderException(Exception e) {
+        closeSenderSilently();
+        if (e.getMessage().contains("failed to parse line protocol")) { // hack to detect data parsing errors
+            // ok, we have a parsing error, let's try to send records one by one to find the problematic record
+            // and we will report it to the error handler. the rest of the records will make it to QuestDB
+            sender = createSender();
+            for (int i = 0; i < inflightSinkRecords.size(); i++) {
+                SinkRecord sinkRecord = inflightSinkRecords.get(i);
+                try {
+                    handleSingleRecord(sinkRecord);
+                    sender.flush();
+                } catch (Exception ex) {
+                    context.errantRecordReporter().report(sinkRecord, ex);
+                    closeSenderSilently();
+                    sender = createSender();
+                }
+            }
+            nextFlushNanos = System.nanoTime() + flushConfig.autoFlushNanos;
+            pendingRows = 0;
+        } else {
+            // ok, this is not a parsing error, let's just close the sender and rethrow the exception
+            nextFlushNanos = System.nanoTime() + flushConfig.autoFlushNanos;
+            pendingRows = 0;
+            throw new ConnectException("Failed to send data to QuestDB", e);
         }
     }
 
