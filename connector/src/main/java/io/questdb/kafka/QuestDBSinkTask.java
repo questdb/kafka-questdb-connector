@@ -16,6 +16,7 @@ import org.apache.kafka.connect.data.Date;
 import org.apache.kafka.connect.data.*;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.RetriableException;
+import org.apache.kafka.connect.sink.ErrantRecordReporter;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTask;
 import org.slf4j.Logger;
@@ -50,6 +51,7 @@ public final class QuestDBSinkTask extends SinkTask {
     private int pendingRows;
     private final FlushConfig flushConfig = new FlushConfig();
     private final ObjList<SinkRecord> inflightSinkRecords = new ObjList<>();
+    private ErrantRecordReporter reporter;
 
     @Override
     public String version() {
@@ -88,6 +90,12 @@ public final class QuestDBSinkTask extends SinkTask {
         this.allowedLag = config.getAllowedLag();
         this.nextFlushNanos = System.nanoTime() + flushConfig.autoFlushNanos;
         this.recordToTable = Templating.newTableTableFn(config.getTable());
+        try {
+            reporter = context.errantRecordReporter();
+        } catch (NoSuchMethodError | NoClassDefFoundError e) {
+            // Kafka older than 2.6
+            reporter = null;
+        }
     }
 
     private Sender createRawSender() {
@@ -247,7 +255,7 @@ public final class QuestDBSinkTask extends SinkTask {
 
     private void onHttpSenderException(Exception e) {
         closeSenderSilently();
-        if (e.getMessage() != null && e.getMessage().contains("error in line")) { // hack to detect data parsing errors
+        if (reporter != null & e.getMessage() != null && e.getMessage().contains("error in line")) { // hack to detect data parsing errors
             // ok, we have a parsing error, let's try to send records one by one to find the problematic record
             // and we will report it to the error handler. the rest of the records will make it to QuestDB
             sender = createSender();
