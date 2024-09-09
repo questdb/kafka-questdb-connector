@@ -224,6 +224,7 @@ public final class QuestDBSinkTask extends SinkTask {
             if (sender != null) {
                 sender.flush();
             }
+            context.requestCommit();
             nextFlushNanos = System.nanoTime() + flushConfig.autoFlushNanos;
             pendingRows = 0;
         } catch (LineSenderException | HttpClientException e) {
