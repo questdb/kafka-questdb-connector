@@ -52,7 +52,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 public final class QuestDBSinkConnectorEmbeddedTest {
     private static int httpPort = -1;
     private static int ilpPort = -1;
-    private static final String OFFICIAL_QUESTDB_DOCKER = "questdb/questdb:7.4.0";
+    private static final String OFFICIAL_QUESTDB_DOCKER = "questdb/questdb:8.1.1";
     private static final boolean DUMP_QUESTDB_CONTAINER_LOGS = true;
 
     private EmbeddedConnectCluster connect;
@@ -246,6 +246,81 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         ConsumerRecord<byte[], byte[]> dqlRecord = fetchedRecords.iterator().next();
         Assertions.assertEquals("{\"not valid json}", new String(dqlRecord.value()));
+    }
+
+    @Test
+    public void testDeadLetterQueue_badColumnType() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+        props.put("errors.deadletterqueue.topic.name", "dlq");
+        props.put("errors.deadletterqueue.topic.replication.factor", "1");
+        props.put("errors.tolerance", "all");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
+                "create table " + topicName + " (firstname string, lastname string, age int, id uuid, ts timestamp) timestamp(ts) partition by day wal",
+                httpPort,
+                QuestDBUtils.Endpoint.EXEC);
+
+        String goodRecordA = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d041\"}";
+        String goodRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d042\"}";
+        String goodRecordC = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d043\"}";
+        String badRecordA = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"Invalid UUID\"}";
+        String badRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":\"not a number\",\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d041\"}";
+
+        // interleave good and bad records
+        connect.kafka().produce(topicName, "key", goodRecordA);
+        connect.kafka().produce(topicName, "key", badRecordA);
+        connect.kafka().produce(topicName, "key", goodRecordB);
+        connect.kafka().produce(topicName, "key", badRecordB);
+        connect.kafka().produce(topicName, "key", goodRecordC);
+
+        ConsumerRecords<byte[], byte[]> fetchedRecords = connect.kafka().consume(2, 120_000, "dlq");
+        Assertions.assertEquals(2, fetchedRecords.count());
+        Iterator<ConsumerRecord<byte[], byte[]>> iterator = fetchedRecords.iterator();
+        Assertions.assertEquals(badRecordA, new String(iterator.next().value()));
+        Assertions.assertEquals(badRecordB, new String(iterator.next().value()));
+
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\",\"id\"\r\n"
+                        + "\"John\",\"Doe\",42,ad956a45-a55b-441e-b80d-023a2bf5d041\r\n"
+                        + "\"John\",\"Doe\",42,ad956a45-a55b-441e-b80d-023a2bf5d042\r\n"
+                        + "\"John\",\"Doe\",42,ad956a45-a55b-441e-b80d-023a2bf5d043\r\n",
+                "select firstname,lastname,age, id from " + topicName,
+                httpPort);
+
+    }
+
+    @Test
+    public void testbadColumnType_noDLQ() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
+                "create table " + topicName + " (firstname string, lastname string, age int, id uuid, ts timestamp) timestamp(ts) partition by day wal",
+                httpPort,
+                QuestDBUtils.Endpoint.EXEC);
+
+        String goodRecordA = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d041\"}";
+        String goodRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d042\"}";
+        String goodRecordC = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d043\"}";
+        String badRecordA = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"Invalid UUID\"}";
+        String badRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":\"not a number\",\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d041\"}";
+
+        // interleave good and bad records
+        connect.kafka().produce(topicName, "key", goodRecordA);
+        connect.kafka().produce(topicName, "key", badRecordA);
+        connect.kafka().produce(topicName, "key", goodRecordB);
+        connect.kafka().produce(topicName, "key", badRecordB);
+        connect.kafka().produce(topicName, "key", goodRecordC);
+
+        ConnectTestUtils.assertConnectorTaskStateEventually(connect, AbstractStatus.State.FAILED);
     }
 
     @ParameterizedTest
