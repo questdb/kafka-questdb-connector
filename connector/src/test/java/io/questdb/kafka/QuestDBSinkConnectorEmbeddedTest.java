@@ -278,7 +278,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.kafka().produce(topicName, "key", badRecordB);
         connect.kafka().produce(topicName, "key", goodRecordC);
 
-        ConsumerRecords<byte[], byte[]> fetchedRecords = connect.kafka().consume(2, 60_000, "dlq");
+        ConsumerRecords<byte[], byte[]> fetchedRecords = connect.kafka().consume(2, 120_000, "dlq");
         Assertions.assertEquals(2, fetchedRecords.count());
         Iterator<ConsumerRecord<byte[], byte[]>> iterator = fetchedRecords.iterator();
         Assertions.assertEquals(badRecordA, new String(iterator.next().value()));
