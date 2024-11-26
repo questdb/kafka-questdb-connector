@@ -318,9 +318,9 @@ public final class QuestDBSinkTask extends SinkTask {
         if (tableName == null || tableName.equals("")) {
             throw new InvalidDataException("Table name cannot be empty");
         }
-        sender.table(tableName);
 
         try {
+            sender.table(tableName);
             if (config.isIncludeKey()) {
                 handleObject(config.getKeyPrefix(), record.keySchema(), record.key(), PRIMITIVE_KEY_FALLBACK_NAME);
             }
@@ -330,6 +330,11 @@ public final class QuestDBSinkTask extends SinkTask {
                 sender.cancelRow();
             }
             throw ex;
+        } catch (LineSenderException ex) {
+            if (httpTransport) {
+                sender.cancelRow();
+            }
+            throw new InvalidDataException("object contains invalid data", ex);
         }
 
         if (kafkaTimestampsEnabled) {

@@ -8,7 +8,7 @@ public final class InvalidDataException extends ConnectException {
         super(message);
     }
 
-    public InvalidDataException(String message, NumericException e) {
+    public InvalidDataException(String message, Throwable e) {
         super(message, e);
     }
 }

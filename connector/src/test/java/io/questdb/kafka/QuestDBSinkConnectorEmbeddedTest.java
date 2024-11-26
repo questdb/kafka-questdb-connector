@@ -249,6 +249,67 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @Test
+    public void testDeadLetterQueue_invalidTableName() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("errors.deadletterqueue.topic.name", "dlq");
+        props.put("errors.deadletterqueue.topic.replication.factor", "1");
+        props.put("errors.tolerance", "all");
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, "${key}");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // we send this with an invalid key - contains dots
+        String badObjectString = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":88}";
+
+        connect.kafka().produce(topicName, topicName, "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
+        connect.kafka().produce(topicName, "k,e,y", badObjectString);
+        connect.kafka().produce(topicName, topicName, "{\"firstname\":\"Jane\",\"lastname\":\"Doe\",\"age\":41}");
+
+        QuestDBUtils.assertSqlEventually( "\"firstname\",\"lastname\",\"age\"\r\n"
+                        + "\"John\",\"Doe\",42\r\n"
+                        + "\"Jane\",\"Doe\",41\r\n",
+                "select firstname,lastname,age from " + topicName,
+                httpPort);
+
+        ConsumerRecords<byte[], byte[]> fetchedRecords = connect.kafka().consume(1, 120_000, "dlq");
+        Assertions.assertEquals(1, fetchedRecords.count());
+        Iterator<ConsumerRecord<byte[], byte[]>> iterator = fetchedRecords.iterator();
+        Assertions.assertEquals(badObjectString, new String(iterator.next().value()));
+    }
+
+    @Test
+    public void testDeadLetterQueue_invalidColumnName() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("errors.deadletterqueue.topic.name", "dlq");
+        props.put("errors.deadletterqueue.topic.replication.factor", "1");
+        props.put("errors.tolerance", "all");
+        props.put("value.converter.schemas.enable", "false");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // invalid column - contains a star
+        String badObjectString = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"a*g*e\":88}";
+
+        connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
+        connect.kafka().produce(topicName, "key", badObjectString);
+        connect.kafka().produce(topicName, "key", "{\"firstname\":\"Jane\",\"lastname\":\"Doe\",\"age\":41}");
+
+        QuestDBUtils.assertSqlEventually( "\"firstname\",\"lastname\",\"age\"\r\n"
+                        + "\"John\",\"Doe\",42\r\n"
+                        + "\"Jane\",\"Doe\",41\r\n",
+                "select firstname,lastname,age from " + topicName,
+                httpPort);
+
+        ConsumerRecords<byte[], byte[]> fetchedRecords = connect.kafka().consume(1, 120_000, "dlq");
+        Assertions.assertEquals(1, fetchedRecords.count());
+        Iterator<ConsumerRecord<byte[], byte[]>> iterator = fetchedRecords.iterator();
+        Assertions.assertEquals(badObjectString, new String(iterator.next().value()));
+    }
+
+    @Test
     public void testDeadLetterQueue_unsupportedType() {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
