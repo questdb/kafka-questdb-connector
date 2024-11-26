@@ -172,7 +172,22 @@ public final class QuestDBSinkTask extends SinkTask {
                 if (httpTransport) {
                     inflightSinkRecords.add(record);
                 }
-                handleSingleRecord(record);
+                try {
+                    handleSingleRecord(record);
+                } catch (InvalidDataException ex) {
+                    // data format error generated on client-side
+
+                    if (httpTransport && reporter != null) {
+                        // we have DLQ set, let's report this single object
+
+                        // remove the last item from in-flight records
+                        inflightSinkRecords.setPos(inflightSinkRecords.size() - 1);
+                        context.errantRecordReporter().report(record, ex);
+                    } else {
+                        // ok, no DQL, let's error the connector
+                        throw ex;
+                    }
+                }
             }
 
             if (httpTransport) {
@@ -257,7 +272,7 @@ public final class QuestDBSinkTask extends SinkTask {
     private void onHttpSenderException(Exception e) {
         closeSenderSilently();
         if (
-                (reporter != null && e.getMessage() != null) // hack to detect data parsing errors
+                (reporter != null && e.getMessage() != null) // hack to detect data parsing errors originating at server-side
                 && (e.getMessage().contains("error in line") || e.getMessage().contains("failed to parse line protocol"))
         ) {
             // ok, we have a parsing error, let's try to send records one by one to find the problematic record
@@ -300,16 +315,27 @@ public final class QuestDBSinkTask extends SinkTask {
         assert timestampColumnValue == Long.MIN_VALUE;
 
         CharSequence tableName = recordToTable.apply(record);
+        if (tableName == null || tableName.equals("")) {
+            throw new InvalidDataException("Table name cannot be empty");
+        }
         sender.table(tableName);
 
-        if (config.isIncludeKey()) {
-            handleObject(config.getKeyPrefix(), record.keySchema(), record.key(), PRIMITIVE_KEY_FALLBACK_NAME);
+        try {
+            if (config.isIncludeKey()) {
+                handleObject(config.getKeyPrefix(), record.keySchema(), record.key(), PRIMITIVE_KEY_FALLBACK_NAME);
+            }
+            handleObject(config.getValuePrefix(), record.valueSchema(), record.value(), PRIMITIVE_VALUE_FALLBACK_NAME);
+        } catch (InvalidDataException ex) {
+            if (httpTransport) {
+                sender.cancelRow();
+            }
+            throw ex;
         }
-        handleObject(config.getValuePrefix(), record.valueSchema(), record.value(), PRIMITIVE_VALUE_FALLBACK_NAME);
 
         if (kafkaTimestampsEnabled) {
             timestampColumnValue = TimeUnit.MILLISECONDS.toNanos(record.timestamp());
         }
+
         if (timestampColumnValue == Long.MIN_VALUE) {
             sender.atNow();
         } else {
@@ -338,7 +364,7 @@ public final class QuestDBSinkTask extends SinkTask {
         for (Map.Entry<?, ?> entry : value.entrySet()) {
             Object mapKey = entry.getKey();
             if (!(mapKey instanceof String)) {
-                throw new ConnectException("Map keys must be strings");
+                throw new InvalidDataException("Map keys must be strings");
             }
             String mapKeyName = (String) mapKey;
             String entryName = name.isEmpty() ? mapKeyName : name + STRUCT_FIELD_SEPARATOR + mapKeyName;
@@ -365,7 +391,7 @@ public final class QuestDBSinkTask extends SinkTask {
         if (isDesignatedColumnName(name, fallbackName)) {
             assert timestampColumnValue == Long.MIN_VALUE;
             if (value == null) {
-                throw new ConnectException("Timestamp column value cannot be null");
+                throw new InvalidDataException("Timestamp column value cannot be null");
             }
             timestampColumnValue = resolveDesignatedTimestampColumnValue(value, schema);
             return;
@@ -393,7 +419,7 @@ public final class QuestDBSinkTask extends SinkTask {
             return parseToMicros((String) value) * 1000;
         }
         if (!(value instanceof Long)) {
-            throw new ConnectException("Unsupported timestamp column type: " + value.getClass());
+            throw new InvalidDataException("Unsupported timestamp column type: " + value.getClass());
         }
         long longValue = (Long) value;
         TimeUnit inputUnit;
@@ -453,7 +479,7 @@ public final class QuestDBSinkTask extends SinkTask {
         try {
             return dataFormat.parse(timestamp, DateFormatUtils.EN_LOCALE);
         } catch (NumericException e) {
-            throw new ConnectException("Cannot parse timestamp: " + timestamp + " with the configured format '" + config.getTimestampFormat() +"' use '"
+            throw new InvalidDataException("Cannot parse timestamp: " + timestamp + " with the configured format '" + config.getTimestampFormat() +"' use '"
                     + QuestDBSinkConnectorConfig.TIMESTAMP_FORMAT + "' to configure the right timestamp format. " +
                     "See https://questdb.io/docs/reference/function/date-time/#date-and-timestamp-format for timestamp parser documentation. ", e);
         }
@@ -513,7 +539,7 @@ public final class QuestDBSinkTask extends SinkTask {
         if (config.isSkipUnsupportedTypes()) {
             log.debug("Skipping unsupported type: {}, name: {}", type, name);
         } else {
-            throw new ConnectException("Unsupported type: " + type + ", name: " + name);
+            throw new InvalidDataException("Unsupported type: " + type + ", name: " + name);
         }
     }
 

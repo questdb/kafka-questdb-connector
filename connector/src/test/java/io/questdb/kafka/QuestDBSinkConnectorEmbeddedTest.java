@@ -52,7 +52,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 public final class QuestDBSinkConnectorEmbeddedTest {
     private static int httpPort = -1;
     private static int ilpPort = -1;
-    private static final String OFFICIAL_QUESTDB_DOCKER = "questdb/questdb:8.1.1";
+    private static final String OFFICIAL_QUESTDB_DOCKER = "questdb/questdb:8.2.0";
     private static final boolean DUMP_QUESTDB_CONTAINER_LOGS = true;
 
     private EmbeddedConnectCluster connect;
