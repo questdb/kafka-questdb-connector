@@ -50,9 +50,9 @@ public class ExactlyOnceIT {
     private static final int VICTIM_KAFKA = 2;
     private static final int VICTIMS_TOTAL = VICTIM_KAFKA + 1;
 
-    private static final DockerImageName KAFKA_CONTAINER_IMAGE = DockerImageName.parse("confluentinc/cp-kafka:7.6.0");
-    private static final DockerImageName CONNECT_CONTAINER_IMAGE = DockerImageName.parse("confluentinc/cp-kafka-connect:7.6.0");
-    private static final DockerImageName QUESTDB_CONTAINER_IMAGE = DockerImageName.parse("questdb/questdb:7.4.0");
+    private static final DockerImageName KAFKA_CONTAINER_IMAGE = DockerImageName.parse("confluentinc/cp-kafka:7.6.3");
+    private static final DockerImageName CONNECT_CONTAINER_IMAGE = DockerImageName.parse("confluentinc/cp-kafka-connect:7.6.3");
+    private static final DockerImageName QUESTDB_CONTAINER_IMAGE = DockerImageName.parse("questdb/questdb:8.2.0");
     private static final int KAFKA_CLUSTER_SIZE = 3;
     private static final int CONNECT_CLUSTER_SIZE = 2;
 
