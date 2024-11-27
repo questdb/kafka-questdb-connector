@@ -98,6 +98,24 @@ final class BufferingSender implements Sender {
     }
 
     @Override
+    public void cancelRow() {
+        symbolColumnNames.clear();
+        symbolColumnValues.clear();
+        stringNames.clear();
+        stringValues.clear();
+        longNames.clear();
+        longValues.clear();
+        doubleNames.clear();
+        doubleValues.clear();
+        boolNames.clear();
+        boolValues.clear();
+        timestampNames.clear();
+        timestampValues.clear();
+
+        sender.cancelRow();
+    }
+
+    @Override
     public Sender timestampColumn(CharSequence name, long value, ChronoUnit unit) {
         if (symbolColumns.contains(name)) {
             symbolColumnNames.add(name);
