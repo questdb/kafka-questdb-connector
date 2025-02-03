@@ -314,6 +314,12 @@ public final class QuestDBSinkTask extends SinkTask {
     private void handleSingleRecord(SinkRecord record) {
         assert timestampColumnValue == Long.MIN_VALUE;
 
+        Object recordValue = record.value();
+        if (recordValue == null) {
+            // ignore tombstones
+            return;
+        }
+
         CharSequence tableName = recordToTable.apply(record);
         if (tableName == null || tableName.equals("")) {
             throw new InvalidDataException("Table name cannot be empty");
@@ -324,7 +330,7 @@ public final class QuestDBSinkTask extends SinkTask {
             if (config.isIncludeKey()) {
                 handleObject(config.getKeyPrefix(), record.keySchema(), record.key(), PRIMITIVE_KEY_FALLBACK_NAME);
             }
-            handleObject(config.getValuePrefix(), record.valueSchema(), record.value(), PRIMITIVE_VALUE_FALLBACK_NAME);
+            handleObject(config.getValuePrefix(), record.valueSchema(), recordValue, PRIMITIVE_VALUE_FALLBACK_NAME);
         } catch (InvalidDataException ex) {
             if (httpTransport) {
                 sender.cancelRow();

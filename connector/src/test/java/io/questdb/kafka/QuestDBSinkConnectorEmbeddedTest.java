@@ -198,6 +198,42 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 httpPort);
     }
 
+    @Test
+    public void testTombstoneRecordFilter() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+
+        // this FILTER transform is no longer needed since the connector filters out tombstone records by default
+//        props.put("transforms", "filterTombstones");
+//        props.put("transforms.filterTombstones.type", "org.apache.kafka.connect.transforms.Filter");
+//        props.put("transforms.filterTombstones.predicate", "isTombstone");
+//        props.put("predicates", "isTombstone");
+//        props.put("predicates.isTombstone.type", "org.apache.kafka.connect.transforms.predicates.RecordIsTombstone");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .field("age", Schema.INT8_SCHEMA)
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe")
+                .put("age", (byte) 42);
+
+        connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
+        connect.kafka().produce(topicName, "key", null);
+
+        QuestDBUtils.assertSqlEventually( "\"firstname\",\"lastname\",\"age\"\r\n"
+                        + "\"John\",\"Doe\",42\r\n",
+                "select firstname,lastname,age from " + topicName,
+                httpPort);
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     public void testTableTemplateWithKey_schemaless(boolean useHttp) {
