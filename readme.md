@@ -3,7 +3,7 @@ The connector reads data from Kafka topics and writes to [QuestDB](https://quest
 The connector implements Apache Kafka [Sink Connector API](https://kafka.apache.org/documentation/#connect_development).
 
 ## Documentation
-Documentation is maintained on [QuestDB.io](https://questdb.io/docs/third-party-tools/kafka/questdb-kafka/) 
+Documentation is maintained on [QuestDB.com](https://questdb.com/docs/third-party-tools/kafka/#questdb-kafka-connect-connector) 
 
 ## Sample Projects
 This repository contains a number of [sample projects.](kafka-questdb-connector-samples) showing how to use the connector. It also demonstrates how to use the connector together with Debezium for Change Data Capture.
