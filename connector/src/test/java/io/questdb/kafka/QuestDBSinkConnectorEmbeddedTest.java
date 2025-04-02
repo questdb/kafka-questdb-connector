@@ -234,6 +234,79 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 httpPort);
     }
 
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testRegexRouter(boolean useHttp) {
+        // 1. Define source topics and expected target tables
+        String ordersAddTopic = "orders.add";
+        String ordersModifyTopic = "orders.modify";
+        String authLoginTopic = "auth.login";
+        String tradesTopic = "trades";
+
+        String ordersTable = "orders";
+        String authTable = "auth";
+        String tradesTable = "trades"; // same as topic, no change expected
+
+        // 2. Create source Kafka topics
+        connect.kafka().createTopic(ordersAddTopic, 1);
+        connect.kafka().createTopic(ordersModifyTopic, 1);
+        connect.kafka().createTopic(authLoginTopic, 1);
+        connect.kafka().createTopic(tradesTopic, 1);
+
+        // 3. Configure the connector
+        // Use one of the topics for base props, then override 'topics'
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, ordersAddTopic, useHttp);
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false"); // Simplify assertions
+
+        // Override the topics to subscribe to all source topics
+        props.put("topics", String.join(",", ordersAddTopic, ordersModifyTopic, authLoginTopic, tradesTopic));
+
+        // Add the RegexRouter SMT configuration
+        props.put("transforms", "RouteByPrefix");
+        props.put("transforms.RouteByPrefix.type", "org.apache.kafka.connect.transforms.RegexRouter");
+        // Note the double backslash needed for Java String literal escaping
+        props.put("transforms.RouteByPrefix.regex", "(orders|auth)\\..+");
+        props.put("transforms.RouteByPrefix.replacement", "$1");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // 4. Define Schema and Data
+        Schema schema = SchemaBuilder.struct().name("com.example.Data")
+                .field("id", Schema.INT32_SCHEMA)
+                .field("payload", Schema.STRING_SCHEMA)
+                .build();
+
+        Struct structOrdersAdd = new Struct(schema).put("id", 1).put("payload", "order added");
+        Struct structOrdersModify = new Struct(schema).put("id", 2).put("payload", "order modified");
+        Struct structAuthLogin = new Struct(schema).put("id", 10).put("payload", "user logged in");
+        Struct structTrades = new Struct(schema).put("id", 100).put("payload", "trade executed");
+
+        // 5. Produce records to source topics
+        connect.kafka().produce(ordersAddTopic, "key1", new String(converter.fromConnectData(ordersAddTopic, schema, structOrdersAdd)));
+        connect.kafka().produce(ordersModifyTopic, "key2", new String(converter.fromConnectData(ordersModifyTopic, schema, structOrdersModify)));
+        connect.kafka().produce(authLoginTopic, "key3", new String(converter.fromConnectData(authLoginTopic, schema, structAuthLogin)));
+        connect.kafka().produce(tradesTopic, "key4", new String(converter.fromConnectData(tradesTopic, schema, structTrades)));
+
+        // 6. Assert data in target QuestDB tables
+        QuestDBUtils.assertSqlEventually( "\"id\",\"payload\"\r\n"
+                        + "1,\"order added\"\r\n"
+                        + "2,\"order modified\"\r\n",
+                "select id, payload from " + ordersTable + " order by id", // Ensure consistent order
+                httpPort);
+
+        QuestDBUtils.assertSqlEventually( "\"id\",\"payload\"\r\n"
+                        + "10,\"user logged in\"\r\n",
+                "select id, payload from " + authTable,
+                httpPort);
+
+        QuestDBUtils.assertSqlEventually( "\"id\",\"payload\"\r\n"
+                        + "100,\"trade executed\"\r\n",
+                "select id, payload from " + tradesTable,
+                httpPort);
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     public void testTableTemplateWithKey_schemaless(boolean useHttp) {
