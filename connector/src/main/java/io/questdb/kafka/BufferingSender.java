@@ -1,8 +1,11 @@
 package io.questdb.kafka;
 
 import io.questdb.client.Sender;
+import io.questdb.cutlass.line.array.DoubleArray;
+import io.questdb.cutlass.line.array.LongArray;
 import io.questdb.std.BoolList;
 import io.questdb.std.LongList;
+import io.questdb.std.bytes.DirectByteSlice;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -95,6 +98,11 @@ final class BufferingSender implements Sender {
             boolValues.add(value);
         }
         return this;
+    }
+
+    @Override
+    public DirectByteSlice bufferView() {
+        throw new UnsupportedOperationException("not implemented");
     }
 
     @Override
@@ -229,5 +237,45 @@ final class BufferingSender implements Sender {
     @Override
     public void close() {
         sender.close();
+    }
+
+    @Override
+    public Sender doubleArray(CharSequence charSequence, double[] doubles) {
+        throw new UnsupportedOperationException("not implemented");
+    }
+
+    @Override
+    public Sender doubleArray(CharSequence charSequence, double[][] doubles) {
+        throw new UnsupportedOperationException("not implemented");
+    }
+
+    @Override
+    public Sender doubleArray(CharSequence charSequence, double[][][] doubles) {
+        throw new UnsupportedOperationException("not implemented");
+    }
+
+    @Override
+    public Sender doubleArray(CharSequence charSequence, DoubleArray doubleArray) {
+        throw new UnsupportedOperationException("not implemented");
+    }
+
+    @Override
+    public Sender longArray(CharSequence charSequence, long[] longs) {
+        throw new UnsupportedOperationException("not implemented");
+    }
+
+    @Override
+    public Sender longArray(CharSequence charSequence, long[][] longs) {
+        throw new UnsupportedOperationException("not implemented");
+    }
+
+    @Override
+    public Sender longArray(CharSequence charSequence, long[][][] longs) {
+        throw new UnsupportedOperationException("not implemented");
+    }
+
+    @Override
+    public Sender longArray(CharSequence charSequence, LongArray longArray) {
+        throw new UnsupportedOperationException("not implemented");
     }
 }
