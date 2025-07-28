@@ -51,6 +51,11 @@ final class Templating {
                     partials.add(record -> record.key() == null ? "null" : record.key().toString());
                     break;
                 }
+                case "partition": {
+                    // assumption: sink records always have a non-null kafkaPartition()
+                    partials.add(record -> String.valueOf(record.kafkaPartition()));
+                    break;
+                }
                 default: {
                     throw new ConnectException("Unknown template in table name, table template: '" + template + "'");
                 }

@@ -17,6 +17,13 @@ public class TemplatingTest {
     }
 
     @Test
+    public void testPartition() {
+        Function<SinkRecord, ? extends CharSequence> fn = Templating.newTableTableFn("table_${partition}");
+        SinkRecord record = newSinkRecord("mytopic", "key", 42);
+        assertTableName(fn, record, "table_42");
+    }
+
+    @Test
     public void testEmptyTableName() {
         Function<SinkRecord, ? extends CharSequence> fn = Templating.newTableTableFn("");
         SinkRecord record = newSinkRecord("topic", "key");
@@ -49,6 +56,13 @@ public class TemplatingTest {
         Function<SinkRecord, ? extends CharSequence> fn = Templating.newTableTableFn("${topic}_${key}");
         SinkRecord record = newSinkRecord("mytopic", null);
         assertTableName(fn, record, "mytopic_null");
+    }
+
+    @Test
+    public void testTopicWithNullKeyAndPartition() {
+        Function<SinkRecord, ? extends CharSequence> fn = Templating.newTableTableFn("${topic}_${key}_${partition}");
+        SinkRecord record = newSinkRecord("mytopic", null, 3);
+        assertTableName(fn, record, "mytopic_null_3");
     }
 
     @Test
@@ -99,7 +113,11 @@ public class TemplatingTest {
     }
 
     private static SinkRecord newSinkRecord(String topic, String key) {
-        return new SinkRecord(topic, 0, null, key, null, null, 0);
+        return newSinkRecord(topic, key, 0);
+    }
+
+    private static SinkRecord newSinkRecord(String topic, String key, int partition) {
+        return new SinkRecord(topic, partition, null, key, null, null, 0);
     }
 
 }
