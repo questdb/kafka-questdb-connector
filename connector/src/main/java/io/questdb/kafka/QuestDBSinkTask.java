@@ -325,19 +325,21 @@ public final class QuestDBSinkTask extends SinkTask {
             throw new InvalidDataException("Table name cannot be empty");
         }
 
+        boolean partialRecord = false;
         try {
             sender.table(tableName);
+            partialRecord = true;
             if (config.isIncludeKey()) {
                 handleObject(config.getKeyPrefix(), record.keySchema(), record.key(), PRIMITIVE_KEY_FALLBACK_NAME);
             }
             handleObject(config.getValuePrefix(), record.valueSchema(), recordValue, PRIMITIVE_VALUE_FALLBACK_NAME);
         } catch (InvalidDataException ex) {
-            if (httpTransport) {
+            if (httpTransport && partialRecord) {
                 sender.cancelRow();
             }
             throw ex;
         } catch (LineSenderException ex) {
-            if (httpTransport) {
+            if (httpTransport && partialRecord) {
                 sender.cancelRow();
             }
             throw new InvalidDataException("object contains invalid data", ex);
