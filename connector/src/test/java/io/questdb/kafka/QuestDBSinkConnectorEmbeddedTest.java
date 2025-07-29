@@ -52,7 +52,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 public final class QuestDBSinkConnectorEmbeddedTest {
     private static int httpPort = -1;
     private static int ilpPort = -1;
-    private static final String OFFICIAL_QUESTDB_DOCKER = "questdb/questdb:8.2.0";
+    private static final String OFFICIAL_QUESTDB_DOCKER = "questdb/questdb:9.0.1";
     private static final boolean DUMP_QUESTDB_CONTAINER_LOGS = true;
 
     private EmbeddedConnectCluster connect;
@@ -957,7 +957,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         // make sure we have all records in the table
         QuestDBUtils.assertSqlEventually(
-                "\"count\"\r\n"
+                "\"count()\"\r\n"
                         + recordCount + "\r\n",
                 "select count(*) from " + topicName,
                 600,
@@ -1545,15 +1545,28 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
-    public void testJsonNoSchema_ArrayNotSupported(boolean useHttp) {
+    public void testJsonNoSchema_intArraySendAsDoubleArray(boolean useHttp) {
+        // In schema-less mode, we have to be lenient with array element types.
+        // Since floating point numbers without any actual decimal point are
+        // instantiated as integers by Kafka Connect.
+        //
+        // This will become problematic once QuestDB supports arrays of integers,
+        // as it will not be able to distinguish between an array of integers and
+        // an array of doubles.
+        // For now, we just assume that all arrays are of doubles.
+
+
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
         props.put("value.converter.schemas.enable", "false");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
-        connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"array\":[1,2,3]}");
+        connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"arr\":[1,2,3]}");
 
-        ConnectTestUtils.assertConnectorTaskFailedEventually(connect);
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\",\"arr\"\r\n"
+                        + "\"John\",\"Doe\",42,\"[1.0,2.0,3.0]\"\r\n",
+                "select firstname,lastname,age,arr from " + topicName,
+                httpPort);
     }
 
     @ParameterizedTest
@@ -2015,5 +2028,225 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                         + "\"John\",\"Doe\",\"Jane\",\"Doe\"\r\n",
                 "select partner1_name_firstname, partner1_name_lastname, partner2_name_firstname, partner2_name_lastname from " + topicName,
                 httpPort);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testFloat32ArraySupport(boolean useHttp) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Create schema with float array
+        Schema arraySchema = SchemaBuilder.array(Schema.FLOAT32_SCHEMA).build();
+        Schema schema = SchemaBuilder.struct()
+                .name("com.example.Measurement")
+                .field("sensor_id", Schema.STRING_SCHEMA)
+                .field("readings", arraySchema)
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("sensor_id", "sensor1")
+                .put("readings", Arrays.asList(23.5f, 24.1f, 23.8f));
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        QuestDBUtils.assertSqlEventually(
+                "\"sensor_id\",\"readings\"\r\n" +
+                "\"sensor1\",\"[23.5,24.100000381469727,23.799999237060547]\"\r\n",
+                "select sensor_id, readings from " + topicName,
+                httpPort
+        );
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testFloat64ArraySupport(boolean useHttp) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Create schema with double array
+        Schema arraySchema = SchemaBuilder.array(Schema.FLOAT64_SCHEMA).build();
+        Schema schema = SchemaBuilder.struct()
+                .name("com.example.Measurement")
+                .field("device", Schema.STRING_SCHEMA)
+                .field("temperatures", arraySchema)
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("device", "thermometer1")
+                .put("temperatures", Arrays.asList(98.6, 99.1, 97.9));
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        QuestDBUtils.assertSqlEventually(
+                "\"device\",\"temperatures\"\r\n" +
+                "\"thermometer1\",\"[98.6,99.1,97.9]\"\r\n",
+                "select device, temperatures from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testSchemalessFloatArraySupport() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Send JSON with array of doubles
+        String json = "{\"location\":\"room1\",\"humidity_readings\":[45.2,46.8,44.9]}";
+        connect.kafka().produce(topicName, json);
+
+        QuestDBUtils.assertSqlEventually(
+                "\"location\",\"humidity_readings\"\r\n" +
+                "\"room1\",\"[45.2,46.8,44.9]\"\r\n",
+                "select location, humidity_readings from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testSchemalessFloatArraySupport_floatFollowedByInt() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Send JSON with array of doubles
+        String json = "{\"location\":\"room1\",\"humidity_readings\":[45.0,46,44.9]}";
+        connect.kafka().produce(topicName, json);
+
+        QuestDBUtils.assertSqlEventually(
+                "\"location\",\"humidity_readings\"\r\n" +
+                        "\"room1\",\"[45.0,46.0,44.9]\"\r\n",
+                "select location, humidity_readings from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testSchemalessFloatArraySupport_intFollowedByFloat() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Send JSON with array of doubles
+        String json = "{\"location\":\"room1\",\"humidity_readings\":[45,46.0,44.9]}";
+        connect.kafka().produce(topicName, json);
+
+        QuestDBUtils.assertSqlEventually(
+                "\"location\",\"humidity_readings\"\r\n" +
+                        "\"room1\",\"[45.0,46.0,44.9]\"\r\n",
+                "select location, humidity_readings from " + topicName,
+                httpPort
+        );
+    }
+
+
+    @Test
+    public void testIntegerArrayRejection() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        props.put("errors.tolerance", "none");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Create schema with integer array (should fail)
+        Schema arraySchema = SchemaBuilder.array(Schema.INT32_SCHEMA).build();
+        Schema schema = SchemaBuilder.struct()
+                .name("com.example.Counter")
+                .field("name", Schema.STRING_SCHEMA)
+                .field("counts", arraySchema)
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("name", "counter1")
+                .put("counts", Arrays.asList(1, 2, 3));
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        // The connector should fail to process this record
+        ConnectTestUtils.assertConnectorTaskFailedEventually(connect);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testNestedStructWithArray(boolean useHttp) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        Schema arraySchema = SchemaBuilder.array(Schema.FLOAT64_SCHEMA).build();
+        Schema sensorSchema = SchemaBuilder.struct()
+                .field("type", Schema.STRING_SCHEMA)
+                .field("values", arraySchema)
+                .build();
+        Schema schema = SchemaBuilder.struct()
+                .name("com.example.Device")
+                .field("id", Schema.STRING_SCHEMA)
+                .field("sensor", sensorSchema)
+                .build();
+
+        Struct sensorStruct = new Struct(sensorSchema)
+                .put("type", "temperature")
+                .put("values", Arrays.asList(20.5, 21.0, 20.8));
+
+        Struct struct = new Struct(schema)
+                .put("id", "device1")
+                .put("sensor", sensorStruct);
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        QuestDBUtils.assertSqlEventually(
+                "\"id\",\"sensor_type\",\"sensor_values\"\r\n" +
+                "\"device1\",\"temperature\",\"[20.5,21.0,20.8]\"\r\n",
+                "select id, sensor_type, sensor_values from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testArrayWithSkipUnsupportedTypes() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("skip.unsupported.types", "true");
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Create schema with string array (unsupported)
+        Schema arraySchema = SchemaBuilder.array(Schema.STRING_SCHEMA).build();
+        Schema schema = SchemaBuilder.struct()
+                .name("com.example.Data")
+                .field("names", arraySchema)
+                .field("value", Schema.FLOAT64_SCHEMA)
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("names", Arrays.asList("a", "b", "c"))
+                .put("value", 42.0);
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        // Verify - string array should be skipped but double field should be written
+        QuestDBUtils.assertSqlEventually(
+                "\"value\"\r\n" +
+                "42.0\r\n",
+                "select value from " + topicName,
+                httpPort
+        );
     }
 }

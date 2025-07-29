@@ -114,7 +114,7 @@ public final class QuestDBSinkTask extends SinkTask {
             }
             return Sender.fromConfig(sink);
         }
-        log.warn("Configuration options 'host', 'tsl', 'token' and 'username' are deprecated and will be removed in the future. Use 'client.conf.string' instead. See: https://questdb.io/docs/third-party-tools/kafka/questdb-kafka/#configuration-options");
+        log.warn("Configuration options 'host', 'tsl', 'token' and 'username' are deprecated and will be removed in the future. Use 'client.conf.string' instead. See: https://questdb.com/docs/third-party-tools/kafka/#configuration-manual");
         Sender.LineSenderBuilder builder = Sender.builder(Sender.Transport.TCP).address(config.getHost());
         if (config.isTls()) {
             builder.enableTls();
@@ -483,6 +483,8 @@ public final class QuestDBSinkTask extends SinkTask {
         } else if (value instanceof java.util.Date) {
             long epochMillis = ((java.util.Date) value).getTime();
             sender.timestampColumn(actualName, TimeUnit.MILLISECONDS.toMicros(epochMillis), ChronoUnit.MICROS);
+        } else if (value instanceof List) {
+            handleArrayWithoutSchema(actualName, (List<?>) value);
         } else {
             onUnsupportedType(actualName, value.getClass().getName());
         }
@@ -539,13 +541,77 @@ public final class QuestDBSinkTask extends SinkTask {
             case STRUCT:
                 handleStruct(name, (Struct) value, schema);
                 break;
-            case BYTES:
             case ARRAY:
+                handleArray(sanitizedName, value, schema);
+                break;
+            case BYTES:
             case MAP:
             default:
                 onUnsupportedType(name, type);
         }
         return true;
+    }
+
+    private void handleArray(String name, Object value, Schema schema) {
+        if (value == null) {
+            return;
+        }
+        
+        Schema valueSchema = schema.valueSchema();
+        if (valueSchema == null) {
+            throw new InvalidDataException("Array schema must have a value schema");
+        }
+        
+        Schema.Type elementType = valueSchema.type();
+        
+        if (elementType == Schema.Type.FLOAT32 || elementType == Schema.Type.FLOAT64) {
+            List<?> list = (List<?>) value;
+            // todo: do not allocate new arrays
+            double[] doubleArray = new double[list.size()];
+            for (int i = 0; i < list.size(); i++) {
+                Object element = list.get(i);
+                if (element == null) {
+                    throw new InvalidDataException("Array elements cannot be null for QuestDB double arrays");
+                }
+                doubleArray[i] = ((Number) element).doubleValue();
+            }
+            sender.doubleArray(name, doubleArray);
+        } else if (elementType == Schema.Type.ARRAY) {
+            onUnsupportedType(name, "Multidimensional ARRAY");
+        } else {
+            onUnsupportedType(name, "ARRAY<" + elementType + ">");
+        }
+    }
+
+    private void handleArrayWithoutSchema(String name, List<?> list) {
+        if (list == null || list.isEmpty()) {
+            return;
+        }
+        
+        Object firstElement = list.get(0);
+        if (firstElement == null) {
+            throw new InvalidDataException("QuestDB array elements cannot be null");
+        }
+        
+        if (firstElement instanceof Number) {
+            // todo: do not allocate new arrays
+            double[] doubleArray = new double[list.size()];
+            for (int i = 0; i < list.size(); i++) {
+                Object element = list.get(i);
+                if (element == null) {
+                    onUnsupportedType(name, "null element in ARRAY");
+                } else if (!(element instanceof Number)) {
+                    onUnsupportedType(name, "ARRAY<" + element.getClass().getSimpleName() + ">");
+                } else {
+                    doubleArray[i] = ((Number) element).doubleValue();
+                }
+            }
+            sender.doubleArray(name, doubleArray);
+        } else if (firstElement instanceof List) {
+            onUnsupportedType(name, "Multidimensional ARRAY");
+        } else {
+            onUnsupportedType(name, "ARRAY<" + firstElement.getClass().getSimpleName() + ">");
+        }
     }
 
     private void onUnsupportedType(String name, Object type) {
@@ -577,8 +643,8 @@ public final class QuestDBSinkTask extends SinkTask {
                 sender.timestampColumn(name, epochMillis, ChronoUnit.MILLIS);
                 return true;
             case Time.LOGICAL_NAME:
-                d = (java.util.Date) value;
-                long dayMillis = d.getTime();
+                java.util.Date timeValue = (java.util.Date) value;
+                long dayMillis = timeValue.getTime();
                 sender.longColumn(name, dayMillis);
                 return true;
             case Decimal.LOGICAL_NAME:
