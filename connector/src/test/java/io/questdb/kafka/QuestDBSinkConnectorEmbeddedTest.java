@@ -2067,6 +2067,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "devices");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 

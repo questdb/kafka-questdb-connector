@@ -577,6 +577,7 @@ public final class QuestDBSinkTask extends SinkTask {
             }
             sender.doubleArray(name, doubleArray);
         } else if (elementType == Schema.Type.ARRAY) {
+            // todo: handle multidimensional arrays
             onUnsupportedType(name, "Multidimensional ARRAY");
         } else {
             onUnsupportedType(name, "ARRAY<" + elementType + ">");

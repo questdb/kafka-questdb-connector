@@ -37,6 +37,8 @@ final class BufferingSender implements Sender {
     private final List<CharSequence> symbolColumnNames = new ArrayList<>(DEFAULT_CAPACITY);
     private final List<CharSequence> symbolColumnValues = new ArrayList<>(DEFAULT_CAPACITY);
     private final Set<CharSequence> symbolColumns = new HashSet<>();
+    private final List<CharSequence> doubleArrayNames = new ArrayList<>(DEFAULT_CAPACITY);
+    private final List<double[]> doubleArrayValues = new ArrayList<>(DEFAULT_CAPACITY);
 
     BufferingSender(Sender sender, String symbolColumns) {
         this.sender = sender;
@@ -201,6 +203,14 @@ final class BufferingSender implements Sender {
         }
         timestampNames.clear();
         timestampValues.clear();
+
+        for (int i = 0, n = doubleArrayNames.size(); i < n; i++) {
+            CharSequence fieldName = doubleArrayNames.get(i);
+            double[] fieldValue = doubleArrayValues.get(i);
+            sender.doubleArray(fieldName, fieldValue);
+        }
+        doubleArrayNames.clear();
+        doubleArrayValues.clear();
     }
 
     private static long unitToMicros(long value, ChronoUnit unit) {
@@ -241,7 +251,9 @@ final class BufferingSender implements Sender {
 
     @Override
     public Sender doubleArray(CharSequence charSequence, double[] doubles) {
-        throw new UnsupportedOperationException("not implemented");
+        doubleArrayNames.add(charSequence);
+        doubleArrayValues.add(doubles);
+        return this;
     }
 
     @Override
