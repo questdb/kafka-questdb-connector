@@ -754,8 +754,8 @@ public final class QuestDBSinkTask extends SinkTask {
                 
                 if (firstNestedNestedElement instanceof Number) {
                     // First, validate dimensions for 3D array (no jagged arrays)
-                    int expectedMatrixHeight = firstNestedList.size();
-                    int expectedRowLength = firstNestedList.size() > 0 ? ((List<?>) firstNestedList.get(0)).size() : 0;
+                    int expectedMatrixHeight = firstList.size();
+                    int expectedRowLength = firstNestedList.size();
                     
                     for (int i = 0; i < list.size(); i++) {
                         Object matrix = list.get(i);
