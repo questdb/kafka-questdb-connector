@@ -1,8 +1,11 @@
 package io.questdb.kafka;
 
 import io.questdb.client.Sender;
+import io.questdb.cutlass.line.array.DoubleArray;
+import io.questdb.cutlass.line.array.LongArray;
 import io.questdb.std.BoolList;
 import io.questdb.std.LongList;
+import io.questdb.std.bytes.DirectByteSlice;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -34,6 +37,12 @@ final class BufferingSender implements Sender {
     private final List<CharSequence> symbolColumnNames = new ArrayList<>(DEFAULT_CAPACITY);
     private final List<CharSequence> symbolColumnValues = new ArrayList<>(DEFAULT_CAPACITY);
     private final Set<CharSequence> symbolColumns = new HashSet<>();
+    private final List<CharSequence> doubleArrayNames = new ArrayList<>(DEFAULT_CAPACITY);
+    private final List<double[]> doubleArrayValues = new ArrayList<>(DEFAULT_CAPACITY);
+    private final List<CharSequence> doubleArray2DNames = new ArrayList<>(DEFAULT_CAPACITY);
+    private final List<double[][]> doubleArray2DValues = new ArrayList<>(DEFAULT_CAPACITY);
+    private final List<CharSequence> doubleArray3DNames = new ArrayList<>(DEFAULT_CAPACITY);
+    private final List<double[][][]> doubleArray3DValues = new ArrayList<>(DEFAULT_CAPACITY);
 
     BufferingSender(Sender sender, String symbolColumns) {
         this.sender = sender;
@@ -98,6 +107,11 @@ final class BufferingSender implements Sender {
     }
 
     @Override
+    public DirectByteSlice bufferView() {
+        throw new UnsupportedOperationException("not implemented");
+    }
+
+    @Override
     public void cancelRow() {
         symbolColumnNames.clear();
         symbolColumnValues.clear();
@@ -111,6 +125,12 @@ final class BufferingSender implements Sender {
         boolValues.clear();
         timestampNames.clear();
         timestampValues.clear();
+        doubleArrayNames.clear();
+        doubleArrayValues.clear();
+        doubleArray2DNames.clear();
+        doubleArray2DValues.clear();
+        doubleArray3DNames.clear();
+        doubleArray3DValues.clear();
 
         sender.cancelRow();
     }
@@ -193,6 +213,30 @@ final class BufferingSender implements Sender {
         }
         timestampNames.clear();
         timestampValues.clear();
+
+        for (int i = 0, n = doubleArrayNames.size(); i < n; i++) {
+            CharSequence fieldName = doubleArrayNames.get(i);
+            double[] fieldValue = doubleArrayValues.get(i);
+            sender.doubleArray(fieldName, fieldValue);
+        }
+        doubleArrayNames.clear();
+        doubleArrayValues.clear();
+
+        for (int i = 0, n = doubleArray2DNames.size(); i < n; i++) {
+            CharSequence fieldName = doubleArray2DNames.get(i);
+            double[][] fieldValue = doubleArray2DValues.get(i);
+            sender.doubleArray(fieldName, fieldValue);
+        }
+        doubleArray2DNames.clear();
+        doubleArray2DValues.clear();
+
+        for (int i = 0, n = doubleArray3DNames.size(); i < n; i++) {
+            CharSequence fieldName = doubleArray3DNames.get(i);
+            double[][][] fieldValue = doubleArray3DValues.get(i);
+            sender.doubleArray(fieldName, fieldValue);
+        }
+        doubleArray3DNames.clear();
+        doubleArray3DValues.clear();
     }
 
     private static long unitToMicros(long value, ChronoUnit unit) {
@@ -229,5 +273,51 @@ final class BufferingSender implements Sender {
     @Override
     public void close() {
         sender.close();
+    }
+
+    @Override
+    public Sender doubleArray(CharSequence charSequence, double[] doubles) {
+        doubleArrayNames.add(charSequence);
+        doubleArrayValues.add(doubles);
+        return this;
+    }
+
+    @Override
+    public Sender doubleArray(CharSequence charSequence, double[][] doubles) {
+        doubleArray2DNames.add(charSequence);
+        doubleArray2DValues.add(doubles);
+        return this;
+    }
+
+    @Override
+    public Sender doubleArray(CharSequence charSequence, double[][][] doubles) {
+        doubleArray3DNames.add(charSequence);
+        doubleArray3DValues.add(doubles);
+        return this;
+    }
+
+    @Override
+    public Sender doubleArray(CharSequence charSequence, DoubleArray doubleArray) {
+        throw new UnsupportedOperationException("not implemented");
+    }
+
+    @Override
+    public Sender longArray(CharSequence charSequence, long[] longs) {
+        throw new UnsupportedOperationException("not implemented");
+    }
+
+    @Override
+    public Sender longArray(CharSequence charSequence, long[][] longs) {
+        throw new UnsupportedOperationException("not implemented");
+    }
+
+    @Override
+    public Sender longArray(CharSequence charSequence, long[][][] longs) {
+        throw new UnsupportedOperationException("not implemented");
+    }
+
+    @Override
+    public Sender longArray(CharSequence charSequence, LongArray longArray) {
+        throw new UnsupportedOperationException("not implemented");
     }
 }

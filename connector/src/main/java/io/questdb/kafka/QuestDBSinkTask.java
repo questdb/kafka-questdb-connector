@@ -114,7 +114,7 @@ public final class QuestDBSinkTask extends SinkTask {
             }
             return Sender.fromConfig(sink);
         }
-        log.warn("Configuration options 'host', 'tsl', 'token' and 'username' are deprecated and will be removed in the future. Use 'client.conf.string' instead. See: https://questdb.io/docs/third-party-tools/kafka/questdb-kafka/#configuration-options");
+        log.warn("Configuration options 'host', 'tsl', 'token' and 'username' are deprecated and will be removed in the future. Use 'client.conf.string' instead. See: https://questdb.com/docs/third-party-tools/kafka/#configuration-manual");
         Sender.LineSenderBuilder builder = Sender.builder(Sender.Transport.TCP).address(config.getHost());
         if (config.isTls()) {
             builder.enableTls();
@@ -325,19 +325,21 @@ public final class QuestDBSinkTask extends SinkTask {
             throw new InvalidDataException("Table name cannot be empty");
         }
 
+        boolean partialRecord = false;
         try {
             sender.table(tableName);
+            partialRecord = true;
             if (config.isIncludeKey()) {
                 handleObject(config.getKeyPrefix(), record.keySchema(), record.key(), PRIMITIVE_KEY_FALLBACK_NAME);
             }
             handleObject(config.getValuePrefix(), record.valueSchema(), recordValue, PRIMITIVE_VALUE_FALLBACK_NAME);
         } catch (InvalidDataException ex) {
-            if (httpTransport) {
+            if (httpTransport && partialRecord) {
                 sender.cancelRow();
             }
             throw ex;
         } catch (LineSenderException ex) {
-            if (httpTransport) {
+            if (httpTransport && partialRecord) {
                 sender.cancelRow();
             }
             throw new InvalidDataException("object contains invalid data", ex);
@@ -481,6 +483,8 @@ public final class QuestDBSinkTask extends SinkTask {
         } else if (value instanceof java.util.Date) {
             long epochMillis = ((java.util.Date) value).getTime();
             sender.timestampColumn(actualName, TimeUnit.MILLISECONDS.toMicros(epochMillis), ChronoUnit.MICROS);
+        } else if (value instanceof List) {
+            handleArrayWithoutSchema(actualName, (List<?>) value);
         } else {
             onUnsupportedType(actualName, value.getClass().getName());
         }
@@ -537,13 +541,281 @@ public final class QuestDBSinkTask extends SinkTask {
             case STRUCT:
                 handleStruct(name, (Struct) value, schema);
                 break;
-            case BYTES:
             case ARRAY:
+                handleArray(sanitizedName, value, schema);
+                break;
+            case BYTES:
             case MAP:
             default:
                 onUnsupportedType(name, type);
         }
         return true;
+    }
+
+    private void handleArray(String name, Object value, Schema schema) {
+        if (value == null) {
+            return;
+        }
+        
+        Schema valueSchema = schema.valueSchema();
+        if (valueSchema == null) {
+            throw new InvalidDataException("Array schema must have a value schema");
+        }
+        
+        Schema.Type elementType = valueSchema.type();
+        
+        if (elementType == Schema.Type.FLOAT32 || elementType == Schema.Type.FLOAT64) {
+            List<?> list = (List<?>) value;
+            // todo: do not allocate new arrays, depends on https://github.com/questdb/questdb/pull/5996
+            double[] doubleArray = new double[list.size()];
+            for (int i = 0; i < list.size(); i++) {
+                Object element = list.get(i);
+                if (element == null) {
+                    throw new InvalidDataException("Array elements cannot be null for QuestDB double arrays");
+                }
+                doubleArray[i] = ((Number) element).doubleValue();
+            }
+            sender.doubleArray(name, doubleArray);
+        } else if (elementType == Schema.Type.ARRAY) {
+            Schema nestedValueSchema = valueSchema.valueSchema();
+            if (nestedValueSchema != null && (nestedValueSchema.type() == Schema.Type.FLOAT32 || nestedValueSchema.type() == Schema.Type.FLOAT64)) {
+                List<?> list = (List<?>) value;
+                
+                // First, validate that all rows have the same length (no jagged arrays)
+                if (!list.isEmpty()) {
+                    int expectedRowLength = ((List<?>) list.get(0)).size();
+                    for (int i = 0; i < list.size(); i++) {
+                        Object row = list.get(i);
+                        if (row == null) {
+                            throw new InvalidDataException("Array elements cannot be null for QuestDB double arrays");
+                        }
+                        List<?> rowList = (List<?>) row;
+                        if (rowList.size() != expectedRowLength) {
+                            throw new InvalidDataException("QuestDB does not support jagged arrays. All rows must have the same length. Expected: " + expectedRowLength + ", but row " + i + " has length: " + rowList.size());
+                        }
+                    }
+                }
+                
+                double[][] doubleArray2D = new double[list.size()][];
+                for (int i = 0; i < list.size(); i++) {
+                    Object row = list.get(i);
+                    List<?> rowList = (List<?>) row;
+                    doubleArray2D[i] = new double[rowList.size()];
+                    for (int j = 0; j < rowList.size(); j++) {
+                        Object element = rowList.get(j);
+                        if (element == null) {
+                            throw new InvalidDataException("Array elements cannot be null for QuestDB double arrays");
+                        }
+                        doubleArray2D[i][j] = ((Number) element).doubleValue();
+                    }
+                }
+                sender.doubleArray(name, doubleArray2D);
+            } else if (nestedValueSchema != null && nestedValueSchema.type() == Schema.Type.ARRAY) {
+                Schema nestedNestedValueSchema = nestedValueSchema.valueSchema();
+                if (nestedNestedValueSchema != null && (nestedNestedValueSchema.type() == Schema.Type.FLOAT32 || nestedNestedValueSchema.type() == Schema.Type.FLOAT64)) {
+                    List<?> list = (List<?>) value;
+                    
+                    // First, validate dimensions for 3D array (no jagged arrays)
+                    if (!list.isEmpty()) {
+                        List<?> firstMatrix = (List<?>) list.get(0);
+                        int expectedMatrixHeight = firstMatrix.size();
+                        int expectedRowLength = firstMatrix.isEmpty() ? 0 : ((List<?>) firstMatrix.get(0)).size();
+                        
+                        for (int i = 0; i < list.size(); i++) {
+                            Object matrix = list.get(i);
+                            if (matrix == null) {
+                                throw new InvalidDataException("Array elements cannot be null for QuestDB double arrays");
+                            }
+                            List<?> matrixList = (List<?>) matrix;
+                            if (matrixList.size() != expectedMatrixHeight) {
+                                throw new InvalidDataException("QuestDB does not support jagged arrays. All matrices must have the same height. Expected: " + expectedMatrixHeight + ", but matrix " + i + " has height: " + matrixList.size());
+                            }
+                            
+                            for (int j = 0; j < matrixList.size(); j++) {
+                                Object row = matrixList.get(j);
+                                if (row == null) {
+                                    throw new InvalidDataException("Array elements cannot be null for QuestDB double arrays");
+                                }
+                                List<?> rowList = (List<?>) row;
+                                if (rowList.size() != expectedRowLength) {
+                                    throw new InvalidDataException("QuestDB does not support jagged arrays. All rows must have the same length. Expected: " + expectedRowLength + ", but matrix " + i + " row " + j + " has length: " + rowList.size());
+                                }
+                            }
+                        }
+                    }
+                    
+                    double[][][] doubleArray3D = new double[list.size()][][];
+                    for (int i = 0; i < list.size(); i++) {
+                        Object matrix = list.get(i);
+                        List<?> matrixList = (List<?>) matrix;
+                        doubleArray3D[i] = new double[matrixList.size()][];
+                        for (int j = 0; j < matrixList.size(); j++) {
+                            Object row = matrixList.get(j);
+                            List<?> rowList = (List<?>) row;
+                            doubleArray3D[i][j] = new double[rowList.size()];
+                            for (int k = 0; k < rowList.size(); k++) {
+                                Object element = rowList.get(k);
+                                if (element == null) {
+                                    throw new InvalidDataException("Array elements cannot be null for QuestDB double arrays");
+                                }
+                                doubleArray3D[i][j][k] = ((Number) element).doubleValue();
+                            }
+                        }
+                    }
+                    sender.doubleArray(name, doubleArray3D);
+                } else {
+                    onUnsupportedType(name, "Multidimensional ARRAY with unsupported element type");
+                }
+            } else {
+                onUnsupportedType(name, "Multidimensional ARRAY with unsupported element type");
+            }
+        } else {
+            onUnsupportedType(name, "ARRAY<" + elementType + ">");
+        }
+    }
+
+    private void handleArrayWithoutSchema(String name, List<?> list) {
+        if (list == null || list.isEmpty()) {
+            return;
+        }
+        
+        Object firstElement = list.get(0);
+        if (firstElement == null) {
+            throw new InvalidDataException("QuestDB array elements cannot be null");
+        }
+        
+        if (firstElement instanceof Number) {
+            // todo: do not allocate new arrays
+            double[] doubleArray = new double[list.size()];
+            for (int i = 0; i < list.size(); i++) {
+                Object element = list.get(i);
+                if (element == null) {
+                    onUnsupportedType(name, "null element in ARRAY");
+                } else if (!(element instanceof Number)) {
+                    onUnsupportedType(name, "ARRAY<" + element.getClass().getSimpleName() + ">");
+                } else {
+                    doubleArray[i] = ((Number) element).doubleValue();
+                }
+            }
+            sender.doubleArray(name, doubleArray);
+        } else if (firstElement instanceof List) {
+            List<?> firstList = (List<?>) firstElement;
+            if (firstList.isEmpty()) {
+                throw new InvalidDataException("QuestDB 2D array cannot contain empty rows");
+            }
+            Object firstNestedElement = firstList.get(0);
+            if (firstNestedElement == null) {
+                throw new InvalidDataException("QuestDB 2D array elements cannot be null");
+            }
+            
+            if (firstNestedElement instanceof Number) {
+                // First, validate that all rows have the same length (no jagged arrays)
+                int expectedRowLength = firstList.size();
+                for (int i = 0; i < list.size(); i++) {
+                    Object row = list.get(i);
+                    if (row == null) {
+                        throw new InvalidDataException("QuestDB 2D array rows cannot be null");
+                    }
+                    if (!(row instanceof List)) {
+                        throw new InvalidDataException("QuestDB 2D array rows must be Lists");
+                    }
+                    List<?> rowList = (List<?>) row;
+                    if (rowList.size() != expectedRowLength) {
+                        throw new InvalidDataException("QuestDB does not support jagged arrays. All rows must have the same length. Expected: " + expectedRowLength + ", but row " + i + " has length: " + rowList.size());
+                    }
+                }
+                
+                double[][] doubleArray2D = new double[list.size()][];
+                for (int i = 0; i < list.size(); i++) {
+                    Object row = list.get(i);
+                    List<?> rowList = (List<?>) row;
+                    doubleArray2D[i] = new double[rowList.size()];
+                    for (int j = 0; j < rowList.size(); j++) {
+                        Object element = rowList.get(j);
+                        if (element == null) {
+                            throw new InvalidDataException("QuestDB 2D array elements cannot be null");
+                        }
+                        if (!(element instanceof Number)) {
+                            throw new InvalidDataException("QuestDB 2D array elements must be Numbers");
+                        }
+                        doubleArray2D[i][j] = ((Number) element).doubleValue();
+                    }
+                }
+                sender.doubleArray(name, doubleArray2D);
+            } else if (firstNestedElement instanceof List) {
+                List<?> firstNestedList = (List<?>) firstNestedElement;
+                if (firstNestedList.isEmpty()) {
+                    throw new InvalidDataException("QuestDB 3D array cannot contain empty matrices");
+                }
+                Object firstNestedNestedElement = firstNestedList.get(0);
+                if (firstNestedNestedElement == null) {
+                    throw new InvalidDataException("QuestDB 3D array elements cannot be null");
+                }
+                
+                if (firstNestedNestedElement instanceof Number) {
+                    // First, validate dimensions for 3D array (no jagged arrays)
+                    int expectedMatrixHeight = firstList.size();
+                    int expectedRowLength = firstNestedList.size();
+                    
+                    for (int i = 0; i < list.size(); i++) {
+                        Object matrix = list.get(i);
+                        if (matrix == null) {
+                            throw new InvalidDataException("QuestDB 3D array matrices cannot be null");
+                        }
+                        if (!(matrix instanceof List)) {
+                            throw new InvalidDataException("QuestDB 3D array matrices must be Lists");
+                        }
+                        List<?> matrixList = (List<?>) matrix;
+                        if (matrixList.size() != expectedMatrixHeight) {
+                            throw new InvalidDataException("QuestDB does not support jagged arrays. All matrices must have the same height. Expected: " + expectedMatrixHeight + ", but matrix " + i + " has height: " + matrixList.size());
+                        }
+                        
+                        for (int j = 0; j < matrixList.size(); j++) {
+                            Object row = matrixList.get(j);
+                            if (row == null) {
+                                throw new InvalidDataException("QuestDB 3D array rows cannot be null");
+                            }
+                            if (!(row instanceof List)) {
+                                throw new InvalidDataException("QuestDB 3D array rows must be Lists");
+                            }
+                            List<?> rowList = (List<?>) row;
+                            if (rowList.size() != expectedRowLength) {
+                                throw new InvalidDataException("QuestDB does not support jagged arrays. All rows must have the same length. Expected: " + expectedRowLength + ", but matrix " + i + " row " + j + " has length: " + rowList.size());
+                            }
+                        }
+                    }
+                    
+                    double[][][] doubleArray3D = new double[list.size()][][];
+                    for (int i = 0; i < list.size(); i++) {
+                        Object matrix = list.get(i);
+                        List<?> matrixList = (List<?>) matrix;
+                        doubleArray3D[i] = new double[matrixList.size()][];
+                        for (int j = 0; j < matrixList.size(); j++) {
+                            Object row = matrixList.get(j);
+                            List<?> rowList = (List<?>) row;
+                            doubleArray3D[i][j] = new double[rowList.size()];
+                            for (int k = 0; k < rowList.size(); k++) {
+                                Object element = rowList.get(k);
+                                if (element == null) {
+                                    throw new InvalidDataException("QuestDB 3D array elements cannot be null");
+                                }
+                                if (!(element instanceof Number)) {
+                                    throw new InvalidDataException("QuestDB 3D array elements must be Numbers");
+                                }
+                                doubleArray3D[i][j][k] = ((Number) element).doubleValue();
+                            }
+                        }
+                    }
+                    sender.doubleArray(name, doubleArray3D);
+                } else {
+                    onUnsupportedType(name, "3D ARRAY with unsupported element type: " + firstNestedNestedElement.getClass().getSimpleName());
+                }
+            } else {
+                onUnsupportedType(name, "2D ARRAY with unsupported element type: " + firstNestedElement.getClass().getSimpleName());
+            }
+        } else {
+            onUnsupportedType(name, "ARRAY<" + firstElement.getClass().getSimpleName() + ">");
+        }
     }
 
     private void onUnsupportedType(String name, Object type) {
@@ -575,8 +847,8 @@ public final class QuestDBSinkTask extends SinkTask {
                 sender.timestampColumn(name, epochMillis, ChronoUnit.MILLIS);
                 return true;
             case Time.LOGICAL_NAME:
-                d = (java.util.Date) value;
-                long dayMillis = d.getTime();
+                java.util.Date timeValue = (java.util.Date) value;
+                long dayMillis = timeValue.getTime();
                 sender.longColumn(name, dayMillis);
                 return true;
             case Decimal.LOGICAL_NAME:

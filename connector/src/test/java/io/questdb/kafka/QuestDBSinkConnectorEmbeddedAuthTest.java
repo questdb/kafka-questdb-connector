@@ -46,7 +46,7 @@ public class QuestDBSinkConnectorEmbeddedAuthTest {
     private static final GenericContainer<?> tlsProxy = newTlsProxyContainer();
 
     private static GenericContainer<?> newQuestDbConnector() {
-        FixedHostPortGenericContainer<?> container = new FixedHostPortGenericContainer<>("questdb/questdb:7.3.3");
+        FixedHostPortGenericContainer<?> container = new FixedHostPortGenericContainer<>("questdb/questdb:9.0.1");
         container.addExposedPort(QuestDBUtils.QUESTDB_HTTP_PORT);
         container.addExposedPort(QuestDBUtils.QUESTDB_ILP_PORT);
         container.setWaitStrategy(new LogMessageWaitStrategy().withRegEx(".*server-main enjoy.*"));
@@ -96,15 +96,15 @@ public class QuestDBSinkConnectorEmbeddedAuthTest {
     public void testSmoke(boolean useTls) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, false);
-        props.put(QuestDBSinkConnectorConfig.USERNAME, TEST_USER_NAME);
-        props.put(QuestDBSinkConnectorConfig.TOKEN, TEST_USER_TOKEN);
-
+        String confString;
         if (useTls) {
-            props.put(QuestDBSinkConnectorConfig.TLS, "true");
-            props.put(QuestDBSinkConnectorConfig.TLS_VALIDATION_MODE_CONFIG, "insecure");
-            // override the host to point to the TLS proxy
-            props.put("host", "localhost:" + tlsProxy.getMappedPort(443));
+            confString = "tcps::addr=localhost:" + tlsProxy.getMappedPort(443) + ";protocol_version=2;tls_verify=unsafe_off;";
+        } else {
+            confString = "tcp::addr=" + questDBContainer.getHost() + ":" + questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT) + ";protocol_version=2;";
         }
+        confString += "username=" + TEST_USER_NAME + ";token=" + TEST_USER_TOKEN + ";";
+        // override the original confString with the one that has auth info
+        props.put("client.conf.string", confString);
 
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);

@@ -57,8 +57,9 @@ public final class ConnectTestUtils {
             confString = "http::addr=" + host + ":" + port + ";";
             props.put("client.conf.string", confString);
         } else {
-            String ilpIUrl = host + ":" + questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT);
-            props.put("host", ilpIUrl);
+            int port = questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT);
+            confString = "tcp::addr=" + host + ":" + port + ";protocol_version=2;";
+            props.put("client.conf.string", confString);
         }
         return props;
     }
