@@ -566,7 +566,7 @@ public final class QuestDBSinkTask extends SinkTask {
         
         if (elementType == Schema.Type.FLOAT32 || elementType == Schema.Type.FLOAT64) {
             List<?> list = (List<?>) value;
-            // todo: do not allocate new arrays
+            // todo: do not allocate new arrays, depends on https://github.com/questdb/questdb/pull/5996
             double[] doubleArray = new double[list.size()];
             for (int i = 0; i < list.size(); i++) {
                 Object element = list.get(i);
@@ -577,8 +577,61 @@ public final class QuestDBSinkTask extends SinkTask {
             }
             sender.doubleArray(name, doubleArray);
         } else if (elementType == Schema.Type.ARRAY) {
-            // todo: handle multidimensional arrays
-            onUnsupportedType(name, "Multidimensional ARRAY");
+            Schema nestedValueSchema = valueSchema.valueSchema();
+            if (nestedValueSchema != null && (nestedValueSchema.type() == Schema.Type.FLOAT32 || nestedValueSchema.type() == Schema.Type.FLOAT64)) {
+                List<?> list = (List<?>) value;
+                double[][] doubleArray2D = new double[list.size()][];
+                for (int i = 0; i < list.size(); i++) {
+                    Object row = list.get(i);
+                    if (row == null) {
+                        throw new InvalidDataException("Array elements cannot be null for QuestDB double arrays");
+                    }
+                    List<?> rowList = (List<?>) row;
+                    doubleArray2D[i] = new double[rowList.size()];
+                    for (int j = 0; j < rowList.size(); j++) {
+                        Object element = rowList.get(j);
+                        if (element == null) {
+                            throw new InvalidDataException("Array elements cannot be null for QuestDB double arrays");
+                        }
+                        doubleArray2D[i][j] = ((Number) element).doubleValue();
+                    }
+                }
+                sender.doubleArray(name, doubleArray2D);
+            } else if (nestedValueSchema != null && nestedValueSchema.type() == Schema.Type.ARRAY) {
+                Schema nestedNestedValueSchema = nestedValueSchema.valueSchema();
+                if (nestedNestedValueSchema != null && (nestedNestedValueSchema.type() == Schema.Type.FLOAT32 || nestedNestedValueSchema.type() == Schema.Type.FLOAT64)) {
+                    List<?> list = (List<?>) value;
+                    double[][][] doubleArray3D = new double[list.size()][][];
+                    for (int i = 0; i < list.size(); i++) {
+                        Object matrix = list.get(i);
+                        if (matrix == null) {
+                            throw new InvalidDataException("Array elements cannot be null for QuestDB double arrays");
+                        }
+                        List<?> matrixList = (List<?>) matrix;
+                        doubleArray3D[i] = new double[matrixList.size()][];
+                        for (int j = 0; j < matrixList.size(); j++) {
+                            Object row = matrixList.get(j);
+                            if (row == null) {
+                                throw new InvalidDataException("Array elements cannot be null for QuestDB double arrays");
+                            }
+                            List<?> rowList = (List<?>) row;
+                            doubleArray3D[i][j] = new double[rowList.size()];
+                            for (int k = 0; k < rowList.size(); k++) {
+                                Object element = rowList.get(k);
+                                if (element == null) {
+                                    throw new InvalidDataException("Array elements cannot be null for QuestDB double arrays");
+                                }
+                                doubleArray3D[i][j][k] = ((Number) element).doubleValue();
+                            }
+                        }
+                    }
+                    sender.doubleArray(name, doubleArray3D);
+                } else {
+                    onUnsupportedType(name, "Multidimensional ARRAY with unsupported element type");
+                }
+            } else {
+                onUnsupportedType(name, "Multidimensional ARRAY with unsupported element type");
+            }
         } else {
             onUnsupportedType(name, "ARRAY<" + elementType + ">");
         }
@@ -609,7 +662,90 @@ public final class QuestDBSinkTask extends SinkTask {
             }
             sender.doubleArray(name, doubleArray);
         } else if (firstElement instanceof List) {
-            onUnsupportedType(name, "Multidimensional ARRAY");
+            List<?> firstList = (List<?>) firstElement;
+            if (firstList.isEmpty()) {
+                throw new InvalidDataException("QuestDB 2D array cannot contain empty rows");
+            }
+            Object firstNestedElement = firstList.get(0);
+            if (firstNestedElement == null) {
+                throw new InvalidDataException("QuestDB 2D array elements cannot be null");
+            }
+            
+            if (firstNestedElement instanceof Number) {
+                double[][] doubleArray2D = new double[list.size()][];
+                for (int i = 0; i < list.size(); i++) {
+                    Object row = list.get(i);
+                    if (row == null) {
+                        throw new InvalidDataException("QuestDB 2D array rows cannot be null");
+                    }
+                    if (!(row instanceof List)) {
+                        throw new InvalidDataException("QuestDB 2D array rows must be Lists");
+                    }
+                    List<?> rowList = (List<?>) row;
+                    doubleArray2D[i] = new double[rowList.size()];
+                    for (int j = 0; j < rowList.size(); j++) {
+                        Object element = rowList.get(j);
+                        if (element == null) {
+                            throw new InvalidDataException("QuestDB 2D array elements cannot be null");
+                        }
+                        if (!(element instanceof Number)) {
+                            throw new InvalidDataException("QuestDB 2D array elements must be Numbers");
+                        }
+                        doubleArray2D[i][j] = ((Number) element).doubleValue();
+                    }
+                }
+                sender.doubleArray(name, doubleArray2D);
+            } else if (firstNestedElement instanceof List) {
+                List<?> firstNestedList = (List<?>) firstNestedElement;
+                if (firstNestedList.isEmpty()) {
+                    throw new InvalidDataException("QuestDB 3D array cannot contain empty matrices");
+                }
+                Object firstNestedNestedElement = firstNestedList.get(0);
+                if (firstNestedNestedElement == null) {
+                    throw new InvalidDataException("QuestDB 3D array elements cannot be null");
+                }
+                
+                if (firstNestedNestedElement instanceof Number) {
+                    double[][][] doubleArray3D = new double[list.size()][][];
+                    for (int i = 0; i < list.size(); i++) {
+                        Object matrix = list.get(i);
+                        if (matrix == null) {
+                            throw new InvalidDataException("QuestDB 3D array matrices cannot be null");
+                        }
+                        if (!(matrix instanceof List)) {
+                            throw new InvalidDataException("QuestDB 3D array matrices must be Lists");
+                        }
+                        List<?> matrixList = (List<?>) matrix;
+                        doubleArray3D[i] = new double[matrixList.size()][];
+                        for (int j = 0; j < matrixList.size(); j++) {
+                            Object row = matrixList.get(j);
+                            if (row == null) {
+                                throw new InvalidDataException("QuestDB 3D array rows cannot be null");
+                            }
+                            if (!(row instanceof List)) {
+                                throw new InvalidDataException("QuestDB 3D array rows must be Lists");
+                            }
+                            List<?> rowList = (List<?>) row;
+                            doubleArray3D[i][j] = new double[rowList.size()];
+                            for (int k = 0; k < rowList.size(); k++) {
+                                Object element = rowList.get(k);
+                                if (element == null) {
+                                    throw new InvalidDataException("QuestDB 3D array elements cannot be null");
+                                }
+                                if (!(element instanceof Number)) {
+                                    throw new InvalidDataException("QuestDB 3D array elements must be Numbers");
+                                }
+                                doubleArray3D[i][j][k] = ((Number) element).doubleValue();
+                            }
+                        }
+                    }
+                    sender.doubleArray(name, doubleArray3D);
+                } else {
+                    onUnsupportedType(name, "3D ARRAY with unsupported element type: " + firstNestedNestedElement.getClass().getSimpleName());
+                }
+            } else {
+                onUnsupportedType(name, "2D ARRAY with unsupported element type: " + firstNestedElement.getClass().getSimpleName());
+            }
         } else {
             onUnsupportedType(name, "ARRAY<" + firstElement.getClass().getSimpleName() + ">");
         }

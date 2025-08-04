@@ -2250,4 +2250,153 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 httpPort
         );
     }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void test2DDoubleArraySupport(boolean useHttp) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Create schema with 2D double array
+        Schema innerArraySchema = SchemaBuilder.array(Schema.FLOAT64_SCHEMA).build();
+        Schema arraySchema = SchemaBuilder.array(innerArraySchema).build();
+        Schema schema = SchemaBuilder.struct()
+                .name("com.example.Matrix")
+                .field("matrix_id", Schema.STRING_SCHEMA)
+                .field("data", arraySchema)
+                .build();
+
+        // Create 2D array data: [[1.0, 2.0], [3.0, 4.0]]
+        Struct struct = new Struct(schema)
+                .put("matrix_id", "matrix1")
+                .put("data", Arrays.asList(
+                        Arrays.asList(1.0, 2.0),
+                        Arrays.asList(3.0, 4.0)
+                ));
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        QuestDBUtils.assertSqlEventually(
+                "\"matrix_id\",\"data\"\r\n" +
+                "\"matrix1\",\"[[1.0,2.0],[3.0,4.0]]\"\r\n",
+                "select matrix_id, data from " + topicName,
+                httpPort
+        );
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void test3DDoubleArraySupport(boolean useHttp) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Create schema with 3D double array
+        Schema innerArraySchema = SchemaBuilder.array(Schema.FLOAT64_SCHEMA).build();
+        Schema middleArraySchema = SchemaBuilder.array(innerArraySchema).build();
+        Schema arraySchema = SchemaBuilder.array(middleArraySchema).build();
+        Schema schema = SchemaBuilder.struct()
+                .name("com.example.Tensor")
+                .field("tensor_id", Schema.STRING_SCHEMA)
+                .field("data", arraySchema)
+                .build();
+
+        // Create 3D array data: [[[1.0, 2.0]], [[3.0, 4.0]]]
+        Struct struct = new Struct(schema)
+                .put("tensor_id", "tensor1")
+                .put("data", Arrays.asList(
+                        Arrays.asList(Arrays.asList(1.0, 2.0)),
+                        Arrays.asList(Arrays.asList(3.0, 4.0))
+                ));
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        QuestDBUtils.assertSqlEventually(
+                "\"tensor_id\",\"data\"\r\n" +
+                "\"tensor1\",\"[[[1.0,2.0]],[[3.0,4.0]]]\"\r\n",
+                "select tensor_id, data from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testSchemaless2DArraySupport() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Send JSON with 2D array
+        String json = "{\"experiment\":\"test1\",\"results\":[[1.5,2.5],[3.5,4.5]]}";
+        connect.kafka().produce(topicName, json);
+
+        QuestDBUtils.assertSqlEventually(
+                "\"experiment\",\"results\"\r\n" +
+                "\"test1\",\"[[1.5,2.5],[3.5,4.5]]\"\r\n",
+                "select experiment, results from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testSchemaless3DArraySupport() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Send JSON with 3D array
+        String json = "{\"model\":\"cnn1\",\"weights\":[[[0.1,0.2]],[[0.3,0.4]]]}";
+        connect.kafka().produce(topicName, json);
+
+        QuestDBUtils.assertSqlEventually(
+                "\"model\",\"weights\"\r\n" +
+                "\"cnn1\",\"[[[0.1,0.2]],[[0.3,0.4]]]\"\r\n",
+                "select model, weights from " + topicName,
+                httpPort
+        );
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void test2DFloatArraySupport(boolean useHttp) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Create schema with 2D float array
+        Schema innerArraySchema = SchemaBuilder.array(Schema.FLOAT32_SCHEMA).build();
+        Schema arraySchema = SchemaBuilder.array(innerArraySchema).build();
+        Schema schema = SchemaBuilder.struct()
+                .name("com.example.FloatMatrix")
+                .field("id", Schema.STRING_SCHEMA)
+                .field("values", arraySchema)
+                .build();
+
+        // Create 2D array data with float values
+        Struct struct = new Struct(schema)
+                .put("id", "float_matrix1")
+                .put("values", Arrays.asList(
+                        Arrays.asList(1.1f, 2.2f),
+                        Arrays.asList(3.3f, 4.4f)
+                ));
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        QuestDBUtils.assertSqlEventually(
+                "\"id\",\"values\"\r\n" +
+                "\"float_matrix1\",\"[[1.100000023841858,2.200000047683716],[3.299999952316284,4.400000095367432]]\"\r\n",
+                "select id, \"values\" from " + topicName,
+                httpPort
+        );
+    }
 }
