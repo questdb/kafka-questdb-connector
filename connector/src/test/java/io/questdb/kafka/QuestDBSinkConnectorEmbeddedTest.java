@@ -2399,4 +2399,95 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 httpPort
         );
     }
+
+    @Test
+    public void testJaggedArrayRejection() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+        props.put("errors.tolerance", "none");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // send JSON with jagged 2D array (different row lengths)
+        String json = "{\"experiment\":\"jagged\",\"results\":[[1.5,2.5,3.5],[4.5,5.5]]}";
+        connect.kafka().produce(topicName, json);
+
+        ConnectTestUtils.assertConnectorTaskFailedEventually(connect);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void test2DArrayWithSymbolColumns(boolean useHttp) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "sensor_id");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Create schema with 2D double array and symbol column
+        Schema innerArraySchema = SchemaBuilder.array(Schema.FLOAT64_SCHEMA).build();
+        Schema arraySchema = SchemaBuilder.array(innerArraySchema).build();
+        Schema schema = SchemaBuilder.struct()
+                .name("com.example.MatrixWithSymbol")
+                .field("sensor_id", Schema.STRING_SCHEMA)
+                .field("readings", arraySchema)
+                .build();
+
+        // Create 2D array data: [[1.1, 2.2], [3.3, 4.4]]
+        Struct struct = new Struct(schema)
+                .put("sensor_id", "sensor-001")
+                .put("readings", Arrays.asList(
+                        Arrays.asList(1.1, 2.2),
+                        Arrays.asList(3.3, 4.4)
+                ));
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        QuestDBUtils.assertSqlEventually(
+                "\"sensor_id\",\"readings\"\r\n" +
+                "\"sensor-001\",\"[[1.1,2.2],[3.3,4.4]]\"\r\n",
+                "select sensor_id, readings from " + topicName,
+                httpPort
+        );
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void test3DArrayWithSymbolColumns(boolean useHttp) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "device_id");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Create schema with 3D double array and symbol column
+        Schema innerArraySchema = SchemaBuilder.array(Schema.FLOAT64_SCHEMA).build();
+        Schema middleArraySchema = SchemaBuilder.array(innerArraySchema).build();
+        Schema arraySchema = SchemaBuilder.array(middleArraySchema).build();
+        Schema schema = SchemaBuilder.struct()
+                .name("com.example.TensorWithSymbol")
+                .field("device_id", Schema.STRING_SCHEMA)
+                .field("data", arraySchema)
+                .build();
+
+        // Create 3D array data: [[[1.0, 2.0]], [[3.0, 4.0]]]
+        Struct struct = new Struct(schema)
+                .put("device_id", "device-alpha")
+                .put("data", Arrays.asList(
+                        Arrays.asList(Arrays.asList(1.0, 2.0)),
+                        Arrays.asList(Arrays.asList(3.0, 4.0))
+                ));
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        QuestDBUtils.assertSqlEventually(
+                "\"device_id\",\"data\"\r\n" +
+                "\"device-alpha\",\"[[[1.0,2.0]],[[3.0,4.0]]]\"\r\n",
+                "select device_id, data from " + topicName,
+                httpPort
+        );
+    }
 }
