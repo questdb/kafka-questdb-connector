@@ -99,6 +99,7 @@
                             <outputDirectory>${project.build.directory}/generated/avro</outputDirectory>
                             <imports>
                                 <import>${project.basedir}/src/main/resources/avro/Student.avsc</import>
+                                <import>${project.basedir}/src/main/resources/avro/SensorReading.avsc</import>
                             </imports>
                         </configuration>
                     </execution>

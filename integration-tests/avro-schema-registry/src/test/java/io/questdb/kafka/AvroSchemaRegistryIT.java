@@ -5,6 +5,7 @@ import io.confluent.kafka.serializers.KafkaAvroSerializerConfig;
 import io.debezium.testing.testcontainers.ConnectorConfiguration;
 import io.debezium.testing.testcontainers.DebeziumContainer;
 import io.questdb.client.Sender;
+import io.questdb.kafka.domain.SensorReading;
 import io.questdb.kafka.domain.Student;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
@@ -17,9 +18,11 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.jetbrains.annotations.NotNull;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.KafkaContainer;
 import org.testcontainers.containers.Network;
+import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.containers.wait.strategy.HttpWaitStrategy;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
@@ -28,6 +31,7 @@ import org.testcontainers.utility.DockerImageName;
 import org.testcontainers.utility.MountableFile;
 
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Properties;
 
 import static java.time.Duration.ofMinutes;
@@ -52,10 +56,10 @@ public class AvroSchemaRegistryIT {
             .withEnv("KAFKA_CONTROLLER_QUORUM_VOTERS", "0@kafka:9094");
 
     @Container
-    private final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:7.4.0")
+    private final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:9.0.1")
             .withNetwork(network)
             .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT)
-//            .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
+            .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
             .withEnv("QDB_CAIRO_COMMIT_LAG", "100")
             .withEnv("JAVA_OPTS", "-Djava.locale.providers=JRE,SPI");
 
@@ -108,7 +112,7 @@ public class AvroSchemaRegistryIT {
             producer.send(new ProducerRecord<>(topicName, "foo", student)).get();
         }
 
-        startConnector(topicName);
+        startConnector(topicName, "birthday");
         QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"timestamp\"\r\n"
                         + "\"John\",\"Doe\",\"2000-01-01T00:00:00.000000Z\"\r\n",
                 "select * from " + topicName, questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
@@ -125,7 +129,7 @@ public class AvroSchemaRegistryIT {
                     .build();
             producer.send(new ProducerRecord<>(topicName, "foo", student)).get();
         }
-        startConnector(topicName);
+        startConnector(topicName, "birthday");
 
         QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"timestamp\"\r\n"
                 + "\"John\",\"Doe\",\"2000-01-01T00:00:00.000000Z\"\r\n",
@@ -146,7 +150,41 @@ public class AvroSchemaRegistryIT {
                 "select * from " + topicName, questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
     }
 
-    private void startConnector(String topicName) {
+    @Test
+    public void testAvroRecordsWithArrays() throws Exception {
+        String topicName = "sensors";
+        
+        // sensor reading with array of double values
+        try (Producer<String, SensorReading> producer = new KafkaProducer<>(producerProps())) {
+            SensorReading reading = SensorReading.newBuilder()
+                    .setSensorId("sensor-001")
+                    .setTimestamp(Instant.parse("2024-01-01T10:00:00Z"))
+                    .setValues(Arrays.asList(22.5, 23.1, 22.8, 23.3, 22.9))
+                    .setLocation("Building A")
+                    .build();
+            producer.send(new ProducerRecord<>(topicName, "key1", reading)).get();
+            
+            // Send another reading
+            SensorReading reading2 = SensorReading.newBuilder()
+                    .setSensorId("sensor-002")
+                    .setTimestamp(Instant.parse("2024-01-01T10:05:00Z"))
+                    .setValues(Arrays.asList(18.2, 18.5, 18.3))
+                    .setLocation(null)
+                    .build();
+            producer.send(new ProducerRecord<>(topicName, "key2", reading2)).get();
+        }
+
+        startConnector(topicName, "timestamp");
+
+        QuestDBUtils.assertSqlEventually(
+                "\"sensorId\",\"values\",\"location\",\"timestamp\"\r\n" +
+                        "\"sensor-001\",\"[22.5,23.1,22.8,23.3,22.9]\",\"Building A\",\"2024-01-01T10:00:00.000000Z\"\r\n" +
+                        "\"sensor-002\",\"[18.2,18.5,18.3]\",,\"2024-01-01T10:05:00.000000Z\"\r\n",
+                "select sensorId, \"values\", location, timestamp from " + topicName + " order by timestamp",
+                questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
+    }
+
+    private void startConnector(String topicName, String timestampName) {
         String confString = "http::addr=" + questDBContainer.getNetworkAliases().get(0) + ":" + QuestDBUtils.QUESTDB_HTTP_PORT + ";auto_flush_rows=1;";
         ConnectorConfiguration connector = ConnectorConfiguration.create()
                 .with("connector.class", QuestDBSinkConnector.class.getName())
@@ -155,7 +193,7 @@ public class AvroSchemaRegistryIT {
                 .with("value.converter", "io.confluent.connect.avro.AvroConverter")
                 .with("value.converter.schema.registry.url", "http://" + schemaRegistry.getNetworkAliases().get(0) + ":8081")
                 .with("topics", topicName)
-                .with(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birthday")
+                .with(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, timestampName)
                 .with(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false")
                 .with("client.conf.string", confString);
         connectContainer.registerConnector("my-connector", connector);

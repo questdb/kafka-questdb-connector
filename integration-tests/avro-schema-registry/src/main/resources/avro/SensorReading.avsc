@@ -1,0 +1,30 @@
+{
+  "namespace": "io.questdb.kafka.domain",
+  "type": "record",
+  "name": "SensorReading",
+  "fields": [
+    {
+      "name": "sensorId",
+      "type": "string"
+    },
+    {
+      "name": "timestamp",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-millis"
+      }
+    },
+    {
+      "name": "values",
+      "type": {
+        "type": "array",
+        "items": "double"
+      }
+    },
+    {
+      "name": "location",
+      "type": ["null", "string"],
+      "default": null
+    }
+  ]
+}
