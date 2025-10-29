@@ -52,6 +52,7 @@ public final class QuestDBSinkTask extends SinkTask {
     private final FlushConfig flushConfig = new FlushConfig();
     private final ObjList<SinkRecord> inflightSinkRecords = new ObjList<>();
     private ErrantRecordReporter reporter;
+    private boolean dlqSendBatchOnError;
 
     @Override
     public String version() {
@@ -96,6 +97,7 @@ public final class QuestDBSinkTask extends SinkTask {
             // Kafka older than 2.6
             reporter = null;
         }
+        this.dlqSendBatchOnError = config.isDlqSendBatchOnError();
     }
 
     private Sender createRawSender() {
@@ -275,20 +277,30 @@ public final class QuestDBSinkTask extends SinkTask {
                 (reporter != null && e.getMessage() != null) // hack to detect data parsing errors originating at server-side
                 && (e.getMessage().contains("error in line") || e.getMessage().contains("failed to parse line protocol"))
         ) {
-            // ok, we have a parsing error, let's try to send records one by one to find the problematic record
-            // and we will report it to the error handler. the rest of the records will make it to QuestDB
-            log.debug("Sender exception, trying to send problematic record one by one. Inflight record size = {}", inflightSinkRecords.size(), e);
-            sender = createSender();
-            for (int i = 0; i < inflightSinkRecords.size(); i++) {
-                SinkRecord sinkRecord = inflightSinkRecords.get(i);
-                try {
-                    handleSingleRecord(sinkRecord);
-                    sender.flush();
-                } catch (Exception ex) {
-                    log.debug("Failed to send problematic record to QuestDB. Reporting to Kafka Connect error handler (DQL)...", ex);
-                    context.errantRecordReporter().report(sinkRecord, ex);
-                    closeSenderSilently();
-                    sender = createSender();
+            if (dlqSendBatchOnError) {
+                // Send all records directly to DLQ without trying to send them to database
+                log.warn("Sender exception, sending entire batch to DLQ. Inflight record size = {}", inflightSinkRecords.size(), e);
+                for (int i = 0; i < inflightSinkRecords.size(); i++) {
+                    SinkRecord sinkRecord = inflightSinkRecords.get(i);
+                    log.debug("Reporting record to Kafka Connect error handler (DLQ)...");
+                    context.errantRecordReporter().report(sinkRecord, e);
+                }
+            } else {
+                // ok, we have a parsing error, let's try to send records one by one to find the problematic record
+                // and we will report it to the error handler. the rest of the records will make it to QuestDB
+                log.warn("Sender exception, trying to send problematic record one by one. Inflight record size = {}", inflightSinkRecords.size(), e);
+                sender = createSender();
+                for (int i = 0; i < inflightSinkRecords.size(); i++) {
+                    SinkRecord sinkRecord = inflightSinkRecords.get(i);
+                    try {
+                        handleSingleRecord(sinkRecord);
+                        sender.flush();
+                    } catch (Exception ex) {
+                        log.warn("Failed to send problematic record to QuestDB. Reporting to Kafka Connect error handler (DQL)...", ex);
+                        context.errantRecordReporter().report(sinkRecord, ex);
+                        closeSenderSilently();
+                        sender = createSender();
+                    }
                 }
             }
             nextFlushNanos = System.nanoTime() + flushConfig.autoFlushNanos;

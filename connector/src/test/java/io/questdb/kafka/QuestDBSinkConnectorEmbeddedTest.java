@@ -586,6 +586,48 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @Test
+    public void testDeadLetterQueue_sendBatchOnError() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+        props.put("errors.deadletterqueue.topic.name", "dlq");
+        props.put("errors.deadletterqueue.topic.replication.factor", "1");
+        props.put("errors.tolerance", "all");
+        props.put("dlq.send.batch.on.error", "true");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
+                "create table " + topicName + " (firstname string, lastname string, age int, id uuid, ts timestamp) timestamp(ts) partition by day wal",
+                httpPort,
+                QuestDBUtils.Endpoint.EXEC);
+
+        String goodRecordA = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d041\"}";
+        String goodRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d042\"}";
+        String goodRecordC = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d043\"}";
+        String badRecordA = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"Invalid UUID\"}";
+        String badRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":\"not a number\",\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d041\"}";
+
+        // interleave good and bad records
+        connect.kafka().produce(topicName, "key", goodRecordA);
+        connect.kafka().produce(topicName, "key", badRecordA);
+        connect.kafka().produce(topicName, "key", goodRecordB);
+        connect.kafka().produce(topicName, "key", badRecordB);
+        connect.kafka().produce(topicName, "key", goodRecordC);
+
+        // When dlq.send.batch.on.error is true, ALL records in the batch with errors should go to DLQ
+        // This means all 5 records should be in DLQ, not just the 2 bad ones
+        ConsumerRecords<byte[], byte[]> fetchedRecords = connect.kafka().consume(5, 120_000, "dlq");
+        Assertions.assertEquals(5, fetchedRecords.count());
+
+        // Verify that NO records made it to QuestDB
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"age\",\"id\"\r\n",
+                "select firstname,lastname,age, id from " + topicName,
+                httpPort);
+    }
+
+    @Test
     public void testbadColumnType_noDLQ() {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
