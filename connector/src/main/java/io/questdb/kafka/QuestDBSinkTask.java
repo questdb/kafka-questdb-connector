@@ -277,6 +277,7 @@ public final class QuestDBSinkTask extends SinkTask {
         ) {
             // ok, we have a parsing error, let's try to send records one by one to find the problematic record
             // and we will report it to the error handler. the rest of the records will make it to QuestDB
+            log.debug("Sender exception, trying to send problematic record one by one. Inflight record size = {}", inflightSinkRecords.size(), e);
             sender = createSender();
             for (int i = 0; i < inflightSinkRecords.size(); i++) {
                 SinkRecord sinkRecord = inflightSinkRecords.get(i);
@@ -284,6 +285,7 @@ public final class QuestDBSinkTask extends SinkTask {
                     handleSingleRecord(sinkRecord);
                     sender.flush();
                 } catch (Exception ex) {
+                    log.debug("Failed to send problematic record to QuestDB. Reporting to Kafka Connect error handler (DQL)...", ex);
                     context.errantRecordReporter().report(sinkRecord, ex);
                     closeSenderSilently();
                     sender = createSender();
