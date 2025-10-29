@@ -79,6 +79,12 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String TIMESTAMP_FORMAT = "timestamp.string.format";
     private static final String TIMESTAMP_FORMAT_DOC = "Timestamp format. Used when parsing timestamp string fields";
 
+    public static final String DLQ_SEND_BATCH_ON_ERROR_CONFIG = "dlq.send.batch.on.error";
+    private static final String DLQ_SEND_BATCH_ON_ERROR_DOC = "When true and a Dead Letter Queue (DLQ) is configured, " +
+            "send the entire batch to DLQ on parsing errors instead of trying to send records one-by-one to the database first. " +
+            "This can be useful to avoid additional database load when errors are expected to affect multiple records. " +
+            "Default is false (try one-by-one).";
+
     private static final String DEFAULT_TIMESTAMP_FORMAT = "yyyy-MM-ddTHH:mm:ss.SSSUUUZ";
 
     public QuestDBSinkConnectorConfig(ConfigDef config, Map<String, String> parsedConfig) {
@@ -111,7 +117,8 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG, Type.BOOLEAN, false, Importance.MEDIUM, DESIGNATED_TIMESTAMP_KAFKA_NATIVE_DOC)
                 .define(TLS_VALIDATION_MODE_CONFIG, Type.STRING, "default", ConfigDef.ValidString.in("default", "insecure"), Importance.LOW, TLS_VALIDATION_MODE_DOC)
                 .define(CONFIGURATION_STRING_CONFIG, Type.PASSWORD, null, Importance.HIGH, CONFIGURATION_STRING_DOC)
-                .define(ALLOWED_LAG_CONFIG, Type.INT, 1000, ConfigDef.Range.between(1, Integer.MAX_VALUE), Importance.LOW, ALLOWED_LAG_DOC);
+                .define(ALLOWED_LAG_CONFIG, Type.INT, 1000, ConfigDef.Range.between(1, Integer.MAX_VALUE), Importance.LOW, ALLOWED_LAG_DOC)
+                .define(DLQ_SEND_BATCH_ON_ERROR_CONFIG, Type.BOOLEAN, false, Importance.LOW, DLQ_SEND_BATCH_ON_ERROR_DOC);
     }
 
     public Password getConfigurationString() {
@@ -210,6 +217,10 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public int getMaxRetries() {
         return getInt(MAX_RETRIES);
+    }
+
+    public boolean isDlqSendBatchOnError() {
+        return getBoolean(DLQ_SEND_BATCH_ON_ERROR_CONFIG);
     }
 
     private static class TimestampUnitsRecommender implements ConfigDef.Recommender {
