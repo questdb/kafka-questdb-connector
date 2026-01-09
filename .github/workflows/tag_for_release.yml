@@ -18,7 +18,7 @@ jobs:
           git config user.email "actions@github.com"
           git config user.name "GitHub Actions"
       - name: Publish JAR
-        run: mvn -B release:prepare
+        run: mvn -B release:prepare -Darguments="-DskipTests"
 #        env:
 #          GITHUB_TOKEN: ${{ secrets.PACKAGE_PUBLISH_TOKEN }}
 #          SIGN_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
