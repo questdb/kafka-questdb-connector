@@ -108,6 +108,9 @@ public final class QuestDBSinkTask extends SinkTask {
             confStr = System.getenv("QDB_CLIENT_CONF");
         }
         if (confStr != null && !confStr.isEmpty()) {
+            confStr = ConfStringEnvInterpolator.expand(confStr);
+        }
+        if (confStr != null && !confStr.isEmpty()) {
             log.debug("Using client configuration string");
             StringSink sink = new StringSink();
             httpTransport = ClientConfUtils.patchConfStr(confStr, sink, flushConfig);
