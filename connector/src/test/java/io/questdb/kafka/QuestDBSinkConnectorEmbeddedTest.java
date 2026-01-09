@@ -2532,4 +2532,20 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 httpPort
         );
     }
+
+    @Test
+    public void testEnvVarInterpolation_undefinedVariable() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = new HashMap<>();
+        props.put(org.apache.kafka.connect.runtime.ConnectorConfig.CONNECTOR_CLASS_CONFIG, QuestDBSinkConnector.class.getName());
+        props.put("topics", topicName);
+        props.put(KEY_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        // Use an undefined environment variable - this should cause task failure
+        props.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG,
+                "http::addr=localhost:9000;token=${UNDEFINED_TEST_VAR_THAT_DOES_NOT_EXIST};");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskFailedEventually(connect);
+    }
 }
