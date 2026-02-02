@@ -2331,6 +2331,88 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
+    public void testOrderBookToArraySMT(boolean useHttp) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+
+        // Configure the OrderBookToArray SMT
+        props.put("transforms", "orderbook");
+        props.put("transforms.orderbook.type", "io.questdb.kafka.OrderBookToArray$Value");
+        props.put("transforms.orderbook.mappings", "buy_entries:bids:px,size;sell_entries:asks:px,size");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Create schema with two ARRAY(STRUCT{px, size}) fields
+        Schema entrySchema = SchemaBuilder.struct()
+                .field("px", Schema.FLOAT64_SCHEMA)
+                .field("size", Schema.FLOAT64_SCHEMA)
+                .build();
+        Schema entryArraySchema = SchemaBuilder.array(entrySchema).build();
+        Schema schema = SchemaBuilder.struct()
+                .name("com.example.OrderBook")
+                .field("symbol", Schema.STRING_SCHEMA)
+                .field("buy_entries", entryArraySchema)
+                .field("sell_entries", entryArraySchema)
+                .build();
+
+        Struct buy1 = new Struct(entrySchema).put("px", 10.0).put("size", 1123.0);
+        Struct buy2 = new Struct(entrySchema).put("px", 5.1).put("size", 92.0);
+        Struct sell1 = new Struct(entrySchema).put("px", 11.0).put("size", 500.0);
+        Struct sell2 = new Struct(entrySchema).put("px", 12.5).put("size", 300.0);
+
+        Struct struct = new Struct(schema)
+                .put("symbol", "AAPL")
+                .put("buy_entries", Arrays.asList(buy1, buy2))
+                .put("sell_entries", Arrays.asList(sell1, sell2));
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        // After transpose:
+        // bids: [[10.0, 5.1], [1123.0, 92.0]]   (px row, size row)
+        // asks: [[11.0, 12.5], [500.0, 300.0]]
+        QuestDBUtils.assertSqlEventually(
+                "\"symbol\",\"bids\",\"asks\"\r\n" +
+                "\"AAPL\",\"[[10.0,5.1],[1123.0,92.0]]\",\"[[11.0,12.5],[500.0,300.0]]\"\r\n",
+                "select symbol, bids, asks from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testOrderBookToArraySMT_schemaless() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+
+        // Configure the OrderBookToArray SMT
+        props.put("transforms", "orderbook");
+        props.put("transforms.orderbook.type", "io.questdb.kafka.OrderBookToArray$Value");
+        props.put("transforms.orderbook.mappings", "buy_entries:bids:px,size;sell_entries:asks:px,size");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Send raw JSON with array-of-objects
+        String json = "{\"symbol\":\"AAPL\","
+                + "\"buy_entries\":[{\"px\":10.0,\"size\":1123.0},{\"px\":5.1,\"size\":92.0}],"
+                + "\"sell_entries\":[{\"px\":11.0,\"size\":500.0},{\"px\":12.5,\"size\":300.0}]}";
+        connect.kafka().produce(topicName, json);
+
+        // After transpose:
+        // bids: [[10.0, 5.1], [1123.0, 92.0]]
+        // asks: [[11.0, 12.5], [500.0, 300.0]]
+        QuestDBUtils.assertSqlEventually(
+                "\"symbol\",\"bids\",\"asks\"\r\n" +
+                "\"AAPL\",\"[[10.0,5.1],[1123.0,92.0]]\",\"[[11.0,12.5],[500.0,300.0]]\"\r\n",
+                "select symbol, bids, asks from " + topicName,
+                httpPort
+        );
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
     public void test3DDoubleArraySupport(boolean useHttp) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
@@ -2529,6 +2611,180 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 "\"device_id\",\"data\"\r\n" +
                 "\"device-alpha\",\"[[[1.0,2.0]],[[3.0,4.0]]]\"\r\n",
                 "select device_id, data from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testOrderBookToArraySMT_intAndFloatCoercion() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        props.put("transforms", "orderbook");
+        props.put("transforms.orderbook.type", "io.questdb.kafka.OrderBookToArray$Value");
+        props.put("transforms.orderbook.mappings", "entries:data:price,size");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        Schema entrySchema = SchemaBuilder.struct()
+                .field("price", Schema.FLOAT32_SCHEMA)
+                .field("size", Schema.INT32_SCHEMA)
+                .build();
+        Schema schema = SchemaBuilder.struct()
+                .field("symbol", Schema.STRING_SCHEMA)
+                .field("entries", SchemaBuilder.array(entrySchema).build())
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("symbol", "AAPL")
+                .put("entries", Arrays.asList(
+                        new Struct(entrySchema).put("price", 10.5f).put("size", 100),
+                        new Struct(entrySchema).put("price", 5.1f).put("size", 200)
+                ));
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        QuestDBUtils.assertSqlEventually(
+                "\"symbol\",\"data\"\r\n" +
+                "\"AAPL\",\"[[10.5,5.099999904632568],[100.0,200.0]]\"\r\n",
+                "select symbol, data from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testOrderBookToArraySMT_missingSourceField() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        props.put("transforms", "orderbook");
+        props.put("transforms.orderbook.type", "io.questdb.kafka.OrderBookToArray$Value");
+        props.put("transforms.orderbook.mappings", "buy_entries:bids:price,size;sell_entries:asks:price,size");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Schema only has buy_entries, not sell_entries
+        Schema entrySchema = SchemaBuilder.struct()
+                .field("price", Schema.FLOAT64_SCHEMA)
+                .field("size", Schema.FLOAT64_SCHEMA)
+                .build();
+        Schema schema = SchemaBuilder.struct()
+                .field("symbol", Schema.STRING_SCHEMA)
+                .field("buy_entries", SchemaBuilder.array(entrySchema).build())
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("symbol", "AAPL")
+                .put("buy_entries", Arrays.asList(
+                        new Struct(entrySchema).put("price", 10.0).put("size", 100.0)
+                ));
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        // Only bids should appear, asks is omitted since sell_entries was missing
+        QuestDBUtils.assertSqlEventually(
+                "\"symbol\",\"bids\"\r\n" +
+                "\"AAPL\",\"[[10.0],[100.0]]\"\r\n",
+                "select symbol, bids from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testOrderBookToArraySMT_emptySourceArray() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        props.put("transforms", "orderbook");
+        props.put("transforms.orderbook.type", "io.questdb.kafka.OrderBookToArray$Value");
+        props.put("transforms.orderbook.mappings", "buy_entries:bids:price,size");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        Schema entrySchema = SchemaBuilder.struct()
+                .field("price", Schema.FLOAT64_SCHEMA)
+                .field("size", Schema.FLOAT64_SCHEMA)
+                .build();
+        Schema schema = SchemaBuilder.struct()
+                .field("symbol", Schema.STRING_SCHEMA)
+                .field("buy_entries", SchemaBuilder.array(entrySchema).build())
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("symbol", "AAPL")
+                .put("buy_entries", Collections.emptyList());
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        // Empty source array is skipped — record is ingested without the bids column
+        QuestDBUtils.assertSqlEventually(
+                "\"symbol\"\r\n" +
+                "\"AAPL\"\r\n",
+                "select symbol from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testOrderBookToArraySMT_nullValueInStruct() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+        props.put("errors.tolerance", "none");
+        props.put("transforms", "orderbook");
+        props.put("transforms.orderbook.type", "io.questdb.kafka.OrderBookToArray$Value");
+        props.put("transforms.orderbook.mappings", "buy_entries:bids:price,size");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Send JSON with null value in struct entry
+        String json = "{\"symbol\":\"AAPL\",\"buy_entries\":[{\"price\":null,\"size\":100.0}]}";
+        connect.kafka().produce(topicName, json);
+
+        ConnectTestUtils.assertConnectorTaskFailedEventually(connect);
+    }
+
+    @Test
+    public void testOrderBookToArraySMT_targetCollidesWithExisting() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        props.put("transforms", "orderbook");
+        props.put("transforms.orderbook.type", "io.questdb.kafka.OrderBookToArray$Value");
+        // Target "bids" collides with an existing field
+        props.put("transforms.orderbook.mappings", "buy_entries:bids:price,size");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        Schema entrySchema = SchemaBuilder.struct()
+                .field("price", Schema.FLOAT64_SCHEMA)
+                .field("size", Schema.FLOAT64_SCHEMA)
+                .build();
+        Schema schema = SchemaBuilder.struct()
+                .field("symbol", Schema.STRING_SCHEMA)
+                .field("bids", Schema.STRING_SCHEMA) // existing field with same name as target
+                .field("buy_entries", SchemaBuilder.array(entrySchema).build())
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("symbol", "AAPL")
+                .put("bids", "old_value")
+                .put("buy_entries", Arrays.asList(
+                        new Struct(entrySchema).put("price", 10.0).put("size", 100.0)
+                ));
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        // The old "bids" string field should be replaced by the transposed array
+        QuestDBUtils.assertSqlEventually(
+                "\"symbol\",\"bids\"\r\n" +
+                "\"AAPL\",\"[[10.0],[100.0]]\"\r\n",
+                "select symbol, bids from " + topicName,
                 httpPort
         );
     }
