@@ -40,7 +40,7 @@ public class DebeziumIT {
     private static final Network network = Network.newNetwork();
 
     @Container
-    private final KafkaContainer kafkaContainer = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.0"))
+    private final KafkaContainer kafkaContainer = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.8.0"))
             .withNetwork(network)
             .withNetworkAliases("kafka")
             .withKraft()
@@ -49,13 +49,13 @@ public class DebeziumIT {
 
     @Container
     public PostgreSQLContainer<?> postgresContainer =
-            new PostgreSQLContainer<>(DockerImageName.parse("debezium/postgres:11-alpine").asCompatibleSubstituteFor("postgres"))
+            new PostgreSQLContainer<>(DockerImageName.parse("debezium/postgres:16-alpine").asCompatibleSubstituteFor("postgres"))
                     .withNetwork(network)
                     .withNetworkAliases("postgres");
 
     @Container
     public DebeziumContainer debeziumContainer =
-            new DebeziumContainer("debezium/connect:1.9.6.Final")
+            new DebeziumContainer("debezium/connect:2.7.3.Final")
                     .withNetwork(network)
                     .withKafka(kafkaContainer)
                     .withCopyFileToContainer(MountableFile.forHostPath(connectorJarResolver.getJarPath()), "/kafka/connect/questdb-connector/questdb-connector.jar")
@@ -66,7 +66,7 @@ public class DebeziumIT {
                     .withEnv("CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE", "true");
 
     @Container
-    private final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:7.4.0")
+    private final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:9.3.2")
             .withNetwork(network)
             .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT)
             .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")));
@@ -170,7 +170,7 @@ public class DebeziumIT {
                     questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
 
             // total number of rows is equal to the number of updates and inserts
-            QuestDBUtils.assertSqlEventually("\"count\"\r\n"
+            QuestDBUtils.assertSqlEventually("\"count()\"\r\n"
                             + "200010\r\n",
                     "select count() from " + questTableName,
                     questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
@@ -413,7 +413,7 @@ public class DebeziumIT {
     private void startDebeziumConnector() {
         ConnectorConfiguration connector = ConnectorConfiguration
                 .forJdbcContainer(postgresContainer)
-                .with("database.server.name", PG_SERVER_NAME);
+                .with("topic.prefix", PG_SERVER_NAME);
         debeziumContainer.registerConnector(DEBEZIUM_CONNECTOR_NAME, connector);
     }
 

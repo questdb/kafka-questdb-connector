@@ -38,7 +38,7 @@ public class QuestDBSinkConnectorIT {
     private final static Network network = Network.newNetwork();
 
     @Container
-    private static final KafkaContainer kafkaContainer = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.0"))
+    private static final KafkaContainer kafkaContainer = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.8.0"))
             .withNetwork(network)
             .withNetworkAliases("kafka")
             .withKraft()
@@ -46,14 +46,14 @@ public class QuestDBSinkConnectorIT {
             .withEnv("KAFKA_CONTROLLER_QUORUM_VOTERS", "0@kafka:9094");
 
     @Container
-    private static final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:7.4.0")
+    private static final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:9.3.2")
             .withNetwork(network)
             .withNetworkAliases("questdb")
             .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT)
             .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")));
 
     @Container
-    private static final DebeziumContainer connectContainer = new DebeziumContainer("confluentinc/cp-kafka-connect:7.6.0")
+    private static final DebeziumContainer connectContainer = new DebeziumContainer("confluentinc/cp-kafka-connect:7.8.0")
             .withEnv("CONNECT_BOOTSTRAP_SERVERS", kafkaContainer.getNetworkAliases().get(0) + ":9092")
             .withEnv("CONNECT_GROUP_ID", "test")
             .withEnv("CONNECT_OFFSET_STORAGE_TOPIC", "connect-storage-topic")

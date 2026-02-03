@@ -46,7 +46,7 @@
         <dependency>
             <groupId>io.debezium</groupId>
             <artifactId>debezium-testing-testcontainers</artifactId>
-            <version>1.9.5.Final</version>
+            <version>2.7.3.Final</version>
             <scope>test</scope>
         </dependency>
         <dependency>

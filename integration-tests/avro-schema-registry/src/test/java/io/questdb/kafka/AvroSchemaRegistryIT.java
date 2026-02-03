@@ -48,7 +48,7 @@ public class AvroSchemaRegistryIT {
     private final static Network network = Network.newNetwork();
 
     @Container
-    private final KafkaContainer kafkaContainer = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.0"))
+    private final KafkaContainer kafkaContainer = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.8.0"))
             .withNetwork(network)
             .withNetworkAliases("kafka")
             .withKraft()
@@ -56,7 +56,7 @@ public class AvroSchemaRegistryIT {
             .withEnv("KAFKA_CONTROLLER_QUORUM_VOTERS", "0@kafka:9094");
 
     @Container
-    private final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:9.0.1")
+    private final GenericContainer<?> questDBContainer = new GenericContainer<>("questdb/questdb:9.3.2")
             .withNetwork(network)
             .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT)
             .withLogConsumer(new Slf4jLogConsumer(LoggerFactory.getLogger("questdb")))
@@ -64,7 +64,7 @@ public class AvroSchemaRegistryIT {
             .withEnv("JAVA_OPTS", "-Djava.locale.providers=JRE,SPI");
 
     @Container
-    private final DebeziumContainer connectContainer = new DebeziumContainer("confluentinc/cp-kafka-connect:7.6.0")
+    private final DebeziumContainer connectContainer = new DebeziumContainer("confluentinc/cp-kafka-connect:7.8.0")
             .withEnv("CONNECT_BOOTSTRAP_SERVERS", kafkaContainer.getNetworkAliases().get(0) + ":9092")
             .withEnv("CONNECT_GROUP_ID", "test")
             .withEnv("CONNECT_OFFSET_STORAGE_TOPIC", "connect-storage-topic")
@@ -91,7 +91,7 @@ public class AvroSchemaRegistryIT {
                     .withStartupTimeout(ofMinutes(5)));
 
     @Container
-    private GenericContainer<?> schemaRegistry = new GenericContainer<>(DockerImageName.parse("confluentinc/cp-schema-registry:7.6.0"))
+    private GenericContainer<?> schemaRegistry = new GenericContainer<>(DockerImageName.parse("confluentinc/cp-schema-registry:7.8.0"))
             .withNetwork(network)
             .withNetworkAliases("schema-registry")
             .withEnv("SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS", kafkaContainer.getNetworkAliases().get(0) + ":9092")

@@ -13,7 +13,7 @@
         <maven.compiler.source>8</maven.compiler.source>
         <maven.compiler.target>8</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <debezium.version>1.9.6.Final</debezium.version>
+        <debezium.version>2.7.3.Final</debezium.version>
     </properties>
 
     <dependencies>
