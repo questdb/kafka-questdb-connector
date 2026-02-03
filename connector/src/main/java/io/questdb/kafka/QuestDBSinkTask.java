@@ -6,8 +6,8 @@ import io.questdb.cutlass.line.LineSenderException;
 import io.questdb.std.NumericException;
 import io.questdb.std.ObjList;
 import io.questdb.std.datetime.DateFormat;
-import io.questdb.std.datetime.microtime.Timestamps;
-import io.questdb.std.datetime.millitime.DateFormatUtils;
+import io.questdb.std.datetime.DateLocaleFactory;
+import io.questdb.std.datetime.microtime.Micros;
 import io.questdb.std.str.StringSink;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
@@ -391,7 +391,7 @@ public final class QuestDBSinkTask extends SinkTask {
                     composedTimestampValues[i] = null;
                 }
                 try {
-                    timestampColumnValue = dataFormat.parse(composedBuffer, DateFormatUtils.EN_LOCALE) * 1000;
+                    timestampColumnValue = dataFormat.parse(composedBuffer, DateLocaleFactory.EN_LOCALE);
                 } catch (NumericException e) {
                     throw new InvalidDataException("Cannot parse composed timestamp: " + composedBuffer
                             + " with the configured format '" + config.getTimestampFormat() + "'", e);
@@ -410,14 +410,14 @@ public final class QuestDBSinkTask extends SinkTask {
         }
 
         if (kafkaTimestampsEnabled) {
-            timestampColumnValue = TimeUnit.MILLISECONDS.toNanos(record.timestamp());
+            timestampColumnValue = TimeUnit.MILLISECONDS.toMicros(record.timestamp());
         }
 
         if (timestampColumnValue == Long.MIN_VALUE) {
             sender.atNow();
         } else {
             try {
-                sender.at(timestampColumnValue, ChronoUnit.NANOS);
+                sender.at(timestampColumnValue, ChronoUnit.MICROS);
             } finally {
                 timestampColumnValue = Long.MIN_VALUE;
             }
@@ -501,11 +501,11 @@ public final class QuestDBSinkTask extends SinkTask {
     private long resolveDesignatedTimestampColumnValue(Object value, Schema schema) {
         if (value instanceof java.util.Date) {
             log.debug("Timestamp column value is a java.util.Date");
-            return TimeUnit.MILLISECONDS.toNanos(((java.util.Date) value).getTime());
+            return TimeUnit.MILLISECONDS.toMicros(((java.util.Date) value).getTime());
         }
         if (value instanceof String) {
             log.debug("Timestamp column value is a string");
-            return parseToMicros((String) value) * 1000;
+            return parseToMicros((String) value);
         }
         if (!(value instanceof Long)) {
             throw new InvalidDataException("Unsupported timestamp column type: " + value.getClass());
@@ -520,7 +520,7 @@ public final class QuestDBSinkTask extends SinkTask {
             inputUnit = TimeUnit.MICROSECONDS;
             log.debug("Detected Debezium micros as timestamp units");
         }
-        return inputUnit.toNanos(longValue);
+        return inputUnit.toMicros(longValue);
     }
 
     private void writePhysicalTypeWithoutSchema(String name, Object value, String fallbackName) {
@@ -568,7 +568,7 @@ public final class QuestDBSinkTask extends SinkTask {
 
     private long parseToMicros(String timestamp) {
         try {
-            return dataFormat.parse(timestamp, DateFormatUtils.EN_LOCALE);
+            return dataFormat.parse(timestamp, DateLocaleFactory.EN_LOCALE);
         } catch (NumericException e) {
             throw new InvalidDataException("Cannot parse timestamp: " + timestamp + " with the configured format '" + config.getTimestampFormat() +"' use '"
                     + QuestDBSinkConnectorConfig.TIMESTAMP_FORMAT + "' to configure the right timestamp format. " +
@@ -913,7 +913,7 @@ public final class QuestDBSinkTask extends SinkTask {
                 return true;
             case "io.debezium.time.Date":
                 int i = (Integer) value;
-                long micros = Timestamps.addDays(0, i);
+                long micros = Micros.addDays(0, i);
                 sender.timestampColumn(name, micros, ChronoUnit.MICROS);
                 return true;
             case Timestamp.LOGICAL_NAME:

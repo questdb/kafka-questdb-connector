@@ -71,6 +71,30 @@ final class BufferingSender implements Sender {
     }
 
     @Override
+    public void reset() {
+        symbolColumnNames.clear();
+        symbolColumnValues.clear();
+        stringNames.clear();
+        stringValues.clear();
+        longNames.clear();
+        longValues.clear();
+        doubleNames.clear();
+        doubleValues.clear();
+        boolNames.clear();
+        boolValues.clear();
+        timestampNames.clear();
+        timestampValues.clear();
+        doubleArrayNames.clear();
+        doubleArrayValues.clear();
+        doubleArray2DNames.clear();
+        doubleArray2DValues.clear();
+        doubleArray3DNames.clear();
+        doubleArray3DValues.clear();
+
+        sender.reset();
+    }
+
+    @Override
     public Sender stringColumn(CharSequence name, CharSequence value) {
         if (symbolColumns.contains(name)) {
             symbolColumnNames.add(name);
