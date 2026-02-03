@@ -6,8 +6,10 @@ import org.apache.kafka.connect.connector.Task;
 import org.apache.kafka.connect.sink.SinkConnector;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public final class QuestDBSinkConnector extends SinkConnector {
     private Map<String, String> configProps;
@@ -47,14 +49,36 @@ public final class QuestDBSinkConnector extends SinkConnector {
 
     @Override
     public Config validate(Map<String, String> connectorConfigs) {
-        String s = connectorConfigs.get(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG);
-        if (Boolean.parseBoolean(s) && connectorConfigs.get(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG) != null) {
+        String kafkaNative = connectorConfigs.get(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG);
+        if (Boolean.parseBoolean(kafkaNative) && connectorConfigs.get(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG) != null) {
             throw new IllegalArgumentException("Cannot use '" + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG
                     + "' with '" + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG +"'. These options are mutually exclusive.");
         }
 
+        validateTimestampFieldNames(connectorConfigs);
         validateClientConfiguration(connectorConfigs);
         return super.validate(connectorConfigs);
+    }
+
+    private static void validateTimestampFieldNames(Map<String, String> connectorConfigs) {
+        String timestampFieldName = connectorConfigs.get(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG);
+        if (timestampFieldName == null || !timestampFieldName.contains(",")) {
+            return;
+        }
+
+        String[] fields = timestampFieldName.split(",");
+        Set<String> seen = new HashSet<>();
+        for (String field : fields) {
+            String trimmed = field.trim();
+            if (trimmed.isEmpty()) {
+                throw new IllegalArgumentException("Empty field name in '" + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG
+                        + "': '" + timestampFieldName + "'");
+            }
+            if (!seen.add(trimmed)) {
+                throw new IllegalArgumentException("Duplicate field name '" + trimmed + "' in '"
+                        + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG + "': '" + timestampFieldName + "'");
+            }
+        }
     }
 
     private static void validateClientConfiguration(Map<String, String> connectorConfigs) {

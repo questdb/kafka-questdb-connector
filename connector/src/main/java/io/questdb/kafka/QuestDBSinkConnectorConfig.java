@@ -29,10 +29,13 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     private static final String SKIP_UNSUPPORTED_TYPES_DOC = "Skip unsupported types";
 
     public static final String DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG = "timestamp.field.name";
-    private static final String DESIGNATED_TIMESTAMP_COLUMN_NAME_DOC = "Designated timestamp field name";
+    private static final String DESIGNATED_TIMESTAMP_COLUMN_NAME_DOC = "Designated timestamp field name. " +
+            "Use comma-separated names (e.g. 'date,time') to concatenate multiple fields, parsed via 'timestamp.string.format' " +
+            "(e.g. 'yyyyMMddHHmmssSSS' for KDB-style dates). Mutually exclusive with 'timestamp.kafka.native'.";
 
     public static final String DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG = "timestamp.kafka.native";
-    private static final String DESIGNATED_TIMESTAMP_KAFKA_NATIVE_DOC = "Use Kafka record timestamps as designated timestamp. Mutually exclusive with timestamp.field.name";
+    private static final String DESIGNATED_TIMESTAMP_KAFKA_NATIVE_DOC = "Use Kafka record timestamp as the designated timestamp. " +
+            "Mutually exclusive with 'timestamp.field.name'.";
 
     public static final String TIMESTAMP_STRING_FIELDS = "timestamp.string.fields";
     private static final String TIMESTAMP_STRING_FIELDS_DOC = "Comma-separated list of string fields that should be parsed as timestamps.";
@@ -77,7 +80,10 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     private static final String MAX_RETRIES_DOC = "The maximum number of times to retry on errors before failing the task";
 
     public static final String TIMESTAMP_FORMAT = "timestamp.string.format";
-    private static final String TIMESTAMP_FORMAT_DOC = "Timestamp format. Used when parsing timestamp string fields";
+    private static final String TIMESTAMP_FORMAT_DOC = "Timestamp format pattern for parsing string timestamps. " +
+            "Used for fields in 'timestamp.string.fields' and composed timestamps from 'timestamp.field.name'. " +
+            "Default: 'yyyy-MM-ddTHH:mm:ss.SSSUUUZ'. Example: 'yyyyMMddHHmmssSSS' for KDB-style. " +
+            "See https://questdb.com/docs/query/functions/date-time/#date-and-timestamp-format";
 
     public static final String DLQ_SEND_BATCH_ON_ERROR_CONFIG = "dlq.send.batch.on.error";
     private static final String DLQ_SEND_BATCH_ON_ERROR_DOC = "When true and a Dead Letter Queue (DLQ) is configured, " +

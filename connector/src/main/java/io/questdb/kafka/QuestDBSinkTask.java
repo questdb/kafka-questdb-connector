@@ -53,6 +53,9 @@ public final class QuestDBSinkTask extends SinkTask {
     private final ObjList<SinkRecord> inflightSinkRecords = new ObjList<>();
     private ErrantRecordReporter reporter;
     private boolean dlqSendBatchOnError;
+    private String[] composedTimestampFields;
+    private String[] composedTimestampValues;
+    private MultiPartCharSequence composedBuffer;
 
     @Override
     public String version() {
@@ -85,12 +88,34 @@ public final class QuestDBSinkTask extends SinkTask {
         }
         this.sender = createSender();
         this.remainingRetries = config.getMaxRetries();
-        this.timestampColumnName = config.getDesignatedTimestampColumnName();
         this.kafkaTimestampsEnabled = config.isDesignatedTimestampKafkaNative();
         this.timestampUnits = config.getTimestampUnitsOrNull();
         this.allowedLag = config.getAllowedLag();
         this.nextFlushNanos = System.nanoTime() + flushConfig.autoFlushNanos;
         this.recordToTable = Templating.newTableTableFn(config.getTable());
+
+        String timestampFieldName = config.getDesignatedTimestampColumnName();
+        if (timestampFieldName != null && timestampFieldName.contains(",")) {
+            // Multiple fields: composed timestamp mode
+            String[] fields = timestampFieldName.split(",");
+            composedTimestampFields = new String[fields.length];
+            for (int i = 0; i < fields.length; i++) {
+                String field = fields[i].trim();
+                if (field.isEmpty()) {
+                    throw new ConnectException("Empty field name in '" + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG
+                            + "': '" + timestampFieldName + "'");
+                }
+                composedTimestampFields[i] = field;
+            }
+            composedTimestampValues = new String[composedTimestampFields.length];
+            composedBuffer = composedTimestampFields.length == 2
+                    ? new TwoPartCharSequence()
+                    : new CompositeCharSequence(composedTimestampFields.length);
+        } else {
+            // Single field: standard designated timestamp
+            this.timestampColumnName = timestampFieldName;
+        }
+
         try {
             reporter = context.errantRecordReporter();
         } catch (NoSuchMethodError | NoClassDefFoundError e) {
@@ -331,6 +356,11 @@ public final class QuestDBSinkTask extends SinkTask {
     private void handleSingleRecord(SinkRecord record) {
         assert timestampColumnValue == Long.MIN_VALUE;
 
+        // Clear composed timestamp values from any previous failed record
+        if (composedTimestampValues != null) {
+            Arrays.fill(composedTimestampValues, null);
+        }
+
         Object recordValue = record.value();
         if (recordValue == null) {
             // ignore tombstones
@@ -350,6 +380,23 @@ public final class QuestDBSinkTask extends SinkTask {
                 handleObject(config.getKeyPrefix(), record.keySchema(), record.key(), PRIMITIVE_KEY_FALLBACK_NAME);
             }
             handleObject(config.getValuePrefix(), record.valueSchema(), recordValue, PRIMITIVE_VALUE_FALLBACK_NAME);
+
+            if (composedTimestampFields != null) {
+                composedBuffer.reset();
+                for (int i = 0; i < composedTimestampValues.length; i++) {
+                    if (composedTimestampValues[i] == null) {
+                        throw new InvalidDataException("Missing composed timestamp field: " + composedTimestampFields[i]);
+                    }
+                    composedBuffer.add(composedTimestampValues[i]);
+                    composedTimestampValues[i] = null;
+                }
+                try {
+                    timestampColumnValue = dataFormat.parse(composedBuffer, DateFormatUtils.EN_LOCALE) * 1000;
+                } catch (NumericException e) {
+                    throw new InvalidDataException("Cannot parse composed timestamp: " + composedBuffer
+                            + " with the configured format '" + config.getTimestampFormat() + "'", e);
+                }
+            }
         } catch (InvalidDataException ex) {
             if (httpTransport && partialRecord) {
                 sender.cancelRow();
@@ -417,6 +464,18 @@ public final class QuestDBSinkTask extends SinkTask {
 
     private void handleObject(String name, Schema schema, Object value, String fallbackName) {
         assert !name.isEmpty() || !fallbackName.isEmpty();
+
+        if (composedTimestampFields != null) {
+            for (int i = 0; i < composedTimestampFields.length; i++) {
+                if (composedTimestampFields[i].equals(name)) {
+                    if (value == null) {
+                        throw new InvalidDataException("Composed timestamp field '" + name + "' cannot be null");
+                    }
+                    composedTimestampValues[i] = value.toString();
+                    return;
+                }
+            }
+        }
 
         if (isDesignatedColumnName(name, fallbackName)) {
             assert timestampColumnValue == Long.MIN_VALUE;

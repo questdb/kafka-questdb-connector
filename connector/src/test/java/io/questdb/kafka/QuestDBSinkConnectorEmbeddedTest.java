@@ -2789,6 +2789,107 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testComposedTimestamp_schemaless(boolean useHttp) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "date,time");
+        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_FORMAT, "yyyyMMddHHmmssSSS");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
+                "create table " + topicName + " (firstname string, lastname string, ts timestamp) timestamp(ts) partition by day wal",
+                httpPort,
+                QuestDBUtils.Endpoint.EXEC);
+
+        connect.kafka().produce(topicName, "foo",
+                "{\"firstname\":\"John\""
+                        + ",\"lastname\":\"Doe\""
+                        + ",\"date\":\"20260202\""
+                        + ",\"time\":\"135010207\"}"
+        );
+
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"ts\"\r\n" +
+                        "\"John\",\"Doe\",\"2026-02-02T13:50:10.207000Z\"\r\n",
+                "select * from " + topicName,
+                httpPort);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testComposedTimestamp_withSchema(boolean useHttp) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "date,time");
+        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_FORMAT, "yyyyMMddHHmmssSSS");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
+                "create table " + topicName + " (firstname string, lastname string, ts timestamp) timestamp(ts) partition by day wal",
+                httpPort,
+                QuestDBUtils.Endpoint.EXEC);
+
+        Schema schema = SchemaBuilder.struct().name("com.example.Person")
+                .field("firstname", Schema.STRING_SCHEMA)
+                .field("lastname", Schema.STRING_SCHEMA)
+                .field("date", Schema.STRING_SCHEMA)
+                .field("time", Schema.STRING_SCHEMA)
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("firstname", "John")
+                .put("lastname", "Doe")
+                .put("date", "20260202")
+                .put("time", "135010207");
+
+        connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
+
+        QuestDBUtils.assertSqlEventually("\"firstname\",\"lastname\",\"ts\"\r\n" +
+                        "\"John\",\"Doe\",\"2026-02-02T13:50:10.207000Z\"\r\n",
+                "select * from " + topicName,
+                httpPort);
+    }
+
+    @Test
+    public void testComposedTimestamp_emptyFieldNameRejected() {
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "date,,time");
+        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_FORMAT, "yyyyMMddHHmmssSSS");
+
+        try {
+            connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+            fail("Expected ConnectException");
+        } catch (ConnectException e) {
+            assertThat(e.getMessage(), containsString("Empty field name"));
+        }
+    }
+
+    @Test
+    public void testComposedTimestamp_duplicateFieldNameRejected() {
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "date,date");
+        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_FORMAT, "yyyyMMddHHmmssSSS");
+
+        try {
+            connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+            fail("Expected ConnectException");
+        } catch (ConnectException e) {
+            assertThat(e.getMessage(), containsString("Duplicate field name"));
+        }
+    }
+
     @Test
     public void testEnvVarInterpolation_undefinedVariable() {
         connect.kafka().createTopic(topicName, 1);
