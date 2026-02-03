@@ -1,6 +1,6 @@
 services:
   questdb:
-    image: questdb/questdb:8.1.0
+    image: questdb/questdb:9.3.2
     expose:
       - "9000"
     ports:
@@ -9,7 +9,7 @@ services:
       - QDB_LINE_DEFAULT_PARTITION_BY=YEAR
       - QDB_PG_SELECT_CACHE_ENABLED=false
   grafana:
-    image: grafana/grafana-oss:9.2.1
+    image: grafana/grafana-oss:11.4.0
     ports:
       - "3000:3000"
     volumes:
@@ -29,7 +29,7 @@ services:
         - GF_AUTH_ANONYMOUS_ORG_NAME=Main Org.
         - GF_AUTH_ANONYMOUS_ORG_ID=1
   kafka:
-    image: apache/kafka:latest
+    image: apache/kafka:3.8.1
     container_name: broker
     environment:
       KAFKA_NODE_ID: 1
@@ -45,7 +45,7 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_NUM_PARTITIONS: 3
   postgres:
-    image: debezium/postgres:14-alpine
+    image: debezium/postgres:16-alpine
     ports:
       - "5432:5432"
     environment:

@@ -9,10 +9,10 @@
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <maven.compiler.source>8</maven.compiler.source>
-        <maven.compiler.target>8</maven.compiler.target>
-        <spring.boot.version>2.7.4</spring.boot.version>
-        <testcontainers.version>1.17.3</testcontainers.version>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <spring.boot.version>3.3.7</spring.boot.version>
+        <testcontainers.version>1.20.4</testcontainers.version>
 
     </properties>
 
@@ -33,7 +33,6 @@
         <dependency>
             <groupId>org.springframework</groupId>
             <artifactId>spring-test</artifactId>
-            <version>5.3.23</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -52,7 +51,7 @@
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
-            <version>42.5.0</version>
+            <version>42.7.4</version>
         </dependency>
         <dependency>
             <groupId>org.testcontainers</groupId>

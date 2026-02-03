@@ -18,9 +18,9 @@ async function ingest() {
                 let batch = [];
                 for (let j = 0; j < 100; j++) {
                     const data = {
-                        firstname: faker.name.firstName(),
-                        lastname: faker.name.lastName(),
-                        birthday: faker.date.birthdate({min: year, max: year}),
+                        firstname: faker.person.firstName(),
+                        lastname: faker.person.lastName(),
+                        birthday: faker.date.birthdate({min: year, max: year, mode: 'year'}),
                     };
                     batch.push({value: JSON.stringify(data)})
                 }

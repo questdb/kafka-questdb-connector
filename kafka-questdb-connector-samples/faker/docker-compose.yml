@@ -1,6 +1,6 @@
 services:
   questdb:
-    image: questdb/questdb:8.1.0
+    image: questdb/questdb:9.3.2
     expose:
       - "9000"
     ports:
@@ -8,7 +8,7 @@ services:
     environment:
       - QDB_LINE_DEFAULT_PARTITION_BY=YEAR
   kafka:
-    image: apache/kafka:latest
+    image: apache/kafka:3.8.1
     container_name: broker
     environment:
       KAFKA_NODE_ID: 1

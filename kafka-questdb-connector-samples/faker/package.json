@@ -10,7 +10,7 @@
   "author": "",
   "license": "Apache-2.0",
   "dependencies": {
-    "@faker-js/faker": "^7.5.0",
-    "kafkajs": "^2.2.0"
+    "@faker-js/faker": "^9.5.1",
+    "kafkajs": "^2.2.4"
   }
 }
