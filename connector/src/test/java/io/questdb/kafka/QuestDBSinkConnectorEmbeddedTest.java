@@ -2861,6 +2861,66 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
+    @Test
+    public void testMarketData_orderBookToArray_stringEncodedPrices_schemaless() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "received_at");
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "market");
+
+        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_STRING_FIELDS, "received_at");
+        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_FORMAT, "yyyy-MM-ddTHH:mm:ss.U+Z");
+
+        props.put("transforms", "extractPayload,orderbook");
+        props.put("transforms.extractPayload.type", "org.apache.kafka.connect.transforms.ExtractField$Value");
+        props.put("transforms.extractPayload.field", "payload");
+        props.put("transforms.orderbook.type", "io.questdb.kafka.OrderBookToArray$Value");
+        props.put("transforms.orderbook.mappings", "bids:bids:price,amount;asks:asks:price,amount");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
+                "create table " + topicName
+                        + " (market symbol, venue int, bids double[][], asks double[][], received_at timestamp)"
+                        + " timestamp(received_at) partition by hour wal",
+                httpPort,
+                QuestDBUtils.Endpoint.EXEC);
+
+        // Same structure as the numeric test, but price and amount are string-encoded.
+        // OrderBookToArray's toDouble() helper parses strings to doubles transparently.
+        String json = """
+                {
+                  "schema": "market_data",
+                  "payload": {
+                    "market": "BTCUSD",
+                    "venue": 1,
+                    "received_at": "2026-01-13T22:00:00.014Z",
+                    "type": "SNAPSHOT",
+                    "bids": [
+                      {"side": "BUY", "amount": "2.45", "price": "45120.50", "quote_entry_id": "uuid-1", "time": "2026-01-13T22:00:00.014Z", "type": "NEW", "entry_id": "45120.50"},
+                      {"side": "BUY", "amount": "5.12", "price": "45119.00", "quote_entry_id": "uuid-2", "time": "2026-01-13T22:00:00.014Z", "type": "NEW", "entry_id": "45119.00"}
+                    ],
+                    "asks": [
+                      {"side": "SELL", "amount": "1.83", "price": "45121.00", "quote_entry_id": "uuid-3", "time": "2026-01-13T22:00:00.014Z", "type": "NEW", "entry_id": "45121.00"},
+                      {"side": "SELL", "amount": "3.27", "price": "45122.50", "quote_entry_id": "uuid-4", "time": "2026-01-13T22:00:00.014Z", "type": "NEW", "entry_id": "45122.50"}
+                    ]
+                  }
+                }""";
+        connect.kafka().produce(topicName, json);
+
+        QuestDBUtils.assertSqlEventually("""
+                        "market","venue","bids","asks","received_at"\r
+                        "BTCUSD",1,"[[45120.5,45119.0],[2.45,5.12]]","[[45121.0,45122.5],[1.83,3.27]]","2026-01-13T22:00:00.014000Z"\r
+                        """,
+                "select market, venue, bids, asks, received_at from " + topicName,
+                httpPort
+        );
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     public void testComposedTimestamp_schemaless(boolean useHttp) {

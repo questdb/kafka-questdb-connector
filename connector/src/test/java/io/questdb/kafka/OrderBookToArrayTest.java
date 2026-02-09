@@ -588,6 +588,102 @@ public class OrderBookToArrayTest {
         smt.close();
     }
 
+    @Test
+    public void testSchemaless_stringValues() {
+        OrderBookToArray<SinkRecord> smt = new OrderBookToArray.Value<>();
+        smt.configure(Collections.singletonMap("mappings", "buy_entries:bids:px,size"));
+
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("symbol", "AAPL");
+        value.put("buy_entries", Arrays.asList(
+                mapOf("px", "10.5", "size", "1123.0"),
+                mapOf("px", "5.1", "size", "92")
+        ));
+
+        SinkRecord original = new SinkRecord("topic", 0, null, null, null, value, 0);
+        SinkRecord transformed = smt.apply(original);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result = (Map<String, Object>) transformed.value();
+        @SuppressWarnings("unchecked")
+        List<List<Double>> bids = (List<List<Double>>) result.get("bids");
+        Assert.assertEquals(Arrays.asList(10.5, 5.1), bids.get(0));
+        Assert.assertEquals(Arrays.asList(1123.0, 92.0), bids.get(1));
+
+        smt.close();
+    }
+
+    @Test
+    public void testSchemaless_mixedNumericAndStringValues() {
+        OrderBookToArray<SinkRecord> smt = new OrderBookToArray.Value<>();
+        smt.configure(Collections.singletonMap("mappings", "entries:data:px,size"));
+
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("entries", Arrays.asList(
+                mapOf("px", 10.5, "size", "1123.0"),   // numeric px, string size
+                mapOf("px", "5.1", "size", 92.0)       // string px, numeric size
+        ));
+
+        SinkRecord original = new SinkRecord("topic", 0, null, null, null, value, 0);
+        SinkRecord transformed = smt.apply(original);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result = (Map<String, Object>) transformed.value();
+        @SuppressWarnings("unchecked")
+        List<List<Double>> data = (List<List<Double>>) result.get("data");
+        Assert.assertEquals(Arrays.asList(10.5, 5.1), data.get(0));
+        Assert.assertEquals(Arrays.asList(1123.0, 92.0), data.get(1));
+
+        smt.close();
+    }
+
+    @Test(expected = ConnectException.class)
+    public void testSchemaless_nonNumericStringThrows() {
+        OrderBookToArray<SinkRecord> smt = new OrderBookToArray.Value<>();
+        smt.configure(Collections.singletonMap("mappings", "entries:data:px"));
+
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("entries", Collections.singletonList(
+                Collections.singletonMap("px", "not_a_number")
+        ));
+
+        SinkRecord original = new SinkRecord("topic", 0, null, null, null, value, 0);
+        smt.apply(original);
+    }
+
+    @Test
+    public void testWithSchema_stringFieldsCoerced() {
+        OrderBookToArray<SinkRecord> smt = new OrderBookToArray.Value<>();
+        smt.configure(Collections.singletonMap("mappings", "buy_entries:bids:px,size"));
+
+        Schema entrySchema = SchemaBuilder.struct()
+                .field("px", Schema.STRING_SCHEMA)
+                .field("size", Schema.STRING_SCHEMA)
+                .build();
+        Schema schema = SchemaBuilder.struct()
+                .field("symbol", Schema.STRING_SCHEMA)
+                .field("buy_entries", SchemaBuilder.array(entrySchema).build())
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("symbol", "AAPL")
+                .put("buy_entries", Arrays.asList(
+                        new Struct(entrySchema).put("px", "10.5").put("size", "1123.0"),
+                        new Struct(entrySchema).put("px", "5.1").put("size", "92")
+                ));
+
+        SinkRecord original = new SinkRecord("topic", 0, null, null, schema, struct, 0);
+        SinkRecord transformed = smt.apply(original);
+
+        Struct result = (Struct) transformed.value();
+        @SuppressWarnings("unchecked")
+        List<List<Double>> bids = (List<List<Double>>) result.get("bids");
+        Assert.assertEquals(Arrays.asList(10.5, 5.1), bids.get(0));
+        Assert.assertEquals(Arrays.asList(1123.0, 92.0), bids.get(1));
+
+        smt.close();
+    }
+
     private static Map<String, Object> mapOf(String k1, Object v1, String k2, Object v2) {
         Map<String, Object> map = new LinkedHashMap<>();
         map.put(k1, v1);

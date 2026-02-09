@@ -167,14 +167,30 @@ public abstract class OrderBookToArray<R extends ConnectRecord<R>> implements Tr
             List<Double> row = new ArrayList<>(entries.size());
             for (Struct entry : entries) {
                 Object val = entry.get(structField);
-                if (val == null) {
-                    throw new ConnectException("Null value for field '" + structField + "' in source array '" + sourceField + "'");
-                }
-                row.add(((Number) val).doubleValue());
+                row.add(toDouble(val, structField, sourceField));
             }
             result.add(row);
         }
         return result;
+    }
+
+    private static double toDouble(Object val, String structField, String sourceField) {
+        if (val == null) {
+            throw new ConnectException("Null value for field '" + structField + "' in source array '" + sourceField + "'");
+        }
+        if (val instanceof Number) {
+            return ((Number) val).doubleValue();
+        }
+        if (val instanceof String) {
+            try {
+                return Double.parseDouble((String) val);
+            } catch (NumberFormatException e) {
+                throw new ConnectException("Cannot parse '" + val + "' as double for field '"
+                        + structField + "' in source array '" + sourceField + "'");
+            }
+        }
+        throw new ConnectException("Unsupported type " + val.getClass().getName() + " for field '"
+                + structField + "' in source array '" + sourceField + "'");
     }
 
     @SuppressWarnings("unchecked")
@@ -192,10 +208,7 @@ public abstract class OrderBookToArray<R extends ConnectRecord<R>> implements Tr
                 List<Double> row = new ArrayList<>(entries.size());
                 for (Map<String, Object> entry : entries) {
                     Object val = entry.get(structField);
-                    if (val == null) {
-                        throw new ConnectException("Null value for field '" + structField + "' in source array '" + mapping.sourceField + "'");
-                    }
-                    row.add(((Number) val).doubleValue());
+                    row.add(toDouble(val, structField, mapping.sourceField));
                 }
                 transposed.add(row);
             }
