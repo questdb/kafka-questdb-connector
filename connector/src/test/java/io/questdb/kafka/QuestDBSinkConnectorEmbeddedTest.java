@@ -2828,31 +2828,34 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         // price/amount are numeric (not string-encoded) so OrderBookToArray can cast them to double.
         // Extra fields (side, quote_entry_id, time, type, entry_id) inside bids/asks are ignored
         // by OrderBookToArray — only the mapped fields (price, amount) are extracted.
-        String json = "{"
-                + "\"schema\":\"market_data\","
-                + "\"payload\":{"
-                +   "\"market\":\"BTCUSD\","
-                +   "\"venue\":1,"
-                +   "\"received_at\":\"2026-01-13T22:00:00.014Z\","
-                +   "\"type\":\"SNAPSHOT\","
-                +   "\"bids\":["
-                +     "{\"side\":\"BUY\",\"amount\":2.45,\"price\":45120.50,\"quote_entry_id\":\"uuid-1\",\"time\":\"2026-01-13T22:00:00.014Z\",\"type\":\"NEW\",\"entry_id\":\"45120.50\"},"
-                +     "{\"side\":\"BUY\",\"amount\":5.12,\"price\":45119.00,\"quote_entry_id\":\"uuid-2\",\"time\":\"2026-01-13T22:00:00.014Z\",\"type\":\"NEW\",\"entry_id\":\"45119.00\"}"
-                +   "],"
-                +   "\"asks\":["
-                +     "{\"side\":\"SELL\",\"amount\":1.83,\"price\":45121.00,\"quote_entry_id\":\"uuid-3\",\"time\":\"2026-01-13T22:00:00.014Z\",\"type\":\"NEW\",\"entry_id\":\"45121.00\"},"
-                +     "{\"side\":\"SELL\",\"amount\":3.27,\"price\":45122.50,\"quote_entry_id\":\"uuid-4\",\"time\":\"2026-01-13T22:00:00.014Z\",\"type\":\"NEW\",\"entry_id\":\"45122.50\"}"
-                +   "]"
-                + "}}";
+        String json = """
+                {
+                  "schema": "market_data",
+                  "payload": {
+                    "market": "BTCUSD",
+                    "venue": 1,
+                    "received_at": "2026-01-13T22:00:00.014Z",
+                    "type": "SNAPSHOT",
+                    "bids": [
+                      {"side": "BUY", "amount": 2.45, "price": 45120.50, "quote_entry_id": "uuid-1", "time": "2026-01-13T22:00:00.014Z", "type": "NEW", "entry_id": "45120.50"},
+                      {"side": "BUY", "amount": 5.12, "price": 45119.00, "quote_entry_id": "uuid-2", "time": "2026-01-13T22:00:00.014Z", "type": "NEW", "entry_id": "45119.00"}
+                    ],
+                    "asks": [
+                      {"side": "SELL", "amount": 1.83, "price": 45121.00, "quote_entry_id": "uuid-3", "time": "2026-01-13T22:00:00.014Z", "type": "NEW", "entry_id": "45121.00"},
+                      {"side": "SELL", "amount": 3.27, "price": 45122.50, "quote_entry_id": "uuid-4", "time": "2026-01-13T22:00:00.014Z", "type": "NEW", "entry_id": "45122.50"}
+                    ]
+                  }
+                }""";
         connect.kafka().produce(topicName, json);
 
         // After OrderBookToArray transpose with mappings "bids:bids:price,amount":
         // bids: [[45120.5, 45119.0], [2.45, 5.12]]   (row 0 = prices, row 1 = amounts)
         // asks: [[45121.0, 45122.5], [1.83, 3.27]]
         // The extra top-level "type" field ("SNAPSHOT") becomes an additional string column in QuestDB
-        QuestDBUtils.assertSqlEventually(
-                "\"market\",\"venue\",\"bids\",\"asks\",\"received_at\"\r\n"
-                        + "\"BTCUSD\",1,\"[[45120.5,45119.0],[2.45,5.12]]\",\"[[45121.0,45122.5],[1.83,3.27]]\",\"2026-01-13T22:00:00.014000Z\"\r\n",
+        QuestDBUtils.assertSqlEventually("""
+                        "market","venue","bids","asks","received_at"\r
+                        "BTCUSD",1,"[[45120.5,45119.0],[2.45,5.12]]","[[45121.0,45122.5],[1.83,3.27]]","2026-01-13T22:00:00.014000Z"\r
+                        """,
                 "select market, venue, bids, asks, received_at from " + topicName,
                 httpPort
         );
