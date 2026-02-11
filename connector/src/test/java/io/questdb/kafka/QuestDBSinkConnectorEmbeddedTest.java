@@ -3037,4 +3037,353 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskFailedEventually(connect);
     }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testStructArrayExplodeSMT(boolean useHttp) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+
+        props.put("transforms", "explode");
+        props.put("transforms.explode.type", "io.questdb.kafka.StructArrayExplode$Value");
+        props.put("transforms.explode.mappings",
+                "buy_entries:bid_prices,bid_sizes:px,size;sell_entries:ask_prices,ask_sizes:px,size");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        Schema entrySchema = SchemaBuilder.struct()
+                .field("px", Schema.FLOAT64_SCHEMA)
+                .field("size", Schema.FLOAT64_SCHEMA)
+                .build();
+        Schema entryArraySchema = SchemaBuilder.array(entrySchema).build();
+        Schema schema = SchemaBuilder.struct()
+                .name("com.example.OrderBook")
+                .field("symbol", Schema.STRING_SCHEMA)
+                .field("buy_entries", entryArraySchema)
+                .field("sell_entries", entryArraySchema)
+                .build();
+
+        Struct buy1 = new Struct(entrySchema).put("px", 10.0).put("size", 1123.0);
+        Struct buy2 = new Struct(entrySchema).put("px", 5.1).put("size", 92.0);
+        Struct sell1 = new Struct(entrySchema).put("px", 11.0).put("size", 500.0);
+        Struct sell2 = new Struct(entrySchema).put("px", 12.5).put("size", 300.0);
+
+        Struct struct = new Struct(schema)
+                .put("symbol", "AAPL")
+                .put("buy_entries", Arrays.asList(buy1, buy2))
+                .put("sell_entries", Arrays.asList(sell1, sell2));
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        // After explode: 4 separate 1D columns
+        // bid_prices: [10.0, 5.1], bid_sizes: [1123.0, 92.0]
+        // ask_prices: [11.0, 12.5], ask_sizes: [500.0, 300.0]
+        QuestDBUtils.assertSqlEventually(
+                "\"symbol\",\"bid_prices\",\"bid_sizes\",\"ask_prices\",\"ask_sizes\"\r\n" +
+                "\"AAPL\",\"[10.0,5.1]\",\"[1123.0,92.0]\",\"[11.0,12.5]\",\"[500.0,300.0]\"\r\n",
+                "select symbol, bid_prices, bid_sizes, ask_prices, ask_sizes from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testStructArrayExplodeSMT_schemaless() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+
+        props.put("transforms", "explode");
+        props.put("transforms.explode.type", "io.questdb.kafka.StructArrayExplode$Value");
+        props.put("transforms.explode.mappings",
+                "buy_entries:bid_prices,bid_sizes:px,size;sell_entries:ask_prices,ask_sizes:px,size");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        String json = "{\"symbol\":\"AAPL\","
+                + "\"buy_entries\":[{\"px\":10.0,\"size\":1123.0},{\"px\":5.1,\"size\":92.0}],"
+                + "\"sell_entries\":[{\"px\":11.0,\"size\":500.0},{\"px\":12.5,\"size\":300.0}]}";
+        connect.kafka().produce(topicName, json);
+
+        QuestDBUtils.assertSqlEventually(
+                "\"symbol\",\"bid_prices\",\"bid_sizes\",\"ask_prices\",\"ask_sizes\"\r\n" +
+                "\"AAPL\",\"[10.0,5.1]\",\"[1123.0,92.0]\",\"[11.0,12.5]\",\"[500.0,300.0]\"\r\n",
+                "select symbol, bid_prices, bid_sizes, ask_prices, ask_sizes from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testStructArrayExplodeSMT_intAndFloatCoercion() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        props.put("transforms", "explode");
+        props.put("transforms.explode.type", "io.questdb.kafka.StructArrayExplode$Value");
+        props.put("transforms.explode.mappings", "entries:prices,sizes:price,size");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        Schema entrySchema = SchemaBuilder.struct()
+                .field("price", Schema.FLOAT32_SCHEMA)
+                .field("size", Schema.INT32_SCHEMA)
+                .build();
+        Schema schema = SchemaBuilder.struct()
+                .field("symbol", Schema.STRING_SCHEMA)
+                .field("entries", SchemaBuilder.array(entrySchema).build())
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("symbol", "AAPL")
+                .put("entries", Arrays.asList(
+                        new Struct(entrySchema).put("price", 10.5f).put("size", 100),
+                        new Struct(entrySchema).put("price", 5.1f).put("size", 200)
+                ));
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        QuestDBUtils.assertSqlEventually(
+                "\"symbol\",\"prices\",\"sizes\"\r\n" +
+                "\"AAPL\",\"[10.5,5.099999904632568]\",\"[100.0,200.0]\"\r\n",
+                "select symbol, prices, sizes from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testStructArrayExplodeSMT_missingSourceField() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        props.put("transforms", "explode");
+        props.put("transforms.explode.type", "io.questdb.kafka.StructArrayExplode$Value");
+        props.put("transforms.explode.mappings",
+                "buy_entries:bid_prices,bid_sizes:price,size;sell_entries:ask_prices,ask_sizes:price,size");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Schema only has buy_entries, not sell_entries
+        Schema entrySchema = SchemaBuilder.struct()
+                .field("price", Schema.FLOAT64_SCHEMA)
+                .field("size", Schema.FLOAT64_SCHEMA)
+                .build();
+        Schema schema = SchemaBuilder.struct()
+                .field("symbol", Schema.STRING_SCHEMA)
+                .field("buy_entries", SchemaBuilder.array(entrySchema).build())
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("symbol", "AAPL")
+                .put("buy_entries", Arrays.asList(
+                        new Struct(entrySchema).put("price", 10.0).put("size", 100.0)
+                ));
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        // Only bid columns should appear, ask columns omitted since sell_entries was missing
+        QuestDBUtils.assertSqlEventually(
+                "\"symbol\",\"bid_prices\",\"bid_sizes\"\r\n" +
+                "\"AAPL\",\"[10.0]\",\"[100.0]\"\r\n",
+                "select symbol, bid_prices, bid_sizes from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testStructArrayExplodeSMT_emptySourceArray() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        props.put("transforms", "explode");
+        props.put("transforms.explode.type", "io.questdb.kafka.StructArrayExplode$Value");
+        props.put("transforms.explode.mappings", "buy_entries:bid_prices,bid_sizes:price,size");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        Schema entrySchema = SchemaBuilder.struct()
+                .field("price", Schema.FLOAT64_SCHEMA)
+                .field("size", Schema.FLOAT64_SCHEMA)
+                .build();
+        Schema schema = SchemaBuilder.struct()
+                .field("symbol", Schema.STRING_SCHEMA)
+                .field("buy_entries", SchemaBuilder.array(entrySchema).build())
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("symbol", "AAPL")
+                .put("buy_entries", Collections.emptyList());
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        // Empty source array is skipped — record is ingested without the target columns
+        QuestDBUtils.assertSqlEventually(
+                "\"symbol\"\r\n" +
+                "\"AAPL\"\r\n",
+                "select symbol from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testStructArrayExplodeSMT_nullValueInStruct() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+        props.put("errors.tolerance", "none");
+        props.put("transforms", "explode");
+        props.put("transforms.explode.type", "io.questdb.kafka.StructArrayExplode$Value");
+        props.put("transforms.explode.mappings", "vols:strikes,ivols:strike,ivol");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Send JSON with null value in struct entry
+        String json = "{\"symbol\":\"AAPL\",\"vols\":[{\"strike\":null,\"ivol\":0.25}]}";
+        connect.kafka().produce(topicName, json);
+
+        ConnectTestUtils.assertConnectorTaskFailedEventually(connect);
+    }
+
+    @Test
+    public void testStructArrayExplodeSMT_targetCollidesWithExisting() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        props.put("transforms", "explode");
+        props.put("transforms.explode.type", "io.questdb.kafka.StructArrayExplode$Value");
+        // Target "strikes" collides with an existing field
+        props.put("transforms.explode.mappings", "vols:strikes,ivols:strike,ivol");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        Schema entrySchema = SchemaBuilder.struct()
+                .field("strike", Schema.FLOAT64_SCHEMA)
+                .field("ivol", Schema.FLOAT64_SCHEMA)
+                .build();
+        Schema schema = SchemaBuilder.struct()
+                .field("symbol", Schema.STRING_SCHEMA)
+                .field("strikes", Schema.STRING_SCHEMA) // existing field with same name as target
+                .field("vols", SchemaBuilder.array(entrySchema).build())
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("symbol", "AAPL")
+                .put("strikes", "old_value")
+                .put("vols", Arrays.asList(
+                        new Struct(entrySchema).put("strike", 150.0).put("ivol", 0.25)
+                ));
+
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, struct)));
+
+        // The old "strikes" string field should be replaced by the 1D array
+        QuestDBUtils.assertSqlEventually(
+                "\"symbol\",\"strikes\",\"ivols\"\r\n" +
+                "\"AAPL\",\"[150.0]\",\"[0.25]\"\r\n",
+                "select symbol, strikes, ivols from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testStructArrayExplodeSMT_stringEncodedValues() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+
+        props.put("transforms", "explode");
+        props.put("transforms.explode.type", "io.questdb.kafka.StructArrayExplode$Value");
+        props.put("transforms.explode.mappings", "vols:strikes,ivols:strike,ivol");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // String-encoded numeric values
+        String json = "{\"symbol\":\"AAPL\",\"vols\":["
+                + "{\"strike\":\"150.0\",\"ivol\":\"0.25\"},"
+                + "{\"strike\":\"160.0\",\"ivol\":\"0.22\"}"
+                + "]}";
+        connect.kafka().produce(topicName, json);
+
+        QuestDBUtils.assertSqlEventually(
+                "\"symbol\",\"strikes\",\"ivols\"\r\n" +
+                "\"AAPL\",\"[150.0,160.0]\",\"[0.25,0.22]\"\r\n",
+                "select symbol, strikes, ivols from " + topicName,
+                httpPort
+        );
+    }
+
+    @Test
+    public void testMarketData_structArrayExplode_withTimestamp_schemaless() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "received_at");
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "market");
+
+        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_STRING_FIELDS, "received_at");
+        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_FORMAT, "yyyy-MM-ddTHH:mm:ss.U+Z");
+
+        // Transform pipeline:
+        // 1. ExtractField unwraps the schema/payload envelope
+        // 2. StructArrayExplode explodes bids/asks arrays-of-objects into separate 1D double[] columns
+        props.put("transforms", "extractPayload,explode");
+        props.put("transforms.extractPayload.type", "org.apache.kafka.connect.transforms.ExtractField$Value");
+        props.put("transforms.extractPayload.field", "payload");
+        props.put("transforms.explode.type", "io.questdb.kafka.StructArrayExplode$Value");
+        props.put("transforms.explode.mappings",
+                "bids:bid_prices,bid_amounts:price,amount;asks:ask_prices,ask_amounts:price,amount");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        // Pre-create QuestDB table: market as symbol, venue as int,
+        // bid_prices/bid_amounts/ask_prices/ask_amounts as 1D double arrays,
+        // received_at as designated timestamp partitioned by hour
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
+                "create table " + topicName
+                        + " (market symbol, venue int, bid_prices double[], bid_amounts double[],"
+                        + " ask_prices double[], ask_amounts double[], received_at timestamp)"
+                        + " timestamp(received_at) partition by hour wal",
+                httpPort,
+                QuestDBUtils.Endpoint.EXEC);
+
+        String json = """
+                {
+                  "schema": "market_data",
+                  "payload": {
+                    "market": "BTCUSD",
+                    "venue": 1,
+                    "received_at": "2026-01-13T22:00:00.014Z",
+                    "type": "SNAPSHOT",
+                    "bids": [
+                      {"side": "BUY", "amount": 2.45, "price": 45120.50, "quote_entry_id": "uuid-1"},
+                      {"side": "BUY", "amount": 5.12, "price": 45119.00, "quote_entry_id": "uuid-2"}
+                    ],
+                    "asks": [
+                      {"side": "SELL", "amount": 1.83, "price": 45121.00, "quote_entry_id": "uuid-3"},
+                      {"side": "SELL", "amount": 3.27, "price": 45122.50, "quote_entry_id": "uuid-4"}
+                    ]
+                  }
+                }""";
+        connect.kafka().produce(topicName, json);
+
+        // After StructArrayExplode:
+        // bid_prices: [45120.5, 45119.0], bid_amounts: [2.45, 5.12]
+        // ask_prices: [45121.0, 45122.5], ask_amounts: [1.83, 3.27]
+        QuestDBUtils.assertSqlEventually("""
+                        "market","venue","bid_prices","bid_amounts","ask_prices","ask_amounts","received_at"\r
+                        "BTCUSD",1,"[45120.5,45119.0]","[2.45,5.12]","[45121.0,45122.5]","[1.83,3.27]","2026-01-13T22:00:00.014000Z"\r
+                        """,
+                "select market, venue, bid_prices, bid_amounts, ask_prices, ask_amounts, received_at from " + topicName,
+                httpPort
+        );
+    }
 }
