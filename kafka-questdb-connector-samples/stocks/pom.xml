@@ -3,7 +3,7 @@
 
     <groupId>org.questdb</groupId>
     <modelVersion>4.0.0</modelVersion>
-    <version>0.21-SNAPSHOT</version>
+    <version>0.21</version>
 
     <artifactId>kafka-samples-stocks</artifactId>
 
