@@ -1,11 +1,11 @@
 package io.questdb.kafka;
 
 import io.questdb.client.Sender;
-import io.questdb.cutlass.line.array.DoubleArray;
-import io.questdb.cutlass.line.array.LongArray;
-import io.questdb.std.BoolList;
-import io.questdb.std.LongList;
-import io.questdb.std.bytes.DirectByteSlice;
+import io.questdb.client.cutlass.line.array.DoubleArray;
+import io.questdb.client.cutlass.line.array.LongArray;
+import io.questdb.kafka.compat.BoolList;
+import io.questdb.client.std.LongList;
+import io.questdb.client.std.bytes.DirectByteSlice;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;

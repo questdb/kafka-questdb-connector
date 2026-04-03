@@ -1,7 +1,6 @@
 package io.questdb.kafka;
 
-import io.questdb.std.Files;
-import io.questdb.std.Os;
+import io.questdb.client.std.Os;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.producer.KafkaProducer;
@@ -70,7 +69,14 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @AfterAll
     public static void stopContainer() {
         questDBContainer.stop();
-        Files.rmdir(io.questdb.std.str.Path.getThreadLocal(dbRoot.toAbsolutePath().toString()), true);
+        try {
+            java.nio.file.Files.walk(dbRoot)
+                    .sorted(java.util.Comparator.reverseOrder())
+                    .map(java.nio.file.Path::toFile)
+                    .forEach(java.io.File::delete);
+        } catch (java.io.IOException e) {
+            // best effort cleanup
+        }
     }
 
     private static String questDBDirectory() {

@@ -1,11 +1,11 @@
 package io.questdb.kafka;
 
 import io.questdb.client.impl.ConfStringParser;
-import io.questdb.std.Chars;
-import io.questdb.std.Misc;
-import io.questdb.std.Numbers;
-import io.questdb.std.NumericException;
-import io.questdb.std.str.StringSink;
+import io.questdb.client.std.Chars;
+import io.questdb.client.std.Misc;
+import io.questdb.client.std.Numbers;
+import io.questdb.client.std.NumericException;
+import io.questdb.client.std.str.StringSink;
 import org.apache.kafka.common.config.ConfigException;
 
 import java.util.concurrent.TimeUnit;

@@ -1,7 +1,7 @@
 package io.questdb.kafka;
 
 import io.questdb.client.Sender;
-import io.questdb.std.Os;
+import io.questdb.client.std.Os;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -100,7 +100,14 @@ public class ExactlyOnceIT {
         questdb.stop();
         Stream.of(kafkas).forEach(KafkaContainer::stop);
         Stream.of(connects).forEach(GenericContainer::stop);
-        io.questdb.std.Files.rmdir(io.questdb.std.str.Path.getThreadLocal(persistence.toAbsolutePath().toString()), true);
+        try {
+            java.nio.file.Files.walk(persistence)
+                    .sorted(java.util.Comparator.reverseOrder())
+                    .map(java.nio.file.Path::toFile)
+                    .forEach(java.io.File::delete);
+        } catch (java.io.IOException e) {
+            // best effort cleanup
+        }
     }
 
     private static GenericContainer<?> newQuestDBContainer() {
@@ -127,18 +134,15 @@ public class ExactlyOnceIT {
     }
 
     private static KafkaContainer newKafkaContainer(int id) {
-        try (io.questdb.std.str.Path p = new io.questdb.std.str.Path()){
+        try {
             Path kafkaData = persistence.resolve("kafka").resolve("data" + id);
             Set<PosixFilePermission> rwxrwxrwx = PosixFilePermissions.fromString("rwxrwxrwx");
-
 
             // create world-writable directory
             Files.createDirectories(kafkaData, PosixFilePermissions.asFileAttribute(rwxrwxrwx));
             Files.setPosixFilePermissions(kafkaData, rwxrwxrwx);
             Files.setPosixFilePermissions(kafkaData.getParent(), rwxrwxrwx);
             Files.setPosixFilePermissions(kafkaData.getParent().getParent(), rwxrwxrwx);
-//            p.of(kafkaData.toAbsolutePath().toString());
-//            io.questdb.std.Files.mkdirs(p, 0_777);
             StringBuilder votersBuilder = new StringBuilder();
             for (int i = 0; i < KAFKA_CLUSTER_SIZE; i++) {
                 if (i > 0) {

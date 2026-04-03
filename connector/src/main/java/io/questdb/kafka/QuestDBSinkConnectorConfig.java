@@ -1,6 +1,6 @@
 package io.questdb.kafka;
 
-import io.questdb.cairo.TableUtils;
+import io.questdb.client.cairo.TableUtils;
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigDef.Importance;

@@ -1,6 +1,6 @@
 package io.questdb.kafka;
 
-import io.questdb.std.str.StringSink;
+import io.questdb.client.std.str.StringSink;
 import org.apache.kafka.common.config.ConfigException;
 import org.junit.Assert;
 import org.junit.Test;

@@ -1,0 +1,73 @@
+/*+*****************************************************************************
+ *     ___                  _   ____  ____
+ *    / _ \ _   _  ___  ___| |_|  _ \| __ )
+ *   | | | | | | |/ _ \/ __| __| | | |  _ \
+ *   | |_| | |_| |  __/\__ \ |_| |_| | |_) |
+ *    \__\_\\__,_|\___||___/\__|____/|____/
+ *
+ *  Copyright (c) 2014-2019 Appsicle
+ *  Copyright (c) 2019-2026 QuestDB
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ ******************************************************************************/
+
+package io.questdb.kafka.compat.datetime.microtime;
+
+import io.questdb.kafka.compat.datetime.CommonUtils;
+import io.questdb.kafka.compat.datetime.microtime.Micros;
+import io.questdb.kafka.compat.datetime.AbstractTimeZoneRules;
+
+import java.time.zone.ZoneRules;
+
+public class TimeZoneRulesMicros extends AbstractTimeZoneRules {
+
+    public TimeZoneRulesMicros(ZoneRules rules) {
+        super(rules, Micros.SECOND_MICROS);
+    }
+
+    @Override
+    protected long addDays(long epoch, int days) {
+        return Micros.addDays(epoch, days);
+    }
+
+    @Override
+    protected int getDaysPerMonth(int month, boolean leapYear) {
+        return CommonUtils.getDaysPerMonth(month, leapYear);
+    }
+
+    @Override
+    protected int getYear(long epoch) {
+        return Micros.getYear(epoch);
+    }
+
+    @Override
+    protected boolean isLeapYear(int year) {
+        return CommonUtils.isLeapYear(year);
+    }
+
+    @Override
+    protected long nextOrSameDayOfWeek(long epoch, int dow) {
+        return Micros.nextOrSameDayOfWeek(epoch, dow);
+    }
+
+    @Override
+    protected long previousOrSameDayOfWeek(long epoch, int dow) {
+        return Micros.previousOrSameDayOfWeek(epoch, dow);
+    }
+
+    @Override
+    protected long toEpoch(int year, boolean leapYear, int month, int day, int hour, int min) {
+        return Micros.toMicros(year, leapYear, month, day, hour, min);
+    }
+}

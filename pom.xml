@@ -83,8 +83,8 @@
     <dependencies>
         <dependency>
             <groupId>org.questdb</groupId>
-            <artifactId>questdb</artifactId>
-            <version>9.3.2</version>
+            <artifactId>questdb-client</artifactId>
+            <version>1.0.1</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
