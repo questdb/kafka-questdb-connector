@@ -1,8 +1,8 @@
 package io.questdb.kafka;
 
-import io.questdb.std.CharSequenceObjHashMap;
-import io.questdb.std.datetime.DateFormat;
-import io.questdb.std.datetime.microtime.MicrosFormatCompiler;
+import io.questdb.client.std.CharSequenceObjHashMap;
+import io.questdb.kafka.compat.datetime.DateFormat;
+import io.questdb.kafka.compat.datetime.microtime.MicrosFormatCompiler;
 
 class TimestampParserCompiler {
     private static MicrosFormatCompiler compiler;

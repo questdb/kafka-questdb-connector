@@ -1,6 +1,6 @@
 package io.questdb.kafka;
 
-import io.questdb.std.str.StringSink;
+import io.questdb.client.std.str.StringSink;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.sink.SinkRecord;
 

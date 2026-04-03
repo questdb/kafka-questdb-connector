@@ -1,14 +1,14 @@
 package io.questdb.kafka;
 
 import io.questdb.client.Sender;
-import io.questdb.cutlass.http.client.HttpClientException;
-import io.questdb.cutlass.line.LineSenderException;
-import io.questdb.std.NumericException;
-import io.questdb.std.ObjList;
-import io.questdb.std.datetime.DateFormat;
-import io.questdb.std.datetime.DateLocaleFactory;
-import io.questdb.std.datetime.microtime.Micros;
-import io.questdb.std.str.StringSink;
+import io.questdb.client.cutlass.http.client.HttpClientException;
+import io.questdb.client.cutlass.line.LineSenderException;
+import io.questdb.client.std.NumericException;
+import io.questdb.client.std.ObjList;
+import io.questdb.kafka.compat.datetime.DateFormat;
+import io.questdb.kafka.compat.datetime.DateLocaleFactory;
+import io.questdb.kafka.compat.datetime.microtime.Micros;
+import io.questdb.client.std.str.StringSink;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.types.Password;
