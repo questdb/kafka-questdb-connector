@@ -1,10 +1,11 @@
 package io.questdb.kafka.compat;
 
 import io.questdb.client.std.NumericException;
+import io.questdb.client.std.str.StringSink;
 import io.questdb.kafka.compat.datetime.DateFormat;
 import io.questdb.kafka.compat.datetime.DateLocaleFactory;
-import io.questdb.kafka.compat.datetime.microtime.MicrosFormatCompiler;
 import io.questdb.kafka.compat.datetime.microtime.Micros;
+import io.questdb.kafka.compat.datetime.microtime.MicrosFormatCompiler;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -164,5 +165,19 @@ public class MicrosFormatCompilerTest {
     void testGetColumnType() {
         DateFormat fmt = compiler.compile("yyyy-MM-ddTHH:mm:ss.SSSz");
         assertEquals(io.questdb.client.cairo.ColumnType.TIMESTAMP_MICRO, fmt.getColumnType());
+    }
+
+    @Test
+    void testDanglingQuoteDoesNotHideFollowingPatternOperators() {
+        assertDanglingQuotePattern("yyyy'abc", "1970'AMbc");
+        assertDanglingQuotePattern("yyyy\"abc", "1970\"AMbc");
+        assertDanglingQuotePattern("yyyy`abc", "1970`AMbc");
+    }
+
+    private static void assertDanglingQuotePattern(String pattern, String expected) {
+        DateFormat fmt = compiler.compile(pattern);
+        StringSink sink = new StringSink();
+        fmt.format(0, DateLocaleFactory.EN_LOCALE, "Z", sink);
+        assertEquals(expected, sink.toString());
     }
 }

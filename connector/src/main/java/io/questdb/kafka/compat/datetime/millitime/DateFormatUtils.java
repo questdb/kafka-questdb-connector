@@ -24,9 +24,9 @@
 
 package io.questdb.kafka.compat.datetime.millitime;
 
-import io.questdb.client.std.Chars;
-import io.questdb.client.std.Numbers;
 import io.questdb.client.std.NumericException;
+import io.questdb.kafka.compat.Chars;
+import io.questdb.kafka.compat.Numbers;
 import io.questdb.kafka.compat.datetime.DateLocale;
 import io.questdb.client.std.str.CharSink;
 

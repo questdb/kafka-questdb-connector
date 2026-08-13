@@ -26,10 +26,6 @@ package io.questdb.kafka.compat.datetime.microtime;
 
 
 import io.questdb.client.cairo.ColumnType;
-import io.questdb.client.std.GenericLexer;
-import io.questdb.client.std.IntList;
-import io.questdb.client.std.LongList;
-import io.questdb.client.std.Numbers;
 import io.questdb.client.std.ObjList;
 import io.questdb.client.std.ThreadLocal;
 import io.questdb.kafka.compat.datetime.CommonUtils;
@@ -38,6 +34,9 @@ import io.questdb.client.std.str.CharSink;
 import io.questdb.client.std.str.StringSink;
 import io.questdb.kafka.compat.BytecodeAssembler;
 import io.questdb.kafka.compat.CharSequenceIntHashMap;
+import io.questdb.kafka.compat.IntList;
+import io.questdb.kafka.compat.LongList;
+import io.questdb.kafka.compat.Numbers;
 import io.questdb.kafka.compat.datetime.AbstractDateFormat;
 import io.questdb.kafka.compat.datetime.DateFormat;
 import io.questdb.kafka.compat.datetime.DateLocale;
@@ -151,7 +150,7 @@ public class MicrosFormatCompiler {
     private final ObjList<String> delimiters = new ObjList<>();
     private final int[] fmtAttributeIndex = new int[32];
     private final LongList frameOffsets = new LongList();
-    private final GenericLexer lexer = new GenericLexer(2048);
+    private final PatternLexer lexer = new PatternLexer();
     private final IntList ops = new IntList();
 
     public MicrosFormatCompiler() {

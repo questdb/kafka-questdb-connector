@@ -24,16 +24,15 @@
 
 package io.questdb.kafka.compat.datetime;
 
-import io.questdb.client.std.ConcurrentIntHashMap;
-import io.questdb.client.std.LongList;
 import io.questdb.client.std.Unsafe;
-import io.questdb.client.std.Vect;
+import io.questdb.kafka.compat.LongList;
 
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.zone.ZoneOffsetTransitionRule;
 import java.time.zone.ZoneRules;
-import java.util.function.IntFunction;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 
 public abstract class AbstractTimeZoneRules implements TimeZoneRules {
     private static final int L1_CACHE_YEAR_HI = 2051; // exclusive
@@ -43,7 +42,7 @@ public abstract class AbstractTimeZoneRules implements TimeZoneRules {
     private static final long SAVING_LOCAL_TRANSITIONS_OFFSET = Unsafe.getFieldOffset(ZoneRules.class, "savingsLocalTransitions");
     private static final long STANDARD_OFFSETS_OFFSET = Unsafe.getFieldOffset(ZoneRules.class, "standardOffsets");
     private static final long WALL_OFFSETS_OFFSET = Unsafe.getFieldOffset(ZoneRules.class, "wallOffsets");
-    private final IntFunction<Transition[]> computeTransitionsRef;
+    private final Function<Integer, Transition[]> computeTransitionsRef;
     private final long cutoffTransition;
     private final long firstWall;
     private final LongList historicTransitions = new LongList();
@@ -57,7 +56,7 @@ public abstract class AbstractTimeZoneRules implements TimeZoneRules {
     // year to array of transitions level 1 cache: [L1_CACHE_YEAR_LO, L1_CACHE_YEAR_HI) years only
     private final Transition[][] transitionsL1Cache;
     // year to array of transitions level 2 cache (all other years)
-    private final ConcurrentIntHashMap<Transition[]> transitionsL2Cache;
+    private final ConcurrentHashMap<Integer, Transition[]> transitionsL2Cache;
     private final int[] wallOffsets;
 
     public AbstractTimeZoneRules(ZoneRules rules, long multiplier) {
@@ -134,7 +133,7 @@ public abstract class AbstractTimeZoneRules implements TimeZoneRules {
             transitionsL1Cache = null;
         }
 
-        transitionsL2Cache = ruleCount > 0 ? new ConcurrentIntHashMap<>() : null;
+        transitionsL2Cache = ruleCount > 0 ? new ConcurrentHashMap<>() : null;
     }
 
     @Override
@@ -286,7 +285,7 @@ public abstract class AbstractTimeZoneRules implements TimeZoneRules {
     }
 
     private long dstFromHistory(long utcEpoch) {
-        int index = historicTransitions.binarySearch(utcEpoch, Vect.BIN_SEARCH_SCAN_UP);
+        int index = historicTransitions.binarySearch(utcEpoch);
         if (index == -1) {
             return Long.MAX_VALUE;
         }
@@ -313,7 +312,7 @@ public abstract class AbstractTimeZoneRules implements TimeZoneRules {
     }
 
     private long gapOffsetFromHistory(long localEpoch) {
-        int index = localHistoricTransitions.binarySearch(localEpoch, Vect.BIN_SEARCH_SCAN_UP);
+        int index = localHistoricTransitions.binarySearch(localEpoch);
         if (index == -1) {
             return 0; // no offset switches, no gaps
         }
@@ -368,7 +367,7 @@ public abstract class AbstractTimeZoneRules implements TimeZoneRules {
     }
 
     private long localOffsetFromHistory(long localEpoch) {
-        int index = localHistoricTransitions.binarySearch(localEpoch, Vect.BIN_SEARCH_SCAN_UP);
+        int index = localHistoricTransitions.binarySearch(localEpoch);
         if (index == -1) {
             return firstWall;
         }
@@ -400,7 +399,7 @@ public abstract class AbstractTimeZoneRules implements TimeZoneRules {
     }
 
     private long offsetFromHistory(long utcEpoch) {
-        int index = historicTransitions.binarySearch(utcEpoch, Vect.BIN_SEARCH_SCAN_UP);
+        int index = historicTransitions.binarySearch(utcEpoch);
         if (index == -1) {
             return firstWall;
         }

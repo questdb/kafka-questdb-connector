@@ -24,29 +24,31 @@
 
 package io.questdb.kafka.compat.datetime;
 
-import io.questdb.client.std.CharSequenceHashSet;
-import io.questdb.client.std.GenericLexer;
-import io.questdb.client.std.IntObjHashMap;
 import io.questdb.client.std.Numbers;
 import io.questdb.client.std.NumericException;
-import io.questdb.client.std.ObjList;
 
 import java.text.DateFormatSymbols;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 
 public class DateLocale {
     private final String[] ampmArray;
-    private final IntObjHashMap<ObjList<CharSequence>> amspms = new IntObjHashMap<>();
+    private final Map<Integer, List<Token>> amspms = new HashMap<>();
     private final String[] eraArray;
-    private final IntObjHashMap<ObjList<CharSequence>> eras = new IntObjHashMap<>();
+    private final Map<Integer, List<Token>> eras = new HashMap<>();
     private final TimeZoneRuleFactory factory;
     private final String[] monthArray;
-    private final IntObjHashMap<ObjList<CharSequence>> months = new IntObjHashMap<>();
+    private final Map<Integer, List<Token>> months = new HashMap<>();
     private final String name;
     private final String[] shortMonthArray;
     private final String[] shortWeekdayArray;
     private final String[] weekdayArray;
-    private final IntObjHashMap<ObjList<CharSequence>> weekdays = new IntObjHashMap<>();
-    private final IntObjHashMap<ObjList<CharSequence>> zones = new IntObjHashMap<>();
+    private final Map<Integer, List<Token>> weekdays = new HashMap<>();
+    private final Map<Integer, List<Token>> zones = new HashMap<>();
 
     public DateLocale(String name, DateFormatSymbols symbols, TimeZoneRuleFactory timeZoneRuleFactory) {
         this.name = name;
@@ -60,16 +62,9 @@ public class DateLocale {
         indexZones(symbols.getZoneStrings(), timeZoneRuleFactory);
     }
 
-    @SuppressWarnings("unchecked")
-    public static void sort(IntObjHashMap<ObjList<CharSequence>> map) {
-        Object[] values = map.getValues();
-        for (int i = 0, n = values.length; i < n; i++) {
-            if (values[i] != null) {
-                ObjList<CharSequence> l = (ObjList<CharSequence>) values[i];
-                if (l.size() > 1) {
-                    l.sort(GenericLexer.COMPARATOR);
-                }
-            }
+    private static void sort(Map<Integer, List<Token>> map) {
+        for (List<Token> list : map.values()) {
+            list.sort(Comparator.comparingInt((Token token) -> token.text.length()).reversed());
         }
     }
 
@@ -125,42 +120,36 @@ public class DateLocale {
         return findToken(content, lo, hi, zones);
     }
 
-    private static void defineToken(String token, int pos, IntObjHashMap<ObjList<CharSequence>> map) {
+    private static void defineToken(String token, int pos, Map<Integer, List<Token>> map) {
         if (token == null || token.isEmpty()) {
             return;
         }
 
         char c0 = Character.toUpperCase(token.charAt(0));
-        int index = map.keyIndex(c0);
-        ObjList<CharSequence> l;
-        if (index > -1) {
-            l = new ObjList<>();
-            map.putAt(index, c0, l);
-        } else {
-            l = map.valueAtQuick(index);
-        }
-        l.add(((char) pos) + token.toUpperCase());
+        List<Token> list = map.computeIfAbsent((int) c0, ignored -> new ArrayList<>());
+        list.add(new Token(pos, token));
     }
 
-    private static long findToken(CharSequence content, int lo, int hi, IntObjHashMap<ObjList<CharSequence>> map) throws NumericException {
+    private static long findToken(CharSequence content, int lo, int hi, Map<Integer, List<Token>> map) throws NumericException {
         if (lo >= hi) {
             throw NumericException.instance();
         }
 
         char c = Character.toUpperCase(content.charAt(lo));
 
-        ObjList<CharSequence> l = map.get(c);
-        if (l == null) {
+        List<Token> list = map.get((int) c);
+        if (list == null) {
             throw NumericException.instance();
         }
 
-        for (int i = 0, sz = l.size(); i < sz; i++) {
-            CharSequence txt = l.get(i);
-            int n = txt.length() - 1;
+        for (int i = 0, sz = list.size(); i < sz; i++) {
+            Token token = list.get(i);
+            String text = token.text;
+            int n = text.length();
             boolean match = n <= hi - lo;
             if (match) {
                 for (int k = 1; k < n; k++) {
-                    if (Character.toUpperCase(content.charAt(lo + k)) != txt.charAt(k + 1)) {
+                    if (Character.toUpperCase(content.charAt(lo + k)) != Character.toUpperCase(text.charAt(k))) {
                         match = false;
                         break;
                     }
@@ -168,14 +157,14 @@ public class DateLocale {
             }
 
             if (match) {
-                return Numbers.encodeLowHighInts(txt.charAt(0), n);
+                return Numbers.encodeLowHighInts(token.value, n);
             }
         }
 
         throw NumericException.instance();
     }
 
-    private static void index(String[] tokens, IntObjHashMap<ObjList<CharSequence>> map) {
+    private static void index(String[] tokens, Map<Integer, List<Token>> map) {
         for (int i = 0, n = tokens.length; i < n; i++) {
             defineToken(tokens[i], i, map);
         }
@@ -183,7 +172,7 @@ public class DateLocale {
     }
 
     private void indexZones(String[][] zones, TimeZoneRuleFactory timeZoneRuleFactory) {
-        CharSequenceHashSet cache = new CharSequenceHashSet();
+        HashSet<String> cache = new HashSet<>();
         // this is a workaround a problem where UTC timezone comes nearly last
         // in this array, which gives way to Antarctica/Troll take its place
 
@@ -214,5 +203,15 @@ public class DateLocale {
             }
         }
         sort(this.zones);
+    }
+
+    private static final class Token {
+        private final String text;
+        private final int value;
+
+        private Token(int value, String text) {
+            this.value = value;
+            this.text = text;
+        }
     }
 }

@@ -187,7 +187,7 @@ public class BoolList implements Mutable {
             if (i > 0) {
                 b.put(',');
             }
-            b.put(get(i));
+            b.put(get(i) ? "true" : "false");
         }
         b.put(']');
         return b.toString();

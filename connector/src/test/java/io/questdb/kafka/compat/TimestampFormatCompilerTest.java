@@ -24,7 +24,6 @@
 
 package io.questdb.kafka.compat;
 
-import io.questdb.client.std.CharSequenceHashSet;
 import io.questdb.client.std.IntHashSet;
 import io.questdb.client.std.NumericException;
 import io.questdb.kafka.compat.datetime.CommonUtils;
@@ -34,7 +33,6 @@ import io.questdb.kafka.compat.datetime.DateLocaleFactory;
 import io.questdb.kafka.compat.datetime.microtime.Micros;
 import io.questdb.kafka.compat.datetime.microtime.MicrosFormatCompiler;
 import io.questdb.kafka.compat.datetime.microtime.MicrosFormatUtils;
-import io.questdb.client.std.ex.BytecodeException;
 import io.questdb.client.std.str.StringSink;
 import static org.junit.jupiter.api.Assertions.*;
 import org.junit.jupiter.api.Test;
@@ -42,6 +40,7 @@ import org.junit.jupiter.api.Test;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
@@ -780,7 +779,7 @@ public class TimestampFormatCompilerTest {
 
     @Test
     public void testLongPattern() {
-        assertThrows(BytecodeException.class, () -> {
+        assertThrows(IllegalStateException.class, () -> {
             StringBuilder b = new StringBuilder();
             for (int i = 0; i < 1000; i++) {
                 b.append("KK").append(' ').append('Z').append(',');
@@ -912,7 +911,7 @@ public class TimestampFormatCompilerTest {
         assertTrue(MicrosFormatCompiler.getOpCount() > 0);
 
         IntHashSet codeSet = new IntHashSet();
-        CharSequenceHashSet nameSet = new CharSequenceHashSet();
+        HashSet<String> nameSet = new HashSet<>();
         for (int i = 0, n = MicrosFormatCompiler.getOpCount(); i < n; i++) {
             String name = MicrosFormatCompiler.getOpName(i);
             int code = MicrosFormatCompiler.getOpCode(name);
