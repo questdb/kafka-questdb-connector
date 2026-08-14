@@ -20,7 +20,7 @@ import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.FixedHostPortGenericContainer;
 import org.testcontainers.containers.GenericContainer;
@@ -144,7 +144,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testSmoke(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -170,7 +170,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testTableTemplateWithKey_withSchema(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -208,7 +208,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testTableTemplateWithKeyAndPartition_withSchema(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 3);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -283,7 +283,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testRegexRouter(ConnectTestUtils.Transport transport) {
         // 1. Define source topics and expected target tables
         String ordersAddTopic = "orders.add";
@@ -362,7 +362,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testTableTemplateWithKey_schemaless(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -386,7 +386,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testTableTemplateWithKeyAndPartition_schemaless(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 3);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -410,7 +410,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testDeadLetterQueue_wrongJson(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -674,7 +674,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testSymbol(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -760,7 +760,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testRetrying_recoversFromInfrastructureIssues(ConnectTestUtils.Transport transport) throws Exception {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -800,7 +800,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testJsonNestedLongTimestampInSeconds(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -827,7 +827,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testEmptyCollection_wontFailTheConnector(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -859,7 +859,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testSymbol_withAllOtherILPTypes(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -912,7 +912,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testUpfrontTable_withSymbols(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1031,7 +1031,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testTimestampUnitResolution_auto(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1066,16 +1066,12 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @ParameterizedTest
     @CsvSource({
             "seconds, HTTP",
-            "seconds, TCP",
             "seconds, QWP",
             "millis, HTTP",
-            "millis, TCP",
             "millis, QWP",
             "micros, HTTP",
-            "micros, TCP",
             "micros, QWP",
             "nanos, HTTP",
-            "nanos, TCP",
             "nanos, QWP",
     })
     public void testTimestampUnitResolution0(String mode, ConnectTestUtils.Transport transport) {
@@ -1125,7 +1121,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testKafkaNativeTimestampsAndExplicitDesignatedFieldTimestampMutuallyExclusive(ConnectTestUtils.Transport transport) {
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
@@ -1140,7 +1136,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testKafkaNativeTimestamp(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1176,7 +1172,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testTimestampSMT_parseTimestamp_schemaLess(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1221,7 +1217,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testTimestampSMT_parseTimestamp_withSchema(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1265,7 +1261,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testUpfrontTable(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1378,7 +1374,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testDesignatedTimestamp_noSchema_unixEpochMillis(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1396,7 +1392,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testDesignatedTimestamp_noSchema_dateTransform_fromStringToTimestamp(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1419,7 +1415,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testDesignatedTimestamp_withSchema(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1453,7 +1449,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testDoNotIncludeKey(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1570,7 +1566,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testJsonNoSchema(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1586,7 +1582,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testJsonNoSchema_mixedFlotingAndIntTypes(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1606,7 +1602,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testJsonNoSchema_intArraySendAsDoubleArray(ConnectTestUtils.Transport transport) {
         // In schema-less mode, we have to be lenient with array element types.
         // Since floating point numbers without any actual decimal point are
@@ -1632,7 +1628,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testPrimitiveKey(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1658,7 +1654,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testParsingStringTimestamp_designatedTimestampNotListedExplicitly(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1690,7 +1686,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testParsingStringTimestamp(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1725,7 +1721,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testParsingStringTimestamp_defaultPattern(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1759,7 +1755,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testCustomPrefixWithPrimitiveKeyAndValues(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1780,7 +1776,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testSkipUnsupportedType_Bytes(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1807,7 +1803,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testDefaultPrefixWithPrimitiveKeyAndValues(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1826,7 +1822,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testStructKey(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1853,7 +1849,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testStructKeyWithNoPrefix(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1882,7 +1878,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testStructKeyAndPrimitiveValue(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1911,7 +1907,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testExplicitTableName(ConnectTestUtils.Transport transport) {
         String tableName = ConnectTestUtils.newTableName();
         connect.kafka().createTopic(topicName, 1);
@@ -1939,7 +1935,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testLogicalTypes(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1990,7 +1986,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testDecimalTypeNotSupported(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -2016,7 +2012,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testNestedStructInValue(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -2049,7 +2045,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testMultiLevelNestedStructInValue(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -2093,7 +2089,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testFloat32ArraySupport(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -2124,7 +2120,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testFloat64ArraySupport(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -2244,7 +2240,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testNestedStructWithArray(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -2314,7 +2310,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void test2DDoubleArraySupport(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -2350,7 +2346,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testOrderBookToArraySMT(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -2432,7 +2428,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void test3DDoubleArraySupport(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -2509,7 +2505,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void test2DFloatArraySupport(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -2561,7 +2557,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void test2DArrayWithSymbolColumns(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -2598,7 +2594,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void test3DArrayWithSymbolColumns(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -2942,7 +2938,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testComposedTimestamp_schemaless(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -2974,7 +2970,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testComposedTimestamp_withSchema(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -3059,7 +3055,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @EnumSource(ConnectTestUtils.Transport.class)
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testStructArrayExplodeSMT(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
