@@ -35,10 +35,21 @@ import java.util.concurrent.TimeUnit;
 
 class QwpSinkTask extends SinkTask {
     private static final long UNFLUSHED = Long.MIN_VALUE;
+    private static final int COMPACTION_THRESHOLD = 1024;
     private static final Logger log = LoggerFactory.getLogger(QwpSinkTask.class);
 
     private final List<FlushEntry> flushEntries = new ArrayList<>();
     private final List<PendingRecord> retained = new ArrayList<>();
+    // Records complete in FSN order, which is the order they were appended, so
+    // completion consumes a prefix: `head` walks forward and the prefix is
+    // dropped in bulk. Rescanning the whole window on every put() made the cost
+    // per record proportional to retained/batch, which dominated the task's CPU.
+    private int head;
+    // Records whose completion is a DLQ delivery rather than an ack; those can
+    // land out of order, so they are tracked separately. Normally empty.
+    private final List<PendingRecord> dlqPending = new ArrayList<>();
+    private final List<PendingRecord> publishBuffer = new ArrayList<>();
+    private final Map<String, Map<Integer, TopicPartition>> partitionCache = new HashMap<>();
     private final Set<TopicPartition> assignment = new HashSet<>();
     private final FlushConfig flushConfig = new FlushConfig();
 
@@ -114,7 +125,7 @@ class QwpSinkTask extends SinkTask {
             int retainedStart = retained.size();
             for (SinkRecord record : records) {
                 if (record.value() != null) {
-                    retained.add(new PendingRecord(record));
+                    retained.add(new PendingRecord(record, partitionFor(record)));
                 }
             }
             batchAdmitted = true;
@@ -137,8 +148,7 @@ class QwpSinkTask extends SinkTask {
                     if (reporter == null) {
                         throw e;
                     }
-                    pending.rowRequired = false;
-                    pending.dlqFuture = reporter.report(record, e);
+                    reportToDlq(pending, e);
                 }
             }
             flushIfDue();
@@ -190,9 +200,18 @@ class QwpSinkTask extends SinkTask {
             return Collections.emptyMap();
         }
 
+        // Offsets grow within a partition, so the first incomplete record seen
+        // walking from `head` is that partition's earliest incomplete offset.
         Map<TopicPartition, Long> earliestIncomplete = new HashMap<>();
-        for (PendingRecord pending : retained) {
-            earliestIncomplete.merge(pending.partition, pending.offset, Math::min);
+        for (int i = head, n = retained.size(); i < n; i++) {
+            PendingRecord pending = retained.get(i);
+            if (pending.complete) {
+                continue;
+            }
+            earliestIncomplete.putIfAbsent(pending.partition, pending.offset);
+            if (!assignment.isEmpty() && earliestIncomplete.size() == assignment.size()) {
+                break;
+            }
         }
 
         Map<TopicPartition, OffsetAndMetadata> clamped = new LinkedHashMap<>(currentOffsets.size());
@@ -224,7 +243,8 @@ class QwpSinkTask extends SinkTask {
         }
         Set<TopicPartition> revoked = new HashSet<>(partitions);
         assignment.removeAll(revoked);
-        retained.removeIf(pending -> revoked.contains(pending.partition));
+        retained.subList(head, retained.size()).removeIf(pending -> revoked.contains(pending.partition));
+        dlqPending.removeIf(pending -> revoked.contains(pending.partition));
         for (FlushEntry flushEntry : flushEntries) {
             flushEntry.records.removeIf(pending -> revoked.contains(pending.partition));
         }
@@ -278,8 +298,10 @@ class QwpSinkTask extends SinkTask {
         if (pendingRows == 0) {
             return;
         }
-        List<PendingRecord> records = new ArrayList<>(pendingRows);
-        for (PendingRecord pending : retained) {
+        List<PendingRecord> records = publishBuffer;
+        records.clear();
+        for (int i = head, n = retained.size(); i < n; i++) {
+            PendingRecord pending = retained.get(i);
             if (pending.rowRequired && pending.rowWritten && pending.dependencyFsn == UNFLUSHED) {
                 records.add(pending);
             }
@@ -310,7 +332,7 @@ class QwpSinkTask extends SinkTask {
         for (PendingRecord pending : records) {
             pending.dependencyFsn = fsn;
         }
-        flushEntries.add(new FlushEntry(fromFsn, fsn, records));
+        flushEntries.add(new FlushEntry(fromFsn, fsn, new ArrayList<>(records)));
         lastPublishedFsn = fsn;
         pendingRows = 0;
         nextFlushNanos = nanoTime() + flushConfig.autoFlushNanos;
@@ -328,27 +350,36 @@ class QwpSinkTask extends SinkTask {
             lastProgressNanos = nanoTime();
         }
 
-        int write = 0;
         boolean completedRecord = false;
-        for (int read = 0, n = retained.size(); read < n; read++) {
-            PendingRecord pending = retained.get(read);
-            boolean complete = pending.dependencyFsn >= 0L && pending.dependencyFsn <= acked;
-            if (!complete && pending.dlqFuture != null && pending.dlqFuture.isDone()) {
+        for (int i = 0; i < dlqPending.size(); i++) {
+            PendingRecord pending = dlqPending.get(i);
+            if (pending.dlqFuture.isDone()) {
                 completeDlqFuture(pending.dlqFuture);
-                complete = true;
-            }
-            if (!complete) {
-                retained.set(write++, pending);
-            } else {
+                pending.complete = true;
                 completedRecord = true;
+                dlqPending.remove(i--);
             }
         }
-        retained.subList(write, retained.size()).clear();
+        while (head < retained.size()) {
+            PendingRecord pending = retained.get(head);
+            if (!pending.complete) {
+                if (pending.dependencyFsn < 0L || pending.dependencyFsn > acked) {
+                    break;
+                }
+                pending.complete = true;
+                completedRecord = true;
+            }
+            head++;
+        }
+        if (head == retained.size() || head >= COMPACTION_THRESHOLD) {
+            retained.subList(0, head).clear();
+            head = 0;
+        }
         flushEntries.removeIf(entry -> entry.toFsn <= acked || entry.records.isEmpty());
         if (completedRecord) {
             context.requestCommit();
         }
-        if (recovery == null && partitionsPaused && retained.size() < config.getQwpMaxInflightRows()) {
+        if (recovery == null && partitionsPaused && pendingCount() < config.getQwpMaxInflightRows()) {
             resumeAssignedPartitions();
         }
     }
@@ -375,7 +406,8 @@ class QwpSinkTask extends SinkTask {
     }
 
     private boolean hasServerPending() {
-        for (PendingRecord pending : retained) {
+        for (int i = head, n = retained.size(); i < n; i++) {
+            PendingRecord pending = retained.get(i);
             if (pending.rowRequired) {
                 return true;
             }
@@ -384,7 +416,7 @@ class QwpSinkTask extends SinkTask {
     }
 
     private void applyBackpressure() {
-        if (!partitionsPaused && retained.size() > config.getQwpMaxInflightRows() && !assignment.isEmpty()) {
+        if (!partitionsPaused && pendingCount() > config.getQwpMaxInflightRows() && !assignment.isEmpty()) {
             context.pause(assignment.toArray(new TopicPartition[0]));
             context.timeout(Math.min(config.getAllowedLag(), config.getQwpProgressTimeoutMs()));
             partitionsPaused = true;
@@ -398,9 +430,33 @@ class QwpSinkTask extends SinkTask {
         partitionsPaused = false;
     }
 
+    private int pendingCount() {
+        return retained.size() - head;
+    }
+
+    /** Interned so a record does not allocate a TopicPartition per row. */
+    private TopicPartition partitionFor(SinkRecord record) {
+        String topic = record.originalTopic();
+        Integer partition = record.originalKafkaPartition();
+        if (topic == null || partition == null) {
+            throw new ConnectException("Kafka Connect did not provide original coordinates for a QWP record");
+        }
+        return partitionCache.computeIfAbsent(topic, t -> new HashMap<>())
+                .computeIfAbsent(partition, p -> new TopicPartition(topic, p));
+    }
+
+    private void reportToDlq(PendingRecord pending, Throwable error) {
+        pending.rowRequired = false;
+        pending.rowWritten = false;
+        pending.dependencyFsn = UNFLUSHED;
+        pending.dlqFuture = reporter.report(pending.record, error);
+        dlqPending.add(pending);
+    }
+
     private int countUnflushedRows() {
         int count = 0;
-        for (PendingRecord pending : retained) {
+        for (int i = head, n = retained.size(); i < n; i++) {
+            PendingRecord pending = retained.get(i);
             if (pending.rowRequired && pending.rowWritten && pending.dependencyFsn == UNFLUSHED) {
                 count++;
             }
@@ -422,12 +478,10 @@ class QwpSinkTask extends SinkTask {
         }
 
         if (config.isDlqSendBatchOnError()) {
-            for (PendingRecord pending : retained) {
+            for (int i = head, n = retained.size(); i < n; i++) {
+                PendingRecord pending = retained.get(i);
                 if (pending.rowRequired) {
-                    pending.rowRequired = false;
-                    pending.rowWritten = false;
-                    pending.dependencyFsn = UNFLUSHED;
-                    pending.dlqFuture = reporter.report(pending.record, exception);
+                    reportToDlq(pending, exception);
                 }
             }
             resetSenderForRecovery();
@@ -465,7 +519,8 @@ class QwpSinkTask extends SinkTask {
             }
         }
         List<PendingRecord> tail = new ArrayList<>();
-        for (PendingRecord pending : retained) {
+        for (int i = head, n = retained.size(); i < n; i++) {
+            PendingRecord pending = retained.get(i);
             if (pending.rowRequired && !scheduled.contains(pending)) {
                 tail.add(pending);
             }
@@ -523,10 +578,7 @@ class QwpSinkTask extends SinkTask {
                 }
                 if (step.isolated && step.records.size() == 1) {
                     PendingRecord rejected = step.records.get(0);
-                    rejected.rowRequired = false;
-                    rejected.rowWritten = false;
-                    rejected.dependencyFsn = UNFLUSHED;
-                    rejected.dlqFuture = reporter.report(rejected.record, e);
+                    reportToDlq(rejected, e);
                     recovery.index++;
                     lastProgressNanos = nanoTime();
                     resetSenderForRecovery();
@@ -541,9 +593,7 @@ class QwpSinkTask extends SinkTask {
                     continue;
                 }
                 PendingRecord rejected = step.records.get(0);
-                rejected.rowRequired = false;
-                rejected.rowWritten = false;
-                rejected.dlqFuture = reporter.report(rejected.record, e);
+                reportToDlq(rejected, e);
                 recovery.index++;
                 lastProgressNanos = nanoTime();
             } catch (LineSenderException | HttpClientException e) {
@@ -588,7 +638,8 @@ class QwpSinkTask extends SinkTask {
         pendingRows = 0;
         lastAckedFsn = -1L;
         lastPublishedFsn = -1L;
-        for (PendingRecord pending : retained) {
+        for (int i = head, n = retained.size(); i < n; i++) {
+            PendingRecord pending = retained.get(i);
             if (pending.rowRequired) {
                 pending.dependencyFsn = UNFLUSHED;
                 pending.rowWritten = false;
@@ -607,7 +658,7 @@ class QwpSinkTask extends SinkTask {
     }
 
     private void resumeAfterRecovery() {
-        if (partitionsPaused && retained.size() < config.getQwpMaxInflightRows()) {
+        if (partitionsPaused && pendingCount() < config.getQwpMaxInflightRows()) {
             resumeAssignedPartitions();
         }
     }
@@ -709,15 +760,11 @@ class QwpSinkTask extends SinkTask {
         private Future<Void> dlqFuture;
         private boolean rowRequired = true;
         private boolean rowWritten;
+        private boolean complete;
 
-        private PendingRecord(SinkRecord record) {
+        private PendingRecord(SinkRecord record, TopicPartition partition) {
             this.record = record;
-            String originalTopic = record.originalTopic();
-            Integer originalPartition = record.originalKafkaPartition();
-            if (originalTopic == null || originalPartition == null) {
-                throw new ConnectException("Kafka Connect did not provide original coordinates for a QWP record");
-            }
-            this.partition = new TopicPartition(originalTopic, originalPartition);
+            this.partition = partition;
             this.offset = record.originalKafkaOffset();
         }
     }
