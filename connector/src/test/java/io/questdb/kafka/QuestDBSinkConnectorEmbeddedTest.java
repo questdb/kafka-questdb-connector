@@ -129,6 +129,12 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         // The third-party test SMT (PayloadBasisRouter) ships no ServiceLoader
         // manifest, so the strict service_load discovery cannot be used here.
         props.put("plugin.discovery", "hybrid_warn");
+        // On close, every consumer's final close-fetch-session request sits in
+        // the broker's delayed-fetch purgatory for up to fetch.max.wait.ms
+        // (default 500ms). The task consumer and the herder's member close
+        // sequentially, so the default costs ~800ms of every cluster stop.
+        props.put("consumer.fetch.max.wait.ms", "50");
+        props.put("fetch.max.wait.ms", "50");
         connect = new EmbeddedConnectCluster.Builder()
                 .name("questdb-connect-cluster")
                 .workerProps(props)
