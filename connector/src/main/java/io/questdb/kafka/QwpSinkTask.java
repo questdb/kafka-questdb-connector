@@ -76,7 +76,7 @@ class QwpSinkTask extends SinkTask {
         validatePollInterval(props, flushConfig.sfAppendDeadlineMillis);
         dlqEligibleCategories = parseDlqEligibleCategories(config.getQwpDlqTerminalCategories());
         sender = createSender();
-        recordHandler = new RecordToRowHandler(config, sender, true, false);
+        recordHandler = new RecordToRowHandler(config, sender, true, false, true);
         nextFlushNanos = nanoTime() + flushConfig.autoFlushNanos;
         lastProgressNanos = nanoTime();
         try {
@@ -251,9 +251,10 @@ class QwpSinkTask extends SinkTask {
     }
 
     private Sender createSender() {
-        Sender rawSender = buildSender(patchedConfString);
-        String symbolColumns = config.getSymbolColumns();
-        return symbolColumns == null ? rawSender : new SymbolRoutingSender(rawSender, symbolColumns);
+        // No BufferingSender here: that class buffers a whole row purely to satisfy
+        // ILP's "symbols before other columns" rule, which QWP does not have.
+        // RecordToRowHandler writes symbol columns straight to the sender instead.
+        return buildSender(patchedConfString);
     }
 
     private void flushIfDue() {

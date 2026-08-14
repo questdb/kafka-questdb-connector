@@ -30,6 +30,10 @@ final class RecordToRowHandler {
     private final String timestampColumnName;
     private final TimeUnit timestampUnits;
     private final Set<CharSequence> doubleColumns;
+    // Non-empty only on QWP: ILP needs symbols written before any other column, so the
+    // legacy transports route them through BufferingSender instead. QWP accepts symbols
+    // interleaved with fields, so they can go straight to the wire from here.
+    private final Set<String> symbolColumns;
     private final Set<String> stringTimestampColumns;
     private final DateFormat dataFormat;
     private final boolean kafkaTimestampsEnabled;
@@ -40,10 +44,25 @@ final class RecordToRowHandler {
     private Sender sender;
 
     RecordToRowHandler(QuestDBSinkConnectorConfig config, Sender sender, boolean cancelPartialRow, boolean wrapSenderErrors) {
+        this(config, sender, cancelPartialRow, wrapSenderErrors, false);
+    }
+
+    RecordToRowHandler(QuestDBSinkConnectorConfig config, Sender sender, boolean cancelPartialRow, boolean wrapSenderErrors,
+                       boolean routeSymbolsDirectly) {
         this.config = config;
         this.sender = sender;
         this.cancelPartialRow = cancelPartialRow;
         this.wrapSenderErrors = wrapSenderErrors;
+
+        String symbolColumnsConfig = routeSymbolsDirectly ? config.getSymbolColumns() : null;
+        if (symbolColumnsConfig == null) {
+            symbolColumns = Collections.emptySet();
+        } else {
+            symbolColumns = new HashSet<>();
+            for (String column : symbolColumnsConfig.split(",")) {
+                symbolColumns.add(column.trim());
+            }
+        }
 
         String timestampStringFields = config.getTimestampStringFields();
         if (timestampStringFields != null) {
@@ -235,6 +254,13 @@ final class RecordToRowHandler {
         }
         if (value == null) {
             return;
+        }
+        if (!symbolColumns.isEmpty()) {
+            String symbolName = sanitizeName(name.isEmpty() ? fallbackName : name);
+            if (symbolColumns.contains(symbolName)) {
+                sender.symbol(symbolName, value instanceof CharSequence ? (CharSequence) value : String.valueOf(value));
+                return;
+            }
         }
         if (tryWriteLogicalType(name.isEmpty() ? fallbackName : name, schema, value)) {
             return;
