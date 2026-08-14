@@ -126,6 +126,9 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         Map<String, String> props = new HashMap<>();
         props.put("connector.client.config.override.policy", "All");
+        // The third-party test SMT (PayloadBasisRouter) ships no ServiceLoader
+        // manifest, so the strict service_load discovery cannot be used here.
+        props.put("plugin.discovery", "hybrid_warn");
         connect = new EmbeddedConnectCluster.Builder()
                 .name("questdb-connect-cluster")
                 .workerProps(props)
