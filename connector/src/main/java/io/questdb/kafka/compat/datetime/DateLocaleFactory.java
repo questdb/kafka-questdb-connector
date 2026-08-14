@@ -24,20 +24,19 @@
 
 package io.questdb.kafka.compat.datetime;
 
-import io.questdb.client.std.ConcurrentHashMap;
-
 import java.text.DateFormatSymbols;
 import java.util.Locale;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiFunction;
 
 public class DateLocaleFactory {
 
     public static final DateLocaleFactory INSTANCE = new DateLocaleFactory(TimeZoneRuleFactory.INSTANCE);
     public static final DateLocale EN_LOCALE = INSTANCE.getLocale("en");
-    private final ConcurrentHashMap<DateLocale> dateLocales = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, DateLocale> dateLocales = new ConcurrentHashMap<>();
     private final DateLocale dummyLocale = new DateLocale("en-quest", new DateFormatSymbols(), TimeZoneRuleFactory.INSTANCE);
     private final TimeZoneRuleFactory timeZoneRuleFactory;
-    private final BiFunction<CharSequence, DateLocale, DateLocale> computeDateLocaleBiFunc = this::computeDateLocale;
+    private final BiFunction<String, DateLocale, DateLocale> computeDateLocaleBiFunc = this::computeDateLocale;
 
     public DateLocaleFactory(TimeZoneRuleFactory timeZoneRuleFactory) {
         this.timeZoneRuleFactory = timeZoneRuleFactory;
@@ -55,23 +54,23 @@ public class DateLocaleFactory {
     }
 
     public DateLocale getLocale(CharSequence id) {
-        DateLocale dateLocale = dateLocales.get(id);
+        String key = id.toString();
+        DateLocale dateLocale = dateLocales.get(key);
         if (dateLocale == null) {
             return null;
         }
         if (dateLocale != dummyLocale) {
             return dateLocale;
         }
-        return dateLocales.compute(id, computeDateLocaleBiFunc);
+        return dateLocales.compute(key, computeDateLocaleBiFunc);
     }
 
-    private DateLocale computeDateLocale(CharSequence key, DateLocale val) {
+    private DateLocale computeDateLocale(String key, DateLocale val) {
         if (val != dummyLocale) {
             // Someone was faster than us.
             return val;
         }
-        String keyStr = key.toString();
-        Locale locale = Locale.forLanguageTag(keyStr);
-        return new DateLocale(keyStr, new DateFormatSymbols(locale), timeZoneRuleFactory);
+        Locale locale = Locale.forLanguageTag(key);
+        return new DateLocale(key, new DateFormatSymbols(locale), timeZoneRuleFactory);
     }
 }

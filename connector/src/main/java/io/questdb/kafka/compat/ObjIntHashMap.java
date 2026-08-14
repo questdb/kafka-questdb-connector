@@ -25,7 +25,6 @@
 package io.questdb.kafka.compat;
 
 import io.questdb.client.std.Hash;
-import io.questdb.client.std.ImmutableIterator;
 import io.questdb.client.std.Mutable;
 import io.questdb.client.std.Numbers;
 
@@ -189,7 +188,7 @@ public class ObjIntHashMap<K> implements Iterable<ObjIntHashMap.Entry<K>>, Mutab
         public int value;
     }
 
-    public class EntryIterator implements ImmutableIterator<Entry<K>> {
+    public class EntryIterator implements Iterator<Entry<K>> {
 
         private final Entry<K> entry = new Entry<>();
         private int index = 0;

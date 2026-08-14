@@ -25,10 +25,10 @@
 package io.questdb.kafka.compat.datetime.microtime;
 
 import io.questdb.client.cairo.ColumnType;
-import io.questdb.client.std.IntList;
-import io.questdb.client.std.Numbers;
 import io.questdb.client.std.NumericException;
 import io.questdb.client.std.ObjList;
+import io.questdb.kafka.compat.IntList;
+import io.questdb.kafka.compat.Numbers;
 import io.questdb.kafka.compat.datetime.AbstractDateFormat;
 import io.questdb.kafka.compat.datetime.CommonUtils;
 import io.questdb.kafka.compat.datetime.DateLocale;
