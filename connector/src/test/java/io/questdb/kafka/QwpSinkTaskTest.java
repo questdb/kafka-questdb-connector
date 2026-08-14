@@ -37,6 +37,7 @@ class QwpSinkTaskTest {
     @Test
     void clampsCommitsToOriginalCoordinatesUntilAcked() {
         FakeSender fakeSender = new FakeSender();
+        fakeSender.drainSucceeds = false; // acks arrive only when the test says so
         TestTask task = startTask(fakeSender, 2);
 
         task.put(java.util.List.of(record(0L, 10L), record(1L, 11L)));
@@ -57,6 +58,7 @@ class QwpSinkTaskTest {
     @Test
     void tombstonesAndUndeliveredOffsetsDoNotCreateLedgerHoles() {
         FakeSender fakeSender = new FakeSender();
+        fakeSender.drainSucceeds = false; // acks arrive only when the test says so
         TestTask task = startTask(fakeSender, 1);
 
         task.put(Collections.singletonList(tombstone(0L)));

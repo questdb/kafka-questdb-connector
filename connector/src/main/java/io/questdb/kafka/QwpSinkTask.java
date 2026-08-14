@@ -171,8 +171,11 @@ class QwpSinkTask extends SinkTask {
                 // acks a short bounded window so a clean rebalance commits instead of
                 // redelivering the whole window. A timeout just withholds offsets.
                 publishPendingRows();
-                if (lastPublishedFsn > lastAckedFsn) {
-                    sender.awaitAckedFsn(lastPublishedFsn, config.getQwpCommitAckTimeoutMs());
+                if (hasServerPending()) {
+                    // drain uses watermark semantics: flush, then wait (bounded)
+                    // until everything published so far - including frames the
+                    // client auto-flushed on its own - is acked.
+                    sender.drain(config.getQwpCommitAckTimeoutMs());
                 }
             }
             updateCompletions();
@@ -281,8 +284,26 @@ class QwpSinkTask extends SinkTask {
             }
         }
         long fsn = sender.flushAndGetSequence();
-        if (fsn < 0L || records.isEmpty()) {
-            throw new ConnectException("QWP flush published rows without returning a frame sequence number");
+        if (records.isEmpty()) {
+            throw new ConnectException("QWP flush published rows the ledger does not track");
+        }
+        if (fsn < 0L) {
+            // The client auto-flushed every buffered row before this checkpoint,
+            // so this call published nothing and the rows' real FSNs are unknown.
+            // drain(0) is a nonblocking "everything published is acked" probe:
+            // when it reports true the rows are durably acked and complete at
+            // the current acked watermark; until then they stay pending and a
+            // later checkpoint (or preCommit's bounded drain) settles them.
+            if (!sender.drain(0L)) {
+                return;
+            }
+            long acked = Math.max(0L, sender.getAckedFsn());
+            for (PendingRecord pending : records) {
+                pending.dependencyFsn = acked;
+            }
+            pendingRows = 0;
+            nextFlushNanos = nanoTime() + flushConfig.autoFlushNanos;
+            return;
         }
         long fromFsn = lastPublishedFsn + 1L;
         for (PendingRecord pending : records) {

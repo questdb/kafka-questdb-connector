@@ -13,7 +13,10 @@ import java.util.concurrent.TimeUnit;
 
 final class ClientConfUtils {
     static final long DEFAULT_QWP_SF_APPEND_DEADLINE_MILLIS = 30_000L;
-    private static final int QWP_INTERNAL_FLUSH_INTERVAL_MILLIS = Integer.MAX_VALUE - 1;
+    // Any positive value arms the client's byte trigger, which it then clamps
+    // to 90% of the server-advertised batch cap; 0 (the WS default) disables
+    // the trigger AND the clamp, leaving batches free to exceed the cap.
+    static final int DEFAULT_QWP_AUTO_FLUSH_BYTES = 100 * 1024 * 1024;
 
     private ClientConfUtils() {
     }
@@ -45,6 +48,7 @@ final class ClientConfUtils {
 
         boolean hasAtLeastOneParam = false;
         boolean hasSfAppendDeadline = false;
+        boolean hasAutoFlushBytes = false;
         while (ConfStringParser.hasNext(confStr, pos)) {
             hasAtLeastOneParam = true;
             pos = ConfStringParser.nextKey(confStr, pos, tmpSink);
@@ -69,6 +73,11 @@ final class ClientConfUtils {
                 } catch (NumericException e) {
                     throw new ConfigException("Invalid auto_flush_interval value [auto_flush_interval=" + tmpSink + ']');
                 }
+                if (isQwpTransport) {
+                    // one knob, two layers: the client frames at this cadence and
+                    // the connector checkpoints its ledger at the same cadence
+                    sink.put("auto_flush_interval=").put(tmpSink).put(';');
+                }
             } else if (Chars.equals(tmpSink, "auto_flush_rows")) {
                 pos = ConfStringParser.value(confStr, pos, tmpSink);
                 if (pos < 0 || tmpSink.length() == 0) {
@@ -85,6 +94,9 @@ final class ClientConfUtils {
                         throw new ConfigException("Invalid auto_flush_rows value [auto_flush_rows=" + tmpSink + ']');
                     }
                 }
+                if (isQwpTransport) {
+                    sink.put("auto_flush_rows=").put(tmpSink).put(';');
+                }
             } else if (Chars.equals(tmpSink, "auto_flush")) {
                 pos = ConfStringParser.value(confStr, pos, tmpSink);
                 if (pos < 0 || tmpSink.length() == 0) {
@@ -97,12 +109,16 @@ final class ClientConfUtils {
                 } else if (!Chars.equals(tmpSink, "on")) {
                     throw new ConfigException("Unknown auto_flush value [auto_flush=" + tmpSink + ']');
                 }
-            } else if (isQwpTransport && Chars.equals(tmpSink, "auto_flush_bytes")) {
-                throw new ConfigException("QuestDB Kafka connector does not support auto_flush_bytes with QWP");
+                if (isQwpTransport) {
+                    sink.put("auto_flush=").put(tmpSink).put(';');
+                }
             } else if (isQwpTransport && (Chars.equals(tmpSink, "sf_dir") || Chars.equals(tmpSink, "sf_durability"))) {
                 throw new ConfigException("QuestDB Kafka connector supports memory-only store-and-forward; " + tmpSink + " is not allowed with QWP");
             } else {
                 // copy other params
+                if (isQwpTransport && Chars.equals(tmpSink, "auto_flush_bytes")) {
+                    hasAutoFlushBytes = true;
+                }
                 boolean isSfAppendDeadline = isQwpTransport && Chars.equals(tmpSink, "sf_append_deadline_millis");
                 sink.put(tmpSink).put('=');
                 pos = ConfStringParser.value(confStr, pos, tmpSink);
@@ -139,14 +155,16 @@ final class ClientConfUtils {
         if (isQwpTransport && !hasSfAppendDeadline) {
             sink.put("sf_append_deadline_millis=").put(DEFAULT_QWP_SF_APPEND_DEADLINE_MILLIS).put(';');
         }
-        if (isQwpTransport) {
-            // The 1.3.8 QWP client rejects auto_flush=off. Disable its row
-            // trigger and leave the required timer at the largest finite value;
-            // the connector remains responsible for normal publishing cadence.
-            sink.put("auto_flush_rows=off;auto_flush_bytes=off;auto_flush_interval=").put(QWP_INTERNAL_FLUSH_INTERVAL_MILLIS).put(';');
-        } else {
+        if (isQwpTransport && !hasAutoFlushBytes) {
+            sink.put("auto_flush_bytes=").put(DEFAULT_QWP_AUTO_FLUSH_BYTES).put(';');
+        }
+        if (!isQwpTransport) {
             sink.put("auto_flush=off;");
         }
+        // QWP keeps the client's own auto-flush: its effective byte trigger is
+        // clamped to the server's advertised batch cap, which is what prevents
+        // BatchTooLargeForCapException for multi-row batches. The connector's
+        // flush cadence is only a ledger/commit checkpoint on top of it.
 
         return true;
     }
