@@ -153,6 +153,15 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.start();
     }
 
+    @AfterEach
+    public void tearDown() {
+        connect.stop();
+        // Stop first so no in-flight rows recreate tables, then reclaim the disk:
+        // the class shares one QuestDB instance and it preallocates tens of MB per
+        // table, which reached ~17GB of tables over a full class run.
+        QuestDBUtils.dropAllTables(httpPort);
+    }
+
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testSmoke(ConnectTestUtils.Transport transport) {

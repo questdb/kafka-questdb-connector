@@ -43,13 +43,53 @@ public final class QuestDBUtils {
     }
 
     public static void dropTableIfExists(String table, int port) {
-        try (Response response = executeQuery(port, "drop table if exists " + table, Endpoint.EXEC)) {
+        try (Response response = executeQuery(port, dropStatement(table), Endpoint.EXEC)) {
             if (response.code() != 200) {
                 fail("Failed to drop table " + table + ", returned code " + response.code());
             }
         } catch (IOException e) {
             fail("Failed to drop table " + table, e);
         }
+    }
+
+    /**
+     * Drops every table, best-effort. Tests share one QuestDB instance per class
+     * and QuestDB preallocates tens of megabytes per table, so keeping every
+     * test's tables around grows the data directory to ~17GB per class run -
+     * enough to exhaust the disk of a CI runner and slow everything to a crawl.
+     */
+    public static void dropAllTables(int port) {
+        String csv;
+        try (Response response = executeQuery(port, "select table_name from tables()", Endpoint.EXPORT)) {
+            if (response.code() != 200) {
+                return;
+            }
+            try (okhttp3.ResponseBody body = response.body()) {
+                csv = body == null ? "" : body.string();
+            }
+        } catch (IOException e) {
+            return; // QuestDB may be intentionally stopped by the test
+        }
+        String[] lines = csv.split("\r?\n");
+        for (int i = 1; i < lines.length; i++) { // line 0 is the CSV header
+            String name = lines[i].trim();
+            if (name.startsWith("\"") && name.endsWith("\"") && name.length() > 1) {
+                name = name.substring(1, name.length() - 1);
+            }
+            if (name.isEmpty()) {
+                continue;
+            }
+            try (Response ignored = executeQuery(port, dropStatement(name), Endpoint.EXEC)) {
+                // best-effort
+            } catch (IOException e) {
+                return;
+            }
+        }
+    }
+
+    private static String dropStatement(String table) {
+        // quoted: several tests use table names with dots
+        return "drop table if exists \"" + table + "\"";
     }
 
     public static void assertSqlEventually(String expectedResult, String query, int timeoutSeconds, int port) {
