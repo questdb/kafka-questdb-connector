@@ -18,7 +18,7 @@
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
         <kafka.scala.version>2.13</kafka.scala.version>
-        <kafka.version>3.3.1</kafka.version>
+        <kafka.version>3.6.0</kafka.version>
         <junit.version>5.9.0</junit.version>
         <testcontainers.version>1.21.4</testcontainers.version>
         <slf4j.version>2.0.17</slf4j.version>

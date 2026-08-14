@@ -77,7 +77,8 @@ public final class ConnectTestUtils {
         }
         for (ConnectorStateInfo.TaskState taskState : taskStates) {
             if (!Objects.equals(taskState.state(), expectedState.toString())) {
-                fail("Task " + taskState.id() + " for connector " + connectorName + " is in state " + taskState.state() + " but expected " + expectedState);
+                fail("Task " + taskState.id() + " for connector " + connectorName + " is in state " + taskState.state()
+                        + " but expected " + expectedState + ". Trace: " + taskState.trace());
             }
         }
     }

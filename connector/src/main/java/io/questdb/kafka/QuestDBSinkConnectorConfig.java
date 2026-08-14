@@ -91,6 +91,21 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
             "This can be useful to avoid additional database load when errors are expected to affect multiple records. " +
             "Default is false (try one-by-one).";
 
+    public static final String QWP_PROGRESS_TIMEOUT_MS_CONFIG = "progress.timeout.ms";
+    private static final String QWP_PROGRESS_TIMEOUT_MS_DOC = "Maximum time in milliseconds that QWP data may remain pending without the acknowledged frame sequence advancing before the task fails.";
+
+    public static final String QWP_MAX_INFLIGHT_ROWS_CONFIG = "max.inflight.rows";
+    private static final String QWP_MAX_INFLIGHT_ROWS_DOC = "Soft QWP backpressure threshold for retained rows. The current poll batch may overshoot this value; sf_max_total_bytes is the hard memory backstop.";
+
+    public static final String QWP_DRAIN_TIMEOUT_MS_CONFIG = "qwp.drain.timeout.ms";
+    private static final String QWP_DRAIN_TIMEOUT_MS_DOC = "Best-effort QWP drain timeout used during partition close and task stop.";
+
+    public static final String QWP_ISOLATION_SLICE_MS_CONFIG = "qwp.isolation.slice.ms";
+    private static final String QWP_ISOLATION_SLICE_MS_DOC = "Maximum producer-thread time budget for one QWP replay-isolation slice.";
+
+    public static final String QWP_DLQ_TERMINAL_CATEGORIES_CONFIG = "qwp.dlq.terminal.categories";
+    private static final String QWP_DLQ_TERMINAL_CATEGORIES_DOC = "QWP terminal categories eligible for replay isolation and DLQ handling. SCHEMA_MISMATCH is the safe default.";
+
     private static final String DEFAULT_TIMESTAMP_FORMAT = "yyyy-MM-ddTHH:mm:ss.SSSUUUZ";
 
     public QuestDBSinkConnectorConfig(ConfigDef config, Map<String, String> parsedConfig) {
@@ -124,7 +139,12 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(TLS_VALIDATION_MODE_CONFIG, Type.STRING, "default", ConfigDef.ValidString.in("default", "insecure"), Importance.LOW, TLS_VALIDATION_MODE_DOC)
                 .define(CONFIGURATION_STRING_CONFIG, Type.PASSWORD, null, Importance.HIGH, CONFIGURATION_STRING_DOC)
                 .define(ALLOWED_LAG_CONFIG, Type.INT, 1000, ConfigDef.Range.between(1, Integer.MAX_VALUE), Importance.LOW, ALLOWED_LAG_DOC)
-                .define(DLQ_SEND_BATCH_ON_ERROR_CONFIG, Type.BOOLEAN, false, Importance.LOW, DLQ_SEND_BATCH_ON_ERROR_DOC);
+                .define(DLQ_SEND_BATCH_ON_ERROR_CONFIG, Type.BOOLEAN, false, Importance.LOW, DLQ_SEND_BATCH_ON_ERROR_DOC)
+                .define(QWP_PROGRESS_TIMEOUT_MS_CONFIG, Type.LONG, 300_000L, ConfigDef.Range.atLeast(1L), Importance.MEDIUM, QWP_PROGRESS_TIMEOUT_MS_DOC)
+                .define(QWP_MAX_INFLIGHT_ROWS_CONFIG, Type.INT, 150_000, ConfigDef.Range.atLeast(1), Importance.MEDIUM, QWP_MAX_INFLIGHT_ROWS_DOC)
+                .define(QWP_DRAIN_TIMEOUT_MS_CONFIG, Type.LONG, 30_000L, ConfigDef.Range.atLeast(0L), Importance.LOW, QWP_DRAIN_TIMEOUT_MS_DOC)
+                .define(QWP_ISOLATION_SLICE_MS_CONFIG, Type.LONG, 100L, ConfigDef.Range.atLeast(1L), Importance.LOW, QWP_ISOLATION_SLICE_MS_DOC)
+                .define(QWP_DLQ_TERMINAL_CATEGORIES_CONFIG, Type.LIST, "SCHEMA_MISMATCH", Importance.LOW, QWP_DLQ_TERMINAL_CATEGORIES_DOC);
     }
 
     public Password getConfigurationString() {
@@ -227,6 +247,26 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public boolean isDlqSendBatchOnError() {
         return getBoolean(DLQ_SEND_BATCH_ON_ERROR_CONFIG);
+    }
+
+    public long getQwpProgressTimeoutMs() {
+        return getLong(QWP_PROGRESS_TIMEOUT_MS_CONFIG);
+    }
+
+    public int getQwpMaxInflightRows() {
+        return getInt(QWP_MAX_INFLIGHT_ROWS_CONFIG);
+    }
+
+    public long getQwpDrainTimeoutMs() {
+        return getLong(QWP_DRAIN_TIMEOUT_MS_CONFIG);
+    }
+
+    public long getQwpIsolationSliceMs() {
+        return getLong(QWP_ISOLATION_SLICE_MS_CONFIG);
+    }
+
+    public List<String> getQwpDlqTerminalCategories() {
+        return getList(QWP_DLQ_TERMINAL_CATEGORIES_CONFIG);
     }
 
     private static class TimestampUnitsRecommender implements ConfigDef.Recommender {
