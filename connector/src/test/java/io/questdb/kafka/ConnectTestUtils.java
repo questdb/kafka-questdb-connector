@@ -42,7 +42,15 @@ public final class ConnectTestUtils {
         Awaitility.await().atMost(CONNECTOR_START_TIMEOUT_MS, MILLISECONDS).untilAsserted(() -> assertConnectorTaskState(connect, CONNECTOR_NAME, expectedState));
     }
 
+    enum Transport {
+        HTTP, TCP, QWP
+    }
+
     static Map<String, String> baseConnectorProps(GenericContainer<?> questDBContainer, String topicName, boolean useHttp) {
+        return baseConnectorProps(questDBContainer, topicName, useHttp ? Transport.HTTP : Transport.TCP);
+    }
+
+    static Map<String, String> baseConnectorProps(GenericContainer<?> questDBContainer, String topicName, Transport transport) {
         String host = questDBContainer.getHost();
 
         Map<String, String> props = new HashMap<>();
@@ -52,15 +60,21 @@ public final class ConnectTestUtils {
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
 
         String confString;
-        if (useHttp) {
-            int port = questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT);
-            confString = "http::addr=" + host + ":" + port + ";";
-            props.put("client.conf.string", confString);
-        } else {
-            int port = questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT);
-            confString = "tcp::addr=" + host + ":" + port + ";protocol_version=2;";
-            props.put("client.conf.string", confString);
+        switch (transport) {
+            case HTTP:
+                confString = "http::addr=" + host + ":" + questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT) + ";";
+                break;
+            case TCP:
+                confString = "tcp::addr=" + host + ":" + questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT) + ";protocol_version=2;";
+                break;
+            case QWP:
+                // QWP is WebSocket over the HTTP port
+                confString = "ws::addr=" + host + ":" + questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT) + ";";
+                break;
+            default:
+                throw new IllegalArgumentException("Unknown transport: " + transport);
         }
+        props.put("client.conf.string", confString);
         return props;
     }
 

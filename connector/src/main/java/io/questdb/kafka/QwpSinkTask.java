@@ -102,7 +102,10 @@ class QwpSinkTask extends SinkTask {
             updateCompletions();
             detectStall();
             if (records.isEmpty()) {
-                flushIfDue();
+                // An empty poll signals quiescence: publish buffered rows now instead of
+                // waiting out the flush timer, so low-volume latency stays close to the
+                // legacy HTTP path. Publishing is an async write, so this is cheap.
+                publishPendingRows();
                 applyBackpressure();
                 return;
             }
@@ -161,6 +164,17 @@ class QwpSinkTask extends SinkTask {
         }
         try {
             probeTerminalError();
+            if (recovery == null) {
+                // A commit cycle may be the last thing before a rebalance close(),
+                // whose drain cannot influence the commit (Connect uses this method's
+                // return value after close() runs). Publish buffered rows now and give
+                // acks a short bounded window so a clean rebalance commits instead of
+                // redelivering the whole window. A timeout just withholds offsets.
+                publishPendingRows();
+                if (lastPublishedFsn > lastAckedFsn) {
+                    sender.awaitAckedFsn(lastPublishedFsn, config.getQwpCommitAckTimeoutMs());
+                }
+            }
             updateCompletions();
             detectStall();
         } catch (LineSenderServerException e) {

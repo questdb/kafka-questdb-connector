@@ -42,6 +42,16 @@ public final class QuestDBUtils {
 
     }
 
+    public static void dropTableIfExists(String table, int port) {
+        try (Response response = executeQuery(port, "drop table if exists " + table, Endpoint.EXEC)) {
+            if (response.code() != 200) {
+                fail("Failed to drop table " + table + ", returned code " + response.code());
+            }
+        } catch (IOException e) {
+            fail("Failed to drop table " + table, e);
+        }
+    }
+
     public static void assertSqlEventually(String expectedResult, String query, int timeoutSeconds, int port) {
         await().pollInterval(5, TimeUnit.SECONDS).atMost(timeoutSeconds, TimeUnit.SECONDS).untilAsserted(() -> assertSql(expectedResult, query, port));
     }
