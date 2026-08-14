@@ -53,7 +53,7 @@ public final class QuestDBUtils {
     }
 
     public static void assertSqlEventually(String expectedResult, String query, int timeoutSeconds, int port) {
-        await().pollInterval(5, TimeUnit.SECONDS).atMost(timeoutSeconds, TimeUnit.SECONDS).untilAsserted(() -> assertSql(expectedResult, query, port));
+        await().pollInterval(250, TimeUnit.MILLISECONDS).atMost(timeoutSeconds, TimeUnit.SECONDS).untilAsserted(() -> assertSql(expectedResult, query, port));
     }
 
     public static void assertSqlEventually(String expectedResult, String query, int port) {

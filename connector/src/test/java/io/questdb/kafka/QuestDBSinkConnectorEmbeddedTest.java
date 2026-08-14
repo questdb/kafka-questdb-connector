@@ -132,7 +132,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect = new EmbeddedConnectCluster.Builder()
                 .name("questdb-connect-cluster")
                 .workerProps(props)
-                .numWorkers(4)
+                // One worker: none of these tests exercise worker failover
+                // (that is ExactlyOnceIT's job) and each extra worker adds
+                // ~250ms startup and ~1s shutdown to every single test.
+                .numWorkers(1)
                 .build();
 
         connect.start();

@@ -73,6 +73,9 @@ public final class ConnectTestUtils {
         props.put("topics", topicName);
         props.put(KEY_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        // Tests write tiny batches; the default 1s allowed.lag would delay the
+        // timer-driven flush (and thus every visibility assert) by ~1s.
+        props.put(QuestDBSinkConnectorConfig.ALLOWED_LAG_CONFIG, "100");
 
         String confString;
         switch (transport) {
