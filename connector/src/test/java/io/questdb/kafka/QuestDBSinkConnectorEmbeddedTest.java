@@ -126,9 +126,15 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         Map<String, String> props = new HashMap<>();
         props.put("connector.client.config.override.policy", "All");
-        // The third-party test SMT (PayloadBasisRouter) ships no ServiceLoader
-        // manifest, so the strict service_load discovery cannot be used here.
-        props.put("plugin.discovery", "hybrid_warn");
+        // service_load skips the ~200ms reflective classpath scan per worker
+        // start; the third-party test SMT (PayloadBasisRouter) gets its missing
+        // ServiceLoader manifest from src/test/resources.
+        props.put("plugin.discovery", "service_load");
+        // Internal topics default to 25 offset + 5 status partitions; every
+        // partition costs read-to-end rounds at runtime and a checkpoint flush
+        // at broker shutdown.
+        props.put("offset.storage.partitions", "1");
+        props.put("status.storage.partitions", "1");
         // On close, every consumer's final close-fetch-session request sits in
         // the broker's delayed-fetch purgatory for up to fetch.max.wait.ms
         // (default 500ms). The task consumer and the herder's member close
@@ -145,11 +151,6 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 .build();
 
         connect.start();
-    }
-
-    @AfterEach
-    public void tearDown() {
-        connect.stop();
     }
 
     @ParameterizedTest
