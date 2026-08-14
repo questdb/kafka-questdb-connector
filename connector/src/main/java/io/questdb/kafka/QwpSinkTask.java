@@ -253,7 +253,7 @@ class QwpSinkTask extends SinkTask {
     private Sender createSender() {
         Sender rawSender = buildSender(patchedConfString);
         String symbolColumns = config.getSymbolColumns();
-        return symbolColumns == null ? rawSender : new BufferingSender(rawSender, symbolColumns);
+        return symbolColumns == null ? rawSender : new SymbolRoutingSender(rawSender, symbolColumns);
     }
 
     private void flushIfDue() {
