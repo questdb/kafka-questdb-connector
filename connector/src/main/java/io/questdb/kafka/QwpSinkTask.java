@@ -441,8 +441,19 @@ class QwpSinkTask extends SinkTask {
         if (topic == null || partition == null) {
             throw new ConnectException("Kafka Connect did not provide original coordinates for a QWP record");
         }
-        return partitionCache.computeIfAbsent(topic, t -> new HashMap<>())
-                .computeIfAbsent(partition, p -> new TopicPartition(topic, p));
+        // Deliberately not computeIfAbsent: its mapping function captures `topic`,
+        // so the lambda is allocated on every record even when the cache hits.
+        Map<Integer, TopicPartition> byPartition = partitionCache.get(topic);
+        if (byPartition == null) {
+            byPartition = new HashMap<>();
+            partitionCache.put(topic, byPartition);
+        }
+        TopicPartition cached = byPartition.get(partition);
+        if (cached == null) {
+            cached = new TopicPartition(topic, partition);
+            byPartition.put(partition, cached);
+        }
+        return cached;
     }
 
     private void reportToDlq(PendingRecord pending, Throwable error) {
