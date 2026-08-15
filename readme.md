@@ -58,6 +58,13 @@ value.converter=org.apache.kafka.connect.converters.ByteArrayConverter
 value.format=json
 ```
 
+If the producer writes the envelope `JsonConverter` emits with
+`schemas.enable=true` (`{"schema": {...}, "payload": {...}}`), use
+`value.format=json_envelope` instead: the schema is ignored and the payload
+becomes the row. Types are inferred from the JSON either way. Sending an
+enveloped record with plain `value.format=json` fails with a message pointing
+at this setting, rather than writing `schema_*` and `payload_*` columns.
+
 Measured on a single task with 5M records, interleaved A/B against the same
 pipeline using `JsonConverter`: 709k -> 1,048k rows/s, or **+48%**.
 
@@ -82,7 +89,11 @@ Limitations and differences:
 - Composed timestamps (multiple `timestamp.string.fields`) are not supported
   and are rejected at startup.
 - Only the value is parsed by the connector. The key still goes through the
-  key converter, and only JSON is supported (`value.format=json`).
+  key converter, and only JSON is supported (`value.format=json` or
+  `json_envelope`).
+- The schema in an envelope is ignored: column types come from the JSON
+  values, so a schema declaring INT8 or FLOAT32 still yields QuestDB LONG or
+  DOUBLE. Use `doubles` when an integer-looking field must be a double.
 - Objects nested inside arrays are not valid array elements, exactly as on the
   standard path: they fail, or are skipped with `skip.unsupported.types=true`.
 - Integers larger than `Long.MAX_VALUE` are written as doubles. The standard

@@ -231,6 +231,49 @@ class RawJsonEquivalenceTest {
                 callsForRaw(props, json), "fast path keeps the magnitude");
     }
 
+    /** value.format=json_envelope unwraps what JsonConverter writes with schemas.enable=true. */
+    @Test
+    void envelopeModeUnwrapsThePayload() {
+        String enveloped = "{\"schema\":{\"type\":\"struct\",\"fields\":"
+                + "[{\"type\":\"double\",\"optional\":false,\"field\":\"px\"}],\"optional\":false},"
+                + "\"payload\":{\"px\":1.5,\"sym\":\"abc\"}}";
+
+        Map<String, String> envProps = baseProps();
+        envProps.put("value.format", "json_envelope");
+        Recorder recorder = new Recorder();
+        QuestDBSinkConnectorConfig config = new QuestDBSinkConnectorConfig(envProps);
+        new RecordToRowHandler(config, recorder.proxy(), true, false, true).handle(record(enveloped));
+
+        // identical to the same payload sent without an envelope
+        assertSameRow(callsForRaw(baseProps(), "{\"px\":1.5,\"sym\":\"abc\"}"), recorder.calls);
+    }
+
+    @Test
+    void envelopeInPlainJsonModeFailsWithAnActionableMessage() {
+        Map<String, String> props = baseProps();
+        RecordToRowHandler handler = handler(props, new Recorder(), true);
+        String enveloped = "{\"schema\":{\"type\":\"struct\"},\"payload\":{\"px\":1.5}}";
+        InvalidDataException e = assertThrows(InvalidDataException.class, () -> handler.handle(record(enveloped)));
+        assertTrue(String.valueOf(e.getMessage()).contains("json_envelope"), e.getMessage());
+    }
+
+    @Test
+    void envelopeModeRejectsARecordWithoutPayload() {
+        Map<String, String> props = baseProps();
+        props.put("value.format", "json_envelope");
+        QuestDBSinkConnectorConfig config = new QuestDBSinkConnectorConfig(props);
+        RecordToRowHandler handler = new RecordToRowHandler(config, new Recorder().proxy(), true, false, true);
+        assertThrows(InvalidDataException.class, () -> handler.handle(record("{\"schema\":{\"type\":\"struct\"}}")));
+    }
+
+    /** A field merely named "schema" is ordinary data unless it carries an envelope object. */
+    @Test
+    void aScalarFieldNamedSchemaIsNotMistakenForAnEnvelope() {
+        Map<String, String> props = baseProps();
+        assertSameRow(callsForConverted(props, "{\"schema\":\"v1\",\"px\":1.5}"),
+                callsForRaw(props, "{\"schema\":\"v1\",\"px\":1.5}"));
+    }
+
     @Test
     void emptyPayloadIsRejectedRatherThanSilentlyDropped() {
         Map<String, String> props = baseProps();

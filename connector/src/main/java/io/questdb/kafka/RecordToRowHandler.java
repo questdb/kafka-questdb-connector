@@ -27,6 +27,7 @@ final class RecordToRowHandler {
     private final boolean cancelPartialRow;
     private final boolean wrapSenderErrors;
     private final boolean rawJson;
+    private final boolean rawJsonEnvelope;
     private final Function<SinkRecord, ? extends CharSequence> recordToTable;
     private final String timestampColumnName;
     private final TimeUnit timestampUnits;
@@ -56,6 +57,7 @@ final class RecordToRowHandler {
         this.cancelPartialRow = cancelPartialRow;
         this.wrapSenderErrors = wrapSenderErrors;
         this.rawJson = config.isRawJsonFormat();
+        this.rawJsonEnvelope = config.isRawJsonEnvelope();
 
         String symbolColumnsConfig = routeSymbolsDirectly ? config.getSymbolColumns() : null;
         if (symbolColumnsConfig == null) {
@@ -149,7 +151,11 @@ final class RecordToRowHandler {
                 if (parser.nextToken() != com.fasterxml.jackson.core.JsonToken.START_OBJECT) {
                     throw new InvalidDataException("JSON payload must be an object");
                 }
-                writeJsonObject(parser, config.getValuePrefix());
+                if (rawJsonEnvelope) {
+                    writeJsonEnvelope(parser);
+                } else {
+                    writeJsonObject(parser, config.getValuePrefix());
+                }
             } catch (java.io.IOException e) {
                 throw new InvalidDataException("Cannot parse JSON payload", e);
             }
@@ -203,10 +209,24 @@ final class RecordToRowHandler {
     }
 
     private void writeJsonObject(com.fasterxml.jackson.core.JsonParser parser, String prefix) throws java.io.IOException {
+        boolean firstField = prefix.isEmpty() || prefix.equals(config.getValuePrefix());
         while (parser.nextToken() != com.fasterxml.jackson.core.JsonToken.END_OBJECT) {
             String rawName = parser.currentName();
+
             String name = prefix.isEmpty() ? rawName : prefix + STRUCT_FIELD_SEPARATOR + rawName;
             com.fasterxml.jackson.core.JsonToken token = parser.nextToken();
+            if (firstField) {
+                firstField = false;
+                // JsonConverter with schemas.enable=true writes {"schema":{...},"payload":{...}}.
+                // Without this check the envelope would be flattened into schema_* and payload_*
+                // columns. A field merely *named* schema is fine unless it carries an object.
+                if (!rawJsonEnvelope && "schema".equals(rawName)
+                        && token == com.fasterxml.jackson.core.JsonToken.START_OBJECT) {
+                    throw new InvalidDataException("Payload looks like a JsonConverter envelope"
+                            + " (schemas.enable=true). Use value.format=json_envelope, or produce"
+                            + " records without the schema envelope.");
+                }
+            }
             switch (token) {
                 case VALUE_NULL:
                     break;
@@ -240,6 +260,31 @@ final class RecordToRowHandler {
                 default:
                     throw new InvalidDataException("Unsupported JSON token " + token + " for field " + name);
             }
+        }
+    }
+
+    /**
+     * Unwraps the envelope JsonConverter produces with schemas.enable=true:
+     * {"schema": {...}, "payload": {...}}. The schema is ignored - the fast path infers
+     * types from the JSON itself, exactly as it does for schemaless payloads.
+     */
+    private void writeJsonEnvelope(com.fasterxml.jackson.core.JsonParser parser) throws java.io.IOException {
+        boolean payloadSeen = false;
+        while (parser.nextToken() != com.fasterxml.jackson.core.JsonToken.END_OBJECT) {
+            String field = parser.currentName();
+            com.fasterxml.jackson.core.JsonToken token = parser.nextToken();
+            if ("payload".equals(field)) {
+                if (token != com.fasterxml.jackson.core.JsonToken.START_OBJECT) {
+                    throw new InvalidDataException("Envelope payload must be an object");
+                }
+                writeJsonObject(parser, config.getValuePrefix());
+                payloadSeen = true;
+            } else {
+                parser.skipChildren();
+            }
+        }
+        if (!payloadSeen) {
+            throw new InvalidDataException("value.format=json_envelope but the record has no payload field");
         }
     }
 
