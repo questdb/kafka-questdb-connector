@@ -97,6 +97,17 @@ Limitations and differences:
   DOUBLE. Use `doubles` when an integer-looking field must be a double.
 - Objects nested inside arrays are not valid array elements, exactly as on the
   standard path: they fail, or are skipped with `skip.unsupported.types=true`.
+- JSON nested deeper than 64 levels is rejected as invalid data. Without the
+  limit such a payload overflows the stack, and Kafka Connect cannot route an
+  `Error` to the dead letter queue, so the record would kill the task on every
+  restart.
+- Top-level values that are not JSON objects (`123`, `"text"`, `[1,2,3]`) are
+  rejected. The standard path writes them into a `value` column.
+- A field with an empty name (`{"": 1}`) produces an illegal column name. On
+  QWP this fails the task; the standard path substitutes `value`.
+- Naming an object- or array-valued field in `symbols` flattens or writes it as
+  an array instead of stringifying it, so the auto-created schema differs from
+  the standard path.
 - Integers larger than `Long.MAX_VALUE` are written as doubles. The standard
   path silently overflows them into a wrapped negative long, so the two paths
   differ here on purpose.

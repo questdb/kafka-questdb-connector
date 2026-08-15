@@ -44,6 +44,10 @@ final class RecordToRowHandler {
     private final MultiPartCharSequence composedBuffer;
     private long timestampColumnValue = Long.MIN_VALUE;
     private static final com.fasterxml.jackson.core.JsonFactory JSON_FACTORY = new com.fasterxml.jackson.core.JsonFactory();
+    // Jackson 2.13 (what Connect provides here) predates StreamReadConstraints, so nesting is
+    // unbounded. Without a cap a deeply nested payload is a StackOverflowError - an Error, which
+    // Kafka Connect never routes to the DLQ - so the record kills the task on every restart.
+    private static final int MAX_JSON_DEPTH = 64;
     private Sender sender;
 
     RecordToRowHandler(QuestDBSinkConnectorConfig config, Sender sender, boolean cancelPartialRow, boolean wrapSenderErrors) {
@@ -146,7 +150,10 @@ final class RecordToRowHandler {
             sender.table(tableName);
             partialRecord = true;
             if (config.isIncludeKey()) {
-                writeRawKey(record);
+                // The key does not come from the JSON payload, so it is still whatever the
+                // key converter produced. Reuse the standard handling rather than a second
+                // type dispatch: structs, maps and logical types then behave identically.
+                handleObject(config.getKeyPrefix(), record.keySchema(), record.key(), PRIMITIVE_KEY_FALLBACK_NAME);
             }
             try (com.fasterxml.jackson.core.JsonParser parser = JSON_FACTORY.createParser(payload)) {
                 if (parser.nextToken() != com.fasterxml.jackson.core.JsonToken.START_OBJECT) {
@@ -155,7 +162,7 @@ final class RecordToRowHandler {
                 if (rawJsonEnvelope) {
                     writeJsonEnvelope(parser);
                 } else {
-                    writeJsonObject(parser, config.getValuePrefix());
+                    writeJsonObject(parser, config.getValuePrefix(), 1);
                 }
             } catch (java.io.IOException e) {
                 throw new InvalidDataException("Cannot parse JSON payload", e);
@@ -187,29 +194,10 @@ final class RecordToRowHandler {
         return true;
     }
 
-    private void writeRawKey(SinkRecord record) {
-        Object key = record.key();
-        if (key == null) {
-            return;
+    private void writeJsonObject(com.fasterxml.jackson.core.JsonParser parser, String prefix, int depth) throws java.io.IOException {
+        if (depth > MAX_JSON_DEPTH) {
+            throw new InvalidDataException("JSON nesting deeper than " + MAX_JSON_DEPTH + " is not supported");
         }
-        String name = config.getKeyPrefix();
-        if (name == null || name.isEmpty()) {
-            name = PRIMITIVE_KEY_FALLBACK_NAME;
-        }
-        if (key instanceof CharSequence) {
-            writeJsonString(name, key.toString());
-        } else if (key instanceof Long || key instanceof Integer || key instanceof Short || key instanceof Byte) {
-            writeJsonLong(name, ((Number) key).longValue());
-        } else if (key instanceof Double || key instanceof Float) {
-            writeJsonDouble(name, ((Number) key).doubleValue());
-        } else if (key instanceof Boolean) {
-            writeJsonBool(name, (Boolean) key);
-        } else if (!config.isSkipUnsupportedTypes()) {
-            throw new InvalidDataException("Unsupported key type on the raw JSON path: " + key.getClass().getName());
-        }
-    }
-
-    private void writeJsonObject(com.fasterxml.jackson.core.JsonParser parser, String prefix) throws java.io.IOException {
         while (parser.nextToken() != com.fasterxml.jackson.core.JsonToken.END_OBJECT) {
             String rawName = parser.currentName();
 
@@ -226,14 +214,14 @@ final class RecordToRowHandler {
                 case VALUE_NULL:
                     break;
                 case START_OBJECT:
-                    writeJsonObject(parser, name);
+                    writeJsonObject(parser, name, depth + 1);
                     break;
                 case START_ARRAY:
                     // Arrays are rare, and their validation (jagged rows, null elements,
                     // element types, skip.unsupported.types) is intricate. Materialise the
                     // array in the same shape the converter produces and reuse that code
                     // rather than reimplementing the rules here.
-                    handleArrayWithoutSchema(sanitizeName(name), readJsonList(parser));
+                    handleArrayWithoutSchema(sanitizeName(name), readJsonList(parser, depth + 1));
                     break;
                 case VALUE_STRING:
                     writeJsonString(name, parser.getText());
@@ -272,7 +260,7 @@ final class RecordToRowHandler {
                 if (token != com.fasterxml.jackson.core.JsonToken.START_OBJECT) {
                     throw new InvalidDataException("Envelope payload must be an object");
                 }
-                writeJsonObject(parser, config.getValuePrefix());
+                writeJsonObject(parser, config.getValuePrefix(), 1);
                 payloadSeen = true;
             } else {
                 parser.skipChildren();
@@ -283,7 +271,10 @@ final class RecordToRowHandler {
         }
     }
 
-    private java.util.List<Object> readJsonList(com.fasterxml.jackson.core.JsonParser parser) throws java.io.IOException {
+    private java.util.List<Object> readJsonList(com.fasterxml.jackson.core.JsonParser parser, int depth) throws java.io.IOException {
+        if (depth > MAX_JSON_DEPTH) {
+            throw new InvalidDataException("JSON nesting deeper than " + MAX_JSON_DEPTH + " is not supported");
+        }
         java.util.List<Object> list = new ArrayList<>();
         for (;;) {
             com.fasterxml.jackson.core.JsonToken token = parser.nextToken();
@@ -294,7 +285,7 @@ final class RecordToRowHandler {
                 case END_ARRAY:
                     return list;
                 case START_ARRAY:
-                    list.add(readJsonList(parser));
+                    list.add(readJsonList(parser, depth + 1));
                     break;
                 case START_OBJECT:
                     // Objects are not valid array elements, but the decision to skip or fail

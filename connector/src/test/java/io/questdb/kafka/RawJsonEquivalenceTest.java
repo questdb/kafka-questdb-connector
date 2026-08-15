@@ -28,6 +28,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class RawJsonEquivalenceTest {
 
+    private static void assertSameRow(List<String> expected, List<String> actual, String context) {
+        assertEquals(expected.get(0), actual.get(0), context);
+        assertEquals(expected.get(expected.size() - 1), actual.get(actual.size() - 1), context);
+        List<String> e = new ArrayList<>(expected.subList(1, expected.size() - 1));
+        List<String> a = new ArrayList<>(actual.subList(1, actual.size() - 1));
+        Collections.sort(e);
+        Collections.sort(a);
+        assertEquals(e, a, context);
+    }
+
     private static void assertSameRow(List<String> expected, List<String> actual) {
         assertEquals(expected.get(0), actual.get(0), "row must start with table()");
         assertEquals(expected.get(expected.size() - 1), actual.get(actual.size() - 1), "row must end the same way");
@@ -83,6 +93,69 @@ class RawJsonEquivalenceTest {
         props.put("key.prefix", "k");
         String json = "{\"px\":1.5}";
         assertSameRow(callsForConverted(props, json), callsForRaw(props, json));
+    }
+
+    /** Keys are not JSON: they still come from the key converter, so both paths must agree. */
+    @Test
+    void structuredAndLogicalKeysMatchTheConvertedPath() {
+        Map<String, String> props = baseProps();
+        props.put("include.key", "true");
+        props.put("key.prefix", "k");
+        Map<String, Object> mapKey = new LinkedHashMap<>();
+        mapKey.put("id", 7L);
+        for (Object key : new Object[]{"k1", 7L, Boolean.TRUE, mapKey, new java.util.Date(1700000000000L)}) {
+            Recorder converted = new Recorder();
+            handler(props, converted, false).handle(new SinkRecord("tab", 0, null, key, null,
+                    JsonTestUtils.toConnectValue("{\"px\":1.5}"), 0L));
+            Recorder raw = new Recorder();
+            handler(props, raw, true).handle(new SinkRecord("tab", 0, null, key, null,
+                    "{\"px\":1.5}".getBytes(StandardCharsets.UTF_8), 0L));
+            assertSameRow(converted.calls, raw.calls, "key type " + key.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Deep nesting used to be a StackOverflowError, and an Error is never routed to the DLQ -
+     * the record would kill the task on every restart.
+     */
+    @Test
+    void deeplyNestedPayloadsFailAsInvalidDataNotAsAnError() {
+        Map<String, String> props = baseProps();
+        RecordToRowHandler handler = handler(props, new Recorder(), true);
+        StringBuilder objects = new StringBuilder("{");
+        for (int i = 0; i < 5000; i++) {
+            objects.append("\"a\":{");
+        }
+        objects.append("\"b\":1");
+        for (int i = 0; i < 5001; i++) {
+            objects.append('}');
+        }
+        assertThrows(InvalidDataException.class, () -> handler.handle(record(objects.toString())));
+
+        StringBuilder arrays = new StringBuilder("{\"a\":");
+        for (int i = 0; i < 5000; i++) {
+            arrays.append('[');
+        }
+        arrays.append('1');
+        for (int i = 0; i < 5000; i++) {
+            arrays.append(']');
+        }
+        arrays.append('}');
+        assertThrows(InvalidDataException.class, () -> handler.handle(record(arrays.toString())));
+    }
+
+    @Test
+    void nestingUpToTheLimitStillWorks() {
+        Map<String, String> props = baseProps();
+        StringBuilder json = new StringBuilder("{");
+        for (int i = 0; i < 30; i++) {
+            json.append("\"a\":{");
+        }
+        json.append("\"b\":1");
+        for (int i = 0; i < 31; i++) {
+            json.append('}');
+        }
+        assertSameRow(callsForConverted(props, json.toString()), callsForRaw(props, json.toString()));
     }
 
     @Test
