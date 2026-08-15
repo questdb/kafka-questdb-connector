@@ -5,11 +5,11 @@ The connector implements Apache Kafka [Sink Connector API](https://kafka.apache.
 ## Documentation
 Documentation is maintained on [QuestDB.com](https://questdb.com/docs/third-party-tools/kafka/#questdb-kafka-connect-connector) 
 
-## Experimental QWP transport
+## QWP transport
 
-QuestDB WebSocket Protocol transport is experimental. It requires Kafka
-Connect 3.6 or newer, `questdb-client` 1.3.8, and QuestDB 10 or newer. Select it
-with a `ws::` or `wss::` client configuration string, for example:
+The QuestDB WebSocket Protocol transport requires Kafka Connect 3.6 or newer,
+`questdb-client` 1.3.8, and QuestDB 10 or newer. Select it with a `ws::` or
+`wss::` client configuration string, for example:
 
 ```properties
 client.conf.string=ws::addr=questdb:9000;sf_max_total_bytes=268435456;
@@ -25,6 +25,11 @@ a soft pause threshold; `sf_max_total_bytes` is the hard client-memory
 backstop. Keep `sf_append_deadline_millis` below the worker consumer's
 `max.poll.interval.ms` (or set `consumer.override.max.poll.interval.ms` so the
 connector can validate the relationship).
+
+Delivery is validated by a chaos integration test (containers killed mid-stream
+while 5M records flow, asserting an exact deduplicated row count), a
+multi-worker test proving each worker resolves its own transport, and tests
+pinning the server behaviour the design relies on.
 
 Offsets are committed only after the corresponding QWP frame is acknowledged.
 By default, only deterministic `SCHEMA_MISMATCH` terminal errors are eligible
@@ -43,6 +48,10 @@ record-DLQ eligible, and typed `LineSenderServerException` rejections continue
 through the terminal-category policy above.
 
 ## Raw JSON fast path (experimental)
+
+This option is newer than the transport above and has no production mileage
+yet, so it is still marked experimental even though it is covered by a
+differential test suite that pins it against the standard path.
 
 Kafka Connect converts every record before the connector sees it, and for JSON
 that costs two throwaway object graphs per record: `JsonConverter` builds a
