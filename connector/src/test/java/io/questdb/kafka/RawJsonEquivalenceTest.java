@@ -249,15 +249,6 @@ class RawJsonEquivalenceTest {
     }
 
     @Test
-    void envelopeInPlainJsonModeFailsWithAnActionableMessage() {
-        Map<String, String> props = baseProps();
-        RecordToRowHandler handler = handler(props, new Recorder(), true);
-        String enveloped = "{\"schema\":{\"type\":\"struct\"},\"payload\":{\"px\":1.5}}";
-        InvalidDataException e = assertThrows(InvalidDataException.class, () -> handler.handle(record(enveloped)));
-        assertTrue(String.valueOf(e.getMessage()).contains("json_envelope"), e.getMessage());
-    }
-
-    @Test
     void envelopeModeRejectsARecordWithoutPayload() {
         Map<String, String> props = baseProps();
         props.put("value.format", "json_envelope");
@@ -266,12 +257,15 @@ class RawJsonEquivalenceTest {
         assertThrows(InvalidDataException.class, () -> handler.handle(record("{\"schema\":{\"type\":\"struct\"}}")));
     }
 
-    /** A field merely named "schema" is ordinary data unless it carries an envelope object. */
+    /** No envelope guessing: a field named "schema" is ordinary data in value.format=json. */
     @Test
-    void aScalarFieldNamedSchemaIsNotMistakenForAnEnvelope() {
+    void aFieldNamedSchemaIsOrdinaryDataInPlainJsonMode() {
         Map<String, String> props = baseProps();
         assertSameRow(callsForConverted(props, "{\"schema\":\"v1\",\"px\":1.5}"),
                 callsForRaw(props, "{\"schema\":\"v1\",\"px\":1.5}"));
+        // an object-valued "schema" is data too, not a trigger
+        assertSameRow(callsForConverted(props, "{\"schema\":{\"v\":1},\"px\":1.5}"),
+                callsForRaw(props, "{\"schema\":{\"v\":1},\"px\":1.5}"));
     }
 
     @Test

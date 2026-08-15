@@ -209,24 +209,11 @@ final class RecordToRowHandler {
     }
 
     private void writeJsonObject(com.fasterxml.jackson.core.JsonParser parser, String prefix) throws java.io.IOException {
-        boolean firstField = prefix.isEmpty() || prefix.equals(config.getValuePrefix());
         while (parser.nextToken() != com.fasterxml.jackson.core.JsonToken.END_OBJECT) {
             String rawName = parser.currentName();
 
             String name = prefix.isEmpty() ? rawName : prefix + STRUCT_FIELD_SEPARATOR + rawName;
             com.fasterxml.jackson.core.JsonToken token = parser.nextToken();
-            if (firstField) {
-                firstField = false;
-                // JsonConverter with schemas.enable=true writes {"schema":{...},"payload":{...}}.
-                // Without this check the envelope would be flattened into schema_* and payload_*
-                // columns. A field merely *named* schema is fine unless it carries an object.
-                if (!rawJsonEnvelope && "schema".equals(rawName)
-                        && token == com.fasterxml.jackson.core.JsonToken.START_OBJECT) {
-                    throw new InvalidDataException("Payload looks like a JsonConverter envelope"
-                            + " (schemas.enable=true). Use value.format=json_envelope, or produce"
-                            + " records without the schema envelope.");
-                }
-            }
             switch (token) {
                 case VALUE_NULL:
                     break;

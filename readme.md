@@ -61,9 +61,10 @@ value.format=json
 If the producer writes the envelope `JsonConverter` emits with
 `schemas.enable=true` (`{"schema": {...}, "payload": {...}}`), use
 `value.format=json_envelope` instead: the schema is ignored and the payload
-becomes the row. Types are inferred from the JSON either way. Sending an
-enveloped record with plain `value.format=json` fails with a message pointing
-at this setting, rather than writing `schema_*` and `payload_*` columns.
+becomes the row. Types are inferred from the JSON either way. The mode is
+never guessed from the data: pick the one matching your producer, because
+sending enveloped records with plain `value.format=json` flattens the envelope
+into `schema_*` and `payload_*` columns.
 
 Measured on a single task with 5M records, interleaved A/B against the same
 pipeline using `JsonConverter`: 709k -> 1,048k rows/s, or **+48%**.
