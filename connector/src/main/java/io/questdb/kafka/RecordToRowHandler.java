@@ -118,7 +118,8 @@ final class RecordToRowHandler {
         }
         if (rawJson && composedTimestampFields != null) {
             throw new ConnectException("value.format=json does not support composed timestamps ("
-                    + QuestDBSinkConnectorConfig.TIMESTAMP_STRING_FIELDS + " with multiple fields)");
+                    + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG
+                    + " naming several fields)");
         }
     }
 
@@ -214,6 +215,13 @@ final class RecordToRowHandler {
 
             String name = prefix.isEmpty() ? rawName : prefix + STRUCT_FIELD_SEPARATOR + rawName;
             com.fasterxml.jackson.core.JsonToken token = parser.nextToken();
+            if (isDesignatedRawField(name)) {
+                // Every token type must be considered here. Leaving it to the per-type
+                // writers meant a null, fractional, boolean or structured timestamp was
+                // written as an ordinary column and the row silently got wall-clock time.
+                readDesignatedTimestamp(parser, token);
+                continue;
+            }
             switch (token) {
                 case VALUE_NULL:
                     break;
@@ -302,7 +310,11 @@ final class RecordToRowHandler {
                     list.add(parser.getText());
                     break;
                 case VALUE_NUMBER_INT:
-                    list.add(parser.getLongValue());
+                    if (parser.getNumberType() == com.fasterxml.jackson.core.JsonParser.NumberType.BIG_INTEGER) {
+                        list.add(parser.getDoubleValue());
+                    } else {
+                        list.add(parser.getLongValue());
+                    }
                     break;
                 case VALUE_NUMBER_FLOAT:
                     list.add(parser.getDoubleValue());
@@ -314,6 +326,23 @@ final class RecordToRowHandler {
                 default:
                     throw new InvalidDataException("Unsupported JSON token in array: " + token);
             }
+        }
+    }
+
+    private void readDesignatedTimestamp(com.fasterxml.jackson.core.JsonParser parser,
+                                        com.fasterxml.jackson.core.JsonToken token) throws java.io.IOException {
+        switch (token) {
+            case VALUE_STRING:
+                timestampColumnValue = parseToMicros(parser.getText());
+                return;
+            case VALUE_NUMBER_INT:
+                long raw = parser.getLongValue();
+                timestampColumnValue = TimestampHelper.getTimestampUnits(timestampUnits, raw).toMicros(raw);
+                return;
+            case VALUE_NULL:
+                throw new InvalidDataException("Timestamp column value cannot be null");
+            default:
+                throw new InvalidDataException("Unsupported timestamp column type: " + token);
         }
     }
 
@@ -428,16 +457,14 @@ final class RecordToRowHandler {
                             + " with the configured format '" + config.getTimestampFormat() + "'", e);
                 }
             }
-        } catch (InvalidDataException ex) {
+        } catch (InvalidDataException | LineSenderException ex) {
+            // the handler is reused for every record: a row that failed after its
+            // designated timestamp was parsed must not hand it to the next record
+            timestampColumnValue = Long.MIN_VALUE;
             if (cancelPartialRow && partialRecord) {
                 sender.cancelRow();
             }
-            throw ex;
-        } catch (LineSenderException ex) {
-            if (cancelPartialRow && partialRecord) {
-                sender.cancelRow();
-            }
-            if (wrapSenderErrors) {
+            if (ex instanceof LineSenderException && wrapSenderErrors) {
                 throw new InvalidDataException("object contains invalid data", ex);
             }
             throw ex;

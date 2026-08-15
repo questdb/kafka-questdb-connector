@@ -268,6 +268,48 @@ class RawJsonEquivalenceTest {
                 callsForRaw(props, "{\"schema\":{\"v\":1},\"px\":1.5}"));
     }
 
+    /**
+     * An adversarial review found the fast path only honoured the designated timestamp for
+     * string and integer values. A null, fractional, boolean or structured value was written
+     * as an ordinary column and the row silently received wall-clock time instead of going
+     * to the DLQ - the worst kind of defect for this feature.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"ts\":null,\"px\":1.5}",
+            "{\"ts\":1.7e18,\"px\":1.5}",
+            "{\"ts\":true,\"px\":1.5}",
+            "{\"ts\":{\"a\":1},\"px\":1.5}",
+            "{\"ts\":[1.0,2.0],\"px\":1.5}",
+    })
+    void aDesignatedTimestampThatIsNotAStringOrIntegerIsRejected(String json) {
+        Map<String, String> props = baseProps();
+        props.put("timestamp.field.name", "ts");
+        props.put("timestamp.units", "nanos");
+        assertEquals(failureOf(() -> callsForConverted(props, json)), failureOf(() -> callsForRaw(props, json)),
+                "both paths must reject a timestamp value they cannot interpret");
+        assertThrows(InvalidDataException.class, () -> callsForRaw(props, json));
+    }
+
+    @Test
+    void aValidDesignatedTimestampStillWorks() {
+        Map<String, String> props = baseProps();
+        props.put("timestamp.field.name", "ts");
+        props.put("timestamp.units", "nanos");
+        List<String> raw = callsForRaw(props, "{\"ts\":1700000000000000000,\"px\":1.5}");
+        assertEquals(List.of("table(tab)", "doubleColumn(px,1.5)", "at(1700000000000000)"), raw);
+    }
+
+    @Test
+    void oversizedIntegersInsideArraysDoNotLoseTheRecord() {
+        Map<String, String> props = baseProps();
+        // the scalar path already fell back to double; inside an array it threw and the
+        // record was lost to the DLQ
+        List<String> raw = callsForRaw(props, "{\"arr\":[1,99999999999999999999]}");
+        assertEquals(3, raw.size(), raw.toString());
+        assertTrue(raw.get(1).startsWith("doubleArray(arr"), raw.toString());
+    }
+
     @Test
     void emptyPayloadIsRejectedRatherThanSilentlyDropped() {
         Map<String, String> props = baseProps();
@@ -319,6 +361,24 @@ class RawJsonEquivalenceTest {
                 "the previous row's timestamp must not carry over");
     }
 
+    /** The same leak existed on the standard path and is only visible with assertions off. */
+    @Test
+    void standardPathAlsoDoesNotLeakTheTimestampAfterAFailedRow() {
+        Map<String, String> props = baseProps();
+        props.put("timestamp.field.name", "ts");
+        props.put("timestamp.units", "nanos");
+        Recorder recorder = new Recorder();
+        RecordToRowHandler handler = handler(props, recorder, false);
+
+        assertThrows(InvalidDataException.class, () -> handler.handle(new SinkRecord("tab", 0, null, "k", null,
+                JsonTestUtils.toConnectValue("{\"ts\":1700000000000000000,\"bad\":[{\"o\":1}]}"), 0L)));
+        recorder.calls.clear();
+        handler.handle(new SinkRecord("tab", 0, null, "k", null,
+                JsonTestUtils.toConnectValue("{\"px\":2.5}"), 0L));
+        assertEquals(List.of("table(tab)", "doubleColumn(px,2.5)", "atNow()"), recorder.calls,
+                "the failed record's timestamp must not carry over");
+    }
+
     @Test
     void wrongConverterIsReportedClearly() {
         Map<String, String> props = baseProps();
@@ -368,6 +428,16 @@ class RawJsonEquivalenceTest {
         return new SinkRecord("tab", 0, null, "k", null, json.getBytes(StandardCharsets.UTF_8), 0L);
     }
 
+    private static String deepToString(Object array) {
+        if (array instanceof double[]) {
+            return java.util.Arrays.toString((double[]) array);
+        }
+        if (array instanceof long[]) {
+            return java.util.Arrays.toString((long[]) array);
+        }
+        return java.util.Arrays.deepToString((Object[]) array);
+    }
+
     static final class Recorder {
         final List<String> calls = new ArrayList<>();
 
@@ -394,6 +464,11 @@ class RawJsonEquivalenceTest {
                                 return proxy;
                             case "timestampColumn":
                                 calls.add("timestampColumn(" + args[0] + "," + args[1] + ")");
+                                return proxy;
+                            case "doubleArray":
+                            case "longArray":
+                                // recorded so array equivalence is actually compared
+                                calls.add(method.getName() + "(" + args[0] + "," + deepToString(args[1]) + ")");
                                 return proxy;
                             default:
                                 return method.getReturnType() == Sender.class ? proxy : null;
