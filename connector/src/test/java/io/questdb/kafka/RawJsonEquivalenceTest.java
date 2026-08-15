@@ -158,6 +158,50 @@ class RawJsonEquivalenceTest {
                 callsForRaw(props, "{\"a\":1,\"a\":2}"), "raw path writes both; QuestDB keeps the first");
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"a\":{}}",                                   // empty nested object -> no columns
+            "{\"a\":{\"vec\":[1.0,2.0]}}",                    // array nested in an object
+            "{\"a\":{\"mat\":[[1.0,2.0],[3.0,4.0]]}}",        // 2D array nested in an object
+            "{\"a\":{\"b\":1},\"a_b\":2}",                   // flattened name collides with a real field
+            "{\"outer\":{\"inner\":{\"deep\":\"s\"}},\"top\":1}",
+            "{\"a\":{\"b\":null},\"c\":1}",                  // null inside a nested object
+    })
+    void nestedStructuresMatchTheConvertedPath(String json) {
+        Map<String, String> props = baseProps();
+        assertSameRow(callsForConverted(props, json), callsForRaw(props, json));
+    }
+
+    @Test
+    void nestedFieldsHonourSymbolsAndDoublesByFlattenedName() {
+        Map<String, String> props = baseProps();
+        props.put("symbols", "meta_region");
+        props.put("doubles", "meta_count");
+        String json = "{\"meta\":{\"region\":\"eu\",\"count\":7},\"px\":1.5}";
+        assertSameRow(callsForConverted(props, json), callsForRaw(props, json));
+    }
+
+    @Test
+    void nestedDesignatedTimestampIsMatchedByFlattenedName() {
+        Map<String, String> props = baseProps();
+        props.put("timestamp.field.name", "meta_ts");
+        props.put("timestamp.units", "nanos");
+        String json = "{\"meta\":{\"ts\":1700000000000000000},\"px\":1.5}";
+        List<String> converted = callsForConverted(props, json);
+        List<String> raw = callsForRaw(props, json);
+        assertSameRow(converted, raw);
+        assertTrue(raw.get(raw.size() - 1).startsWith("at("),
+                "the nested field must be used as the designated timestamp: " + raw);
+    }
+
+    @Test
+    void nestedValuesAlsoGetTheValuePrefix() {
+        Map<String, String> props = baseProps();
+        props.put("value.prefix", "v");
+        assertSameRow(callsForConverted(props, "{\"a\":{\"b\":1}}"),
+                callsForRaw(props, "{\"a\":{\"b\":1}}"));
+    }
+
     @Test
     void objectsInsideArraysAreRejected() {
         Map<String, String> props = baseProps();
