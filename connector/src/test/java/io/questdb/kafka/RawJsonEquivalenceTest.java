@@ -202,11 +202,33 @@ class RawJsonEquivalenceTest {
                 callsForRaw(props, "{\"a\":{\"b\":1}}"));
     }
 
-    @Test
-    void objectsInsideArraysAreRejected() {
+    @ParameterizedTest
+    @ValueSource(strings = {"false", "true"})
+    void objectsInsideArraysFollowSkipUnsupportedTypes(String skip) {
         Map<String, String> props = baseProps();
-        RecordToRowHandler handler = handler(props, new Recorder(), true);
-        assertThrows(InvalidDataException.class, () -> handler.handle(record("{\"arr\":[{\"a\":1}]}")));
+        props.put("skip.unsupported.types", skip);
+        String json = "{\"arr\":[{\"a\":1}],\"px\":1.5}";
+        Class<? extends Throwable> convertedFailure = failureOf(() -> callsForConverted(props, json));
+        Class<? extends Throwable> rawFailure = failureOf(() -> callsForRaw(props, json));
+        assertEquals(convertedFailure, rawFailure, "skip.unsupported.types must decide on both paths");
+        if (convertedFailure == null) {
+            assertSameRow(callsForConverted(props, json), callsForRaw(props, json));
+        }
+    }
+
+    /**
+     * Deliberate difference: an integer beyond Long.MAX_VALUE silently overflows on the
+     * converted path (JsonConverter yields a wrapped long), while the fast path keeps the
+     * magnitude as a double.
+     */
+    @Test
+    void oversizedIntegersDoNotOverflowOnTheFastPath() {
+        Map<String, String> props = baseProps();
+        String json = "{\"big\":123456789012345678901234567890}";
+        assertEquals(List.of("table(tab)", "longColumn(big,-4362896299872285998)", "atNow()"),
+                callsForConverted(props, json), "converted path overflows");
+        assertEquals(List.of("table(tab)", "doubleColumn(big,1.2345678901234568E29)", "atNow()"),
+                callsForRaw(props, json), "fast path keeps the magnitude");
     }
 
     @Test

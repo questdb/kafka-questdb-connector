@@ -257,7 +257,12 @@ final class RecordToRowHandler {
                     list.add(readJsonList(parser));
                     break;
                 case START_OBJECT:
-                    throw new InvalidDataException("Objects inside arrays are not supported");
+                    // Objects are not valid array elements, but the decision to skip or fail
+                    // belongs to skip.unsupported.types. Hand a map to the shared array code
+                    // so it applies exactly the same rule as the converted path.
+                    parser.skipChildren();
+                    list.add(new java.util.HashMap<>());
+                    break;
                 case VALUE_NULL:
                     list.add(null);
                     break;

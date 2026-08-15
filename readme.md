@@ -69,7 +69,7 @@ and element-type rules as the standard path. A differential test feeds a
 payload corpus through both paths and asserts they emit the same columns and
 values, and reject the same payloads.
 
-Limitations:
+Limitations and differences:
 
 - Transformations that inspect or modify the payload cannot be used: with
   `ByteArrayConverter` an SMT sees opaque bytes. Topic-level SMTs such as
@@ -81,6 +81,13 @@ Limitations:
   is documented rather than prevented.
 - Composed timestamps (multiple `timestamp.string.fields`) are not supported
   and are rejected at startup.
+- Only the value is parsed by the connector. The key still goes through the
+  key converter, and only JSON is supported (`value.format=json`).
+- Objects nested inside arrays are not valid array elements, exactly as on the
+  standard path: they fail, or are skipped with `skip.unsupported.types=true`.
+- Integers larger than `Long.MAX_VALUE` are written as doubles. The standard
+  path silently overflows them into a wrapped negative long, so the two paths
+  differ here on purpose.
 - Column order follows the JSON document rather than the converter's map
   iteration order, which changes the column order of auto-created tables.
 
