@@ -164,6 +164,56 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testRawJsonFormat(ConnectTestUtils.Transport transport) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
+        // value.format=json parses the payload itself, so the converter must hand it the raw bytes
+        props.put("value.converter", "org.apache.kafka.connect.converters.ByteArrayConverter");
+        props.put(QuestDBSinkConnectorConfig.VALUE_FORMAT_CONFIG, "json");
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "sym");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "ts");
+        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_UNITS_CONFIG, "nanos");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        connect.kafka().produce(topicName, "k1",
+                "{\"sym\":\"abc\",\"px\":1.5,\"seq\":42,\"nested\":{\"inner\":7},\"ts\":1700000000000000000}");
+        connect.kafka().produce(topicName, "k2",
+                "{\"sym\":\"xyz\",\"px\":2.5,\"seq\":43,\"nested\":{\"inner\":8},\"ts\":1700000001000000000}");
+
+        QuestDBUtils.assertSqlEventually("\"sym\",\"px\",\"seq\",\"nested_inner\"\r\n"
+                        + "\"abc\",1.5,42,7\r\n"
+                        + "\"xyz\",2.5,43,8\r\n",
+                "select sym, px, seq, nested_inner from " + topicName + " order by timestamp",
+                httpPort);
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testRawJsonFormat_malformedPayloadGoesToDlq(ConnectTestUtils.Transport transport) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
+        props.put("value.converter", "org.apache.kafka.connect.converters.ByteArrayConverter");
+        props.put(QuestDBSinkConnectorConfig.VALUE_FORMAT_CONFIG, "json");
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put("errors.deadletterqueue.topic.name", "dlq");
+        props.put("errors.deadletterqueue.topic.replication.factor", "1");
+        props.put("errors.tolerance", "all");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        connect.kafka().produce(topicName, "bad", "{\"broken\":");
+        connect.kafka().produce(topicName, "good", "{\"px\":9.5}");
+
+        QuestDBUtils.assertSqlEventually("\"px\"\r\n9.5\r\n",
+                "select px from " + topicName, httpPort);
+        ConsumerRecords<byte[], byte[]> fetched = connect.kafka().consume(1, 60_000, "dlq");
+        Assertions.assertEquals(1, fetched.count(), "malformed payload should land in the DLQ");
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testSmoke(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);

@@ -91,6 +91,9 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
             "This can be useful to avoid additional database load when errors are expected to affect multiple records. " +
             "Default is false (try one-by-one).";
 
+    public static final String VALUE_FORMAT_CONFIG = "value.format";
+    private static final String VALUE_FORMAT_DOC = "Payload format the connector parses itself. 'connect' (default) uses the value produced by the Connect converter. 'json' expects raw JSON bytes (set value.converter=org.apache.kafka.connect.converters.ByteArrayConverter) and parses them directly into rows, skipping the converter's intermediate objects.";
+
     public static final String QWP_PROGRESS_TIMEOUT_MS_CONFIG = "progress.timeout.ms";
     private static final String QWP_PROGRESS_TIMEOUT_MS_DOC = "Maximum time in milliseconds that QWP data may remain pending without the acknowledged frame sequence advancing before the task fails.";
 
@@ -143,6 +146,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(CONFIGURATION_STRING_CONFIG, Type.PASSWORD, null, Importance.HIGH, CONFIGURATION_STRING_DOC)
                 .define(ALLOWED_LAG_CONFIG, Type.INT, 1000, ConfigDef.Range.between(1, Integer.MAX_VALUE), Importance.LOW, ALLOWED_LAG_DOC)
                 .define(DLQ_SEND_BATCH_ON_ERROR_CONFIG, Type.BOOLEAN, false, Importance.LOW, DLQ_SEND_BATCH_ON_ERROR_DOC)
+                .define(VALUE_FORMAT_CONFIG, Type.STRING, "connect", ConfigDef.ValidString.in("connect", "json"), Importance.MEDIUM, VALUE_FORMAT_DOC)
                 .define(QWP_PROGRESS_TIMEOUT_MS_CONFIG, Type.LONG, 300_000L, ConfigDef.Range.atLeast(1L), Importance.MEDIUM, QWP_PROGRESS_TIMEOUT_MS_DOC)
                 .define(QWP_MAX_INFLIGHT_ROWS_CONFIG, Type.INT, 150_000, ConfigDef.Range.atLeast(1), Importance.MEDIUM, QWP_MAX_INFLIGHT_ROWS_DOC)
                 .define(QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG, Type.LONG, 500L, ConfigDef.Range.atLeast(0L), Importance.LOW, QWP_COMMIT_ACK_TIMEOUT_MS_DOC)
@@ -251,6 +255,10 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public boolean isDlqSendBatchOnError() {
         return getBoolean(DLQ_SEND_BATCH_ON_ERROR_CONFIG);
+    }
+
+    public boolean isRawJsonFormat() {
+        return "json".equals(getString(VALUE_FORMAT_CONFIG));
     }
 
     public long getQwpProgressTimeoutMs() {

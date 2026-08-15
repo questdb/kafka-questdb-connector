@@ -42,6 +42,43 @@ instead. Mapping errors represented as `InvalidDataException` remain
 record-DLQ eligible, and typed `LineSenderServerException` rejections continue
 through the terminal-category policy above.
 
+## Raw JSON fast path (experimental)
+
+Kafka Connect converts every record before the connector sees it, and for JSON
+that costs two throwaway object graphs per record: `JsonConverter` builds a
+Jackson tree and then converts it into a map of boxed values. In profiling of
+this connector the converter accounted for ~58% of the sink task's CPU and
+~84% of everything it allocated.
+
+`value.format=json` skips that. Hand the connector the raw bytes and it parses
+them once, straight into rows:
+
+```properties
+value.converter=org.apache.kafka.connect.converters.ByteArrayConverter
+value.format=json
+```
+
+Measured on a single task with 5M records, interleaved A/B against the same
+pipeline using `JsonConverter`: 709k -> 1,048k rows/s, or **+48%**.
+
+The fast path honours `table`, `symbols`, `doubles`, `timestamp.field.name`,
+`timestamp.units`, `timestamp.string.fields`, `include.key`, `key.prefix`,
+`value.prefix` and `skip.unsupported.types`, and flattens nested objects with
+`_` exactly as the standard path does. A test asserts both paths emit the same
+columns and values for the same payload.
+
+Limitations:
+
+- Transformations that inspect or modify the payload cannot be used: with
+  `ByteArrayConverter` an SMT sees opaque bytes. Topic-level SMTs such as
+  `RegexRouter` are unaffected.
+- JSON arrays are rejected (they go to the DLQ, or are skipped when
+  `skip.unsupported.types=true`).
+- Composed timestamps (multiple `timestamp.string.fields`) are not supported
+  and are rejected at startup.
+- Column order follows the JSON document rather than the converter's map
+  iteration order, which changes the column order of auto-created tables.
+
 ## Sample Projects
 This repository contains a number of [sample projects.](kafka-questdb-connector-samples) showing how to use the connector. It also demonstrates how to use the connector together with Debezium for Change Data Capture.
 

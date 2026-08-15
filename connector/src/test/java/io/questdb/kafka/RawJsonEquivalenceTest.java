@@ -1,0 +1,236 @@
+package io.questdb.kafka;
+
+import io.questdb.client.Sender;
+import org.apache.kafka.connect.sink.SinkRecord;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import java.util.Collections;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * value.format=json parses the payload itself instead of consuming what the Connect
+ * converter produced, which means the mapping rules exist in two places. These tests
+ * pin the two implementations together: the same payload must produce the same
+ * sequence of Sender calls whether it arrives as raw bytes or as a converted Map.
+ */
+class RawJsonEquivalenceTest {
+
+    private static void assertSameRow(List<String> expected, List<String> actual) {
+        assertEquals(expected.get(0), actual.get(0), "row must start with table()");
+        assertEquals(expected.get(expected.size() - 1), actual.get(actual.size() - 1), "row must end the same way");
+        List<String> expectedCols = new ArrayList<>(expected.subList(1, expected.size() - 1));
+        List<String> actualCols = new ArrayList<>(actual.subList(1, actual.size() - 1));
+        Collections.sort(expectedCols);
+        Collections.sort(actualCols);
+        // field order differs by design (HashMap iteration vs JSON document order)
+        assertEquals(expectedCols, actualCols, "same columns with the same values");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"sym\":\"abc\",\"px\":1.5,\"seq\":42,\"flag\":true}",
+            "{\"sym\":\"abc\",\"nested\":{\"a\":1,\"b\":\"x\"}}",
+            "{\"only_string\":\"v\"}",
+            "{\"neg\":-17,\"zero\":0,\"frac\":-0.25}",
+            "{\"nullable\":null,\"kept\":7}",
+            "{\"dotted.name\":3}",
+            "{\"unicode\":\"héllo\",\"empty\":\"\"}",
+    })
+    void rawJsonMatchesConvertedMap(String json) {
+        Map<String, String> props = baseProps();
+        assertSameRow(callsForConverted(props, json), callsForRaw(props, json));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"sym\":\"abc\",\"num\":5,\"px\":1.5}",
+            "{\"sym\":\"abc\",\"nested\":{\"num\":9}}",
+    })
+    void rawJsonMatchesWithSymbolsAndDoubles(String json) {
+        Map<String, String> props = baseProps();
+        props.put("symbols", "sym,num");
+        props.put("doubles", "px");
+        assertSameRow(callsForConverted(props, json), callsForRaw(props, json));
+    }
+
+    @Test
+    void rawJsonMatchesWithDesignatedTimestampAndPrefix() {
+        Map<String, String> props = baseProps();
+        props.put("timestamp.field.name", "ts");
+        props.put("timestamp.units", "nanos");
+        props.put("value.prefix", "v");
+        String json = "{\"sym\":\"abc\",\"px\":1.5,\"ts\":1700000000000000000}";
+        assertSameRow(callsForConverted(props, json), callsForRaw(props, json));
+    }
+
+    @Test
+    void rawJsonMatchesWithIncludedKey() {
+        Map<String, String> props = baseProps();
+        props.put("include.key", "true");
+        props.put("key.prefix", "k");
+        String json = "{\"px\":1.5}";
+        assertSameRow(callsForConverted(props, json), callsForRaw(props, json));
+    }
+
+    @Test
+    void tombstonesAreIgnoredOnBothPaths() {
+        Map<String, String> props = baseProps();
+        Recorder raw = new Recorder();
+        RecordToRowHandler rawHandler = handler(props, raw, true);
+        SinkRecord tombstone = new SinkRecord("tab", 0, null, "k", null, null, 0L);
+        assertEquals(false, rawHandler.handle(tombstone));
+        assertTrue(raw.calls.isEmpty());
+    }
+
+    @Test
+    void malformedJsonIsInvalidDataAndCancelsTheRow() {
+        Map<String, String> props = baseProps();
+        Recorder recorder = new Recorder();
+        RecordToRowHandler handler = handler(props, recorder, true);
+        SinkRecord record = new SinkRecord("tab", 0, null, "k", null,
+                "{\"broken\":".getBytes(StandardCharsets.UTF_8), 0L);
+
+        assertThrows(InvalidDataException.class, () -> handler.handle(record));
+        assertTrue(recorder.calls.contains("cancelRow()"), "a half-written row must be cancelled: " + recorder.calls);
+    }
+
+    @Test
+    void jsonArraysAreRejectedUnlessSkipped() {
+        Map<String, String> props = baseProps();
+        Recorder recorder = new Recorder();
+        RecordToRowHandler handler = handler(props, recorder, true);
+        SinkRecord record = record("{\"arr\":[1,2,3]}");
+        assertThrows(InvalidDataException.class, () -> handler.handle(record));
+
+        props.put("skip.unsupported.types", "true");
+        Recorder skipping = new Recorder();
+        RecordToRowHandler skipHandler = handler(props, skipping, true);
+        skipHandler.handle(record(("{\"arr\":[1,2,3],\"px\":1.5}")));
+        assertEquals(List.of("table(tab)", "doubleColumn(px,1.5)", "atNow()"), skipping.calls);
+    }
+
+    /** A failed row must not leak its timestamp into the next record. */
+    @Test
+    void timestampStateDoesNotLeakAfterAFailedRow() {
+        Map<String, String> props = baseProps();
+        props.put("timestamp.field.name", "ts");
+        props.put("timestamp.units", "nanos");
+        Recorder recorder = new Recorder();
+        RecordToRowHandler handler = handler(props, recorder, true);
+
+        assertThrows(InvalidDataException.class,
+                () -> handler.handle(record("{\"ts\":1700000000000000000,\"arr\":[1]}")));
+        recorder.calls.clear();
+        handler.handle(record("{\"px\":2.5}"));
+        assertEquals(List.of("table(tab)", "doubleColumn(px,2.5)", "atNow()"), recorder.calls,
+                "the previous row's timestamp must not carry over");
+    }
+
+    @Test
+    void wrongConverterIsReportedClearly() {
+        Map<String, String> props = baseProps();
+        RecordToRowHandler handler = handler(props, new Recorder(), true);
+        SinkRecord stringValue = new SinkRecord("tab", 0, null, "k", null, "not-bytes", 0L);
+        InvalidDataException e = assertThrows(InvalidDataException.class, () -> handler.handle(stringValue));
+        assertTrue(String.valueOf(e.getMessage()).contains("ByteArrayConverter"), e.getMessage());
+    }
+
+    // ---- helpers ----
+
+    private static Map<String, String> baseProps() {
+        Map<String, String> props = new HashMap<>();
+        props.put("client.conf.string", "ws::addr=localhost:9000;");
+        props.put("topics", "tab");
+        props.put("table", "tab");
+        props.put("include.key", "false");
+        return props;
+    }
+
+    private static List<String> callsForRaw(Map<String, String> props, String json) {
+        Recorder recorder = new Recorder();
+        Map<String, String> rawProps = new HashMap<>(props);
+        rawProps.put("value.format", "json");
+        handler(rawProps, recorder, true).handle(record(json));
+        return recorder.calls;
+    }
+
+    private static List<String> callsForConverted(Map<String, String> props, String json) {
+        Recorder recorder = new Recorder();
+        Object converted = JsonTestUtils.toConnectValue(json);
+        SinkRecord record = new SinkRecord("tab", 0, null, "k", null, converted, 0L);
+        handler(props, recorder, false).handle(record);
+        return recorder.calls;
+    }
+
+    private static RecordToRowHandler handler(Map<String, String> props, Recorder recorder, boolean rawJson) {
+        Map<String, String> effective = new HashMap<>(props);
+        if (rawJson) {
+            effective.put("value.format", "json");
+        }
+        QuestDBSinkConnectorConfig config = new QuestDBSinkConnectorConfig(effective);
+        return new RecordToRowHandler(config, recorder.proxy(), true, false, true);
+    }
+
+    private static SinkRecord record(String json) {
+        return new SinkRecord("tab", 0, null, "k", null, json.getBytes(StandardCharsets.UTF_8), 0L);
+    }
+
+    static final class Recorder {
+        final List<String> calls = new ArrayList<>();
+
+        Sender proxy() {
+            return (Sender) Proxy.newProxyInstance(
+                    Sender.class.getClassLoader(),
+                    new Class<?>[]{Sender.class},
+                    (proxy, method, args) -> {
+                        switch (method.getName()) {
+                            case "table":
+                            case "cancelRow":
+                            case "atNow":
+                                calls.add(method.getName() + "(" + (args == null ? "" : args[0]) + ")");
+                                return method.getReturnType() == Sender.class ? proxy : null;
+                            case "at":
+                                calls.add("at(" + args[0] + ")");
+                                return null;
+                            case "symbol":
+                            case "stringColumn":
+                            case "doubleColumn":
+                            case "longColumn":
+                            case "boolColumn":
+                                calls.add(method.getName() + "(" + args[0] + "," + args[1] + ")");
+                                return proxy;
+                            case "timestampColumn":
+                                calls.add("timestampColumn(" + args[0] + "," + args[1] + ")");
+                                return proxy;
+                            default:
+                                return method.getReturnType() == Sender.class ? proxy : null;
+                        }
+                    });
+        }
+    }
+
+    /** Converts JSON the way Connect's JsonConverter would, so both paths see the same input. */
+    static final class JsonTestUtils {
+        static Object toConnectValue(String json) {
+            org.apache.kafka.connect.json.JsonConverter converter = new org.apache.kafka.connect.json.JsonConverter();
+            Map<String, Object> cfg = new LinkedHashMap<>();
+            cfg.put("converter.type", "value");
+            cfg.put("schemas.enable", "false");
+            converter.configure(cfg);
+            return converter.toConnectData("tab", json.getBytes(StandardCharsets.UTF_8)).value();
+        }
+    }
+}

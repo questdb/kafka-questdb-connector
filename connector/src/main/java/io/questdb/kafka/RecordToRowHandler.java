@@ -26,6 +26,7 @@ final class RecordToRowHandler {
     private final QuestDBSinkConnectorConfig config;
     private final boolean cancelPartialRow;
     private final boolean wrapSenderErrors;
+    private final boolean rawJson;
     private final Function<SinkRecord, ? extends CharSequence> recordToTable;
     private final String timestampColumnName;
     private final TimeUnit timestampUnits;
@@ -41,6 +42,7 @@ final class RecordToRowHandler {
     private final String[] composedTimestampValues;
     private final MultiPartCharSequence composedBuffer;
     private long timestampColumnValue = Long.MIN_VALUE;
+    private static final com.fasterxml.jackson.core.JsonFactory JSON_FACTORY = new com.fasterxml.jackson.core.JsonFactory();
     private Sender sender;
 
     RecordToRowHandler(QuestDBSinkConnectorConfig config, Sender sender, boolean cancelPartialRow, boolean wrapSenderErrors) {
@@ -53,6 +55,7 @@ final class RecordToRowHandler {
         this.sender = sender;
         this.cancelPartialRow = cancelPartialRow;
         this.wrapSenderErrors = wrapSenderErrors;
+        this.rawJson = config.isRawJsonFormat();
 
         String symbolColumnsConfig = routeSymbolsDirectly ? config.getSymbolColumns() : null;
         if (symbolColumnsConfig == null) {
@@ -111,6 +114,181 @@ final class RecordToRowHandler {
             composedTimestampValues = null;
             composedBuffer = null;
         }
+        if (rawJson && composedTimestampFields != null) {
+            throw new ConnectException("value.format=json does not support composed timestamps ("
+                    + QuestDBSinkConnectorConfig.TIMESTAMP_STRING_FIELDS + " with multiple fields)");
+        }
+    }
+
+    /**
+     * Fast path for raw JSON payloads (value.converter=ByteArrayConverter): the bytes are
+     * parsed once, directly into Sender calls. The standard path costs two object graphs
+     * per record - JsonConverter builds a JsonNode tree and then converts it into a Map of
+     * boxed values - and both are garbage immediately.
+     */
+    boolean handleRawJson(SinkRecord record, byte[] payload) {
+        assert timestampColumnValue == Long.MIN_VALUE;
+        if (payload == null || payload.length == 0) {
+            return false;
+        }
+        CharSequence tableName = recordToTable.apply(record);
+        if (tableName == null || tableName.length() == 0) {
+            throw new InvalidDataException("Table name cannot be empty");
+        }
+        boolean partialRecord = false;
+        try {
+            sender.table(tableName);
+            partialRecord = true;
+            if (config.isIncludeKey()) {
+                writeRawKey(record);
+            }
+            try (com.fasterxml.jackson.core.JsonParser parser = JSON_FACTORY.createParser(payload)) {
+                if (parser.nextToken() != com.fasterxml.jackson.core.JsonToken.START_OBJECT) {
+                    throw new InvalidDataException("JSON payload must be an object");
+                }
+                writeJsonObject(parser, config.getValuePrefix());
+            } catch (java.io.IOException e) {
+                throw new InvalidDataException("Cannot parse JSON payload", e);
+            }
+        } catch (InvalidDataException | LineSenderException ex) {
+            // a half-written row must not leak its timestamp into the next record
+            timestampColumnValue = Long.MIN_VALUE;
+            if (cancelPartialRow && partialRecord) {
+                sender.cancelRow();
+            }
+            if (ex instanceof LineSenderException && wrapSenderErrors) {
+                throw new InvalidDataException("object contains invalid data", ex);
+            }
+            throw ex;
+        }
+
+        if (kafkaTimestampsEnabled) {
+            timestampColumnValue = TimeUnit.MILLISECONDS.toMicros(record.timestamp());
+        }
+        if (timestampColumnValue == Long.MIN_VALUE) {
+            sender.atNow();
+        } else {
+            try {
+                sender.at(timestampColumnValue, ChronoUnit.MICROS);
+            } finally {
+                timestampColumnValue = Long.MIN_VALUE;
+            }
+        }
+        return true;
+    }
+
+    private void writeRawKey(SinkRecord record) {
+        Object key = record.key();
+        if (key == null) {
+            return;
+        }
+        String name = config.getKeyPrefix();
+        if (name == null || name.isEmpty()) {
+            name = PRIMITIVE_KEY_FALLBACK_NAME;
+        }
+        if (key instanceof CharSequence) {
+            writeJsonString(name, key.toString());
+        } else if (key instanceof Long || key instanceof Integer || key instanceof Short || key instanceof Byte) {
+            writeJsonLong(name, ((Number) key).longValue());
+        } else if (key instanceof Double || key instanceof Float) {
+            writeJsonDouble(name, ((Number) key).doubleValue());
+        } else if (key instanceof Boolean) {
+            writeJsonBool(name, (Boolean) key);
+        } else if (!config.isSkipUnsupportedTypes()) {
+            throw new InvalidDataException("Unsupported key type on the raw JSON path: " + key.getClass().getName());
+        }
+    }
+
+    private void writeJsonObject(com.fasterxml.jackson.core.JsonParser parser, String prefix) throws java.io.IOException {
+        while (parser.nextToken() != com.fasterxml.jackson.core.JsonToken.END_OBJECT) {
+            String rawName = parser.currentName();
+            String name = prefix.isEmpty() ? rawName : prefix + STRUCT_FIELD_SEPARATOR + rawName;
+            com.fasterxml.jackson.core.JsonToken token = parser.nextToken();
+            switch (token) {
+                case VALUE_NULL:
+                    break;
+                case START_OBJECT:
+                    writeJsonObject(parser, name);
+                    break;
+                case START_ARRAY:
+                    if (config.isSkipUnsupportedTypes()) {
+                        parser.skipChildren();
+                        break;
+                    }
+                    throw new InvalidDataException("JSON arrays are not supported with value.format=json, field: " + name);
+                case VALUE_STRING:
+                    writeJsonString(name, parser.getText());
+                    break;
+                case VALUE_NUMBER_INT:
+                    if (parser.getNumberType() == com.fasterxml.jackson.core.JsonParser.NumberType.BIG_INTEGER) {
+                        writeJsonDouble(name, parser.getDoubleValue());
+                    } else {
+                        writeJsonLong(name, parser.getLongValue());
+                    }
+                    break;
+                case VALUE_NUMBER_FLOAT:
+                    writeJsonDouble(name, parser.getDoubleValue());
+                    break;
+                case VALUE_TRUE:
+                case VALUE_FALSE:
+                    writeJsonBool(name, parser.getBooleanValue());
+                    break;
+                default:
+                    throw new InvalidDataException("Unsupported JSON token " + token + " for field " + name);
+            }
+        }
+    }
+
+    private boolean isDesignatedRawField(String name) {
+        return timestampColumnName != null && timestampColumnName.equals(name);
+    }
+
+    private void writeJsonString(String name, String value) {
+        if (isDesignatedRawField(name)) {
+            timestampColumnValue = parseToMicros(value);
+            return;
+        }
+        String actualName = sanitizeName(name);
+        if (symbolColumns.contains(actualName)) {
+            sender.symbol(actualName, value);
+        } else if (stringTimestampColumns.contains(actualName)) {
+            sender.timestampColumn(actualName, parseToMicros(value), ChronoUnit.MICROS);
+        } else {
+            sender.stringColumn(actualName, value);
+        }
+    }
+
+    private void writeJsonLong(String name, long value) {
+        if (isDesignatedRawField(name)) {
+            timestampColumnValue = TimestampHelper.getTimestampUnits(timestampUnits, value).toMicros(value);
+            return;
+        }
+        String actualName = sanitizeName(name);
+        if (symbolColumns.contains(actualName)) {
+            sender.symbol(actualName, String.valueOf(value));
+        } else if (doubleColumns.contains(actualName)) {
+            sender.doubleColumn(actualName, (double) value);
+        } else {
+            sender.longColumn(actualName, value);
+        }
+    }
+
+    private void writeJsonDouble(String name, double value) {
+        String actualName = sanitizeName(name);
+        if (symbolColumns.contains(actualName)) {
+            sender.symbol(actualName, String.valueOf(value));
+        } else {
+            sender.doubleColumn(actualName, value);
+        }
+    }
+
+    private void writeJsonBool(String name, boolean value) {
+        String actualName = sanitizeName(name);
+        if (symbolColumns.contains(actualName)) {
+            sender.symbol(actualName, String.valueOf(value));
+        } else {
+            sender.boolColumn(actualName, value);
+        }
     }
 
     void setSender(Sender sender) {
@@ -118,6 +296,17 @@ final class RecordToRowHandler {
     }
 
     boolean handle(SinkRecord record) {
+        if (rawJson) {
+            Object value = record.value();
+            if (value == null) {
+                return false; // tombstone
+            }
+            if (!(value instanceof byte[])) {
+                throw new InvalidDataException("value.format=json requires value.converter="
+                        + "org.apache.kafka.connect.converters.ByteArrayConverter, got " + value.getClass().getName());
+            }
+            return handleRawJson(record, (byte[]) value);
+        }
         assert timestampColumnValue == Long.MIN_VALUE;
 
         // Clear composed timestamp values from any previous failed record
