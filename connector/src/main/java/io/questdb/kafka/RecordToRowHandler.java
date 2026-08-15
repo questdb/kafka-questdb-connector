@@ -128,8 +128,11 @@ final class RecordToRowHandler {
      */
     boolean handleRawJson(SinkRecord record, byte[] payload) {
         assert timestampColumnValue == Long.MIN_VALUE;
-        if (payload == null || payload.length == 0) {
-            return false;
+        if (payload == null) {
+            return false; // tombstone
+        }
+        if (payload.length == 0) {
+            throw new InvalidDataException("Empty payload cannot be parsed as JSON");
         }
         CharSequence tableName = recordToTable.apply(record);
         if (tableName == null || tableName.length() == 0) {
@@ -211,11 +214,12 @@ final class RecordToRowHandler {
                     writeJsonObject(parser, name);
                     break;
                 case START_ARRAY:
-                    if (config.isSkipUnsupportedTypes()) {
-                        parser.skipChildren();
-                        break;
-                    }
-                    throw new InvalidDataException("JSON arrays are not supported with value.format=json, field: " + name);
+                    // Arrays are rare, and their validation (jagged rows, null elements,
+                    // element types, skip.unsupported.types) is intricate. Materialise the
+                    // array in the same shape the converter produces and reuse that code
+                    // rather than reimplementing the rules here.
+                    handleArrayWithoutSchema(sanitizeName(name), readJsonList(parser));
+                    break;
                 case VALUE_STRING:
                     writeJsonString(name, parser.getText());
                     break;
@@ -235,6 +239,43 @@ final class RecordToRowHandler {
                     break;
                 default:
                     throw new InvalidDataException("Unsupported JSON token " + token + " for field " + name);
+            }
+        }
+    }
+
+    private java.util.List<Object> readJsonList(com.fasterxml.jackson.core.JsonParser parser) throws java.io.IOException {
+        java.util.List<Object> list = new ArrayList<>();
+        for (;;) {
+            com.fasterxml.jackson.core.JsonToken token = parser.nextToken();
+            if (token == null) {
+                throw new InvalidDataException("Unterminated JSON array");
+            }
+            switch (token) {
+                case END_ARRAY:
+                    return list;
+                case START_ARRAY:
+                    list.add(readJsonList(parser));
+                    break;
+                case START_OBJECT:
+                    throw new InvalidDataException("Objects inside arrays are not supported");
+                case VALUE_NULL:
+                    list.add(null);
+                    break;
+                case VALUE_STRING:
+                    list.add(parser.getText());
+                    break;
+                case VALUE_NUMBER_INT:
+                    list.add(parser.getLongValue());
+                    break;
+                case VALUE_NUMBER_FLOAT:
+                    list.add(parser.getDoubleValue());
+                    break;
+                case VALUE_TRUE:
+                case VALUE_FALSE:
+                    list.add(parser.getBooleanValue());
+                    break;
+                default:
+                    throw new InvalidDataException("Unsupported JSON token in array: " + token);
             }
         }
     }

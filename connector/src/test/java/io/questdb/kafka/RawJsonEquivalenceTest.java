@@ -107,19 +107,96 @@ class RawJsonEquivalenceTest {
         assertTrue(recorder.calls.contains("cancelRow()"), "a half-written row must be cancelled: " + recorder.calls);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"arr\":[1.5,2.5,3.5]}",
+            "{\"arr\":[1,2,3]}",
+            "{\"arr\":[]}",
+            "{\"arr\":[[1.0,2.0],[3.0,4.0]]}",
+            "{\"arr\":[[[1.0],[2.0]],[[3.0],[4.0]]]}",
+            "{\"px\":1.5,\"arr\":[1.0,2.0],\"sym\":\"s\"}",
+    })
+    void rawJsonMatchesForArrays(String json) {
+        Map<String, String> props = baseProps();
+        assertSameRow(callsForConverted(props, json), callsForRaw(props, json));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"arr\":[[1.0,2.0],[3.0]]}",          // jagged
+            "{\"arr\":[1.0,null,3.0]}",             // null element
+            "{\"arr\":[\"a\",\"b\"]}",              // unsupported element type
+    })
+    void rawJsonRejectsTheSameBadArraysAsTheConvertedPath(String json) {
+        Map<String, String> props = baseProps();
+        Class<? extends Throwable> convertedFailure = failureOf(() -> callsForConverted(props, json));
+        Class<? extends Throwable> rawFailure = failureOf(() -> callsForRaw(props, json));
+        assertEquals(convertedFailure, rawFailure, "both paths must reject the same payloads");
+    }
+
+    private static Class<? extends Throwable> failureOf(Runnable r) {
+        try {
+            r.run();
+            return null;
+        } catch (Throwable t) {
+            return t.getClass();
+        }
+    }
+
+    /**
+     * Duplicate field names are the one documented divergence. The converted path sees a
+     * Map, so the last value wins; the fast path streams and writes the column twice, and
+     * QuestDB keeps the first. Detecting this would cost a lookup per field on the hot
+     * path for input RFC 8259 says SHOULD NOT occur, so the behaviour is pinned instead.
+     */
     @Test
-    void jsonArraysAreRejectedUnlessSkipped() {
+    void duplicateFieldNamesDivergeAndAreDocumented() {
+        Map<String, String> props = baseProps();
+        assertEquals(List.of("table(tab)", "longColumn(a,2)", "atNow()"),
+                callsForConverted(props, "{\"a\":1,\"a\":2}"), "converted path: last value wins");
+        assertEquals(List.of("table(tab)", "longColumn(a,1)", "longColumn(a,2)", "atNow()"),
+                callsForRaw(props, "{\"a\":1,\"a\":2}"), "raw path writes both; QuestDB keeps the first");
+    }
+
+    @Test
+    void objectsInsideArraysAreRejected() {
+        Map<String, String> props = baseProps();
+        RecordToRowHandler handler = handler(props, new Recorder(), true);
+        assertThrows(InvalidDataException.class, () -> handler.handle(record("{\"arr\":[{\"a\":1}]}")));
+    }
+
+    @Test
+    void emptyPayloadIsRejectedRatherThanSilentlyDropped() {
         Map<String, String> props = baseProps();
         Recorder recorder = new Recorder();
         RecordToRowHandler handler = handler(props, recorder, true);
-        SinkRecord record = record("{\"arr\":[1,2,3]}");
-        assertThrows(InvalidDataException.class, () -> handler.handle(record));
+        SinkRecord empty = new SinkRecord("tab", 0, null, "k", null, new byte[0], 0L);
+        assertThrows(InvalidDataException.class, () -> handler.handle(empty));
+    }
 
+    @Test
+    void unterminatedArrayIsRejected() {
+        Map<String, String> props = baseProps();
+        RecordToRowHandler handler = handler(props, new Recorder(), true);
+        assertThrows(InvalidDataException.class, () -> handler.handle(record("{\"arr\":[1,2")));
+    }
+
+    @Test
+    void deeplyNestedObjectsAreFlattened() {
+        Map<String, String> props = baseProps();
+        assertSameRow(callsForConverted(props, "{\"a\":{\"b\":{\"c\":{\"d\":1}}}}"),
+                callsForRaw(props, "{\"a\":{\"b\":{\"c\":{\"d\":1}}}}"));
+    }
+
+    @Test
+    void arraysCanStillBeSkipped() {
+        Map<String, String> props = baseProps();
         props.put("skip.unsupported.types", "true");
         Recorder skipping = new Recorder();
         RecordToRowHandler skipHandler = handler(props, skipping, true);
-        skipHandler.handle(record(("{\"arr\":[1,2,3],\"px\":1.5}")));
-        assertEquals(List.of("table(tab)", "doubleColumn(px,1.5)", "atNow()"), skipping.calls);
+        skipHandler.handle(record("{\"arr\":[\"a\"],\"px\":1.5}"));
+        assertEquals(List.of("table(tab)", "doubleColumn(px,1.5)", "atNow()"), skipping.calls,
+                "an unsupported array is skipped, the rest of the row still lands");
     }
 
     /** A failed row must not leak its timestamp into the next record. */
@@ -132,7 +209,7 @@ class RawJsonEquivalenceTest {
         RecordToRowHandler handler = handler(props, recorder, true);
 
         assertThrows(InvalidDataException.class,
-                () -> handler.handle(record("{\"ts\":1700000000000000000,\"arr\":[1]}")));
+                () -> handler.handle(record("{\"ts\":1700000000000000000,\"broken\":")));
         recorder.calls.clear();
         handler.handle(record("{\"px\":2.5}"));
         assertEquals(List.of("table(tab)", "doubleColumn(px,2.5)", "atNow()"), recorder.calls,

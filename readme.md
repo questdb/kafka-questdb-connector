@@ -63,17 +63,22 @@ pipeline using `JsonConverter`: 709k -> 1,048k rows/s, or **+48%**.
 
 The fast path honours `table`, `symbols`, `doubles`, `timestamp.field.name`,
 `timestamp.units`, `timestamp.string.fields`, `include.key`, `key.prefix`,
-`value.prefix` and `skip.unsupported.types`, and flattens nested objects with
-`_` exactly as the standard path does. A test asserts both paths emit the same
-columns and values for the same payload.
+`value.prefix` and `skip.unsupported.types`, flattens nested objects with `_`,
+and supports 1D/2D/3D numeric arrays with the same jagged-array, null-element
+and element-type rules as the standard path. A differential test feeds a
+payload corpus through both paths and asserts they emit the same columns and
+values, and reject the same payloads.
 
 Limitations:
 
 - Transformations that inspect or modify the payload cannot be used: with
   `ByteArrayConverter` an SMT sees opaque bytes. Topic-level SMTs such as
   `RegexRouter` are unaffected.
-- JSON arrays are rejected (they go to the DLQ, or are skipped when
-  `skip.unsupported.types=true`).
+- Duplicate field names in one JSON object are the one behavioural difference:
+  the converter's map keeps the last value, while the fast path writes the
+  column twice and QuestDB keeps the first. JSON names should be unique
+  (RFC 8259), and detecting duplicates would cost a lookup per field, so this
+  is documented rather than prevented.
 - Composed timestamps (multiple `timestamp.string.fields`) are not supported
   and are rejected at startup.
 - Column order follows the JSON document rather than the converter's map
