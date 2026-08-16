@@ -102,10 +102,20 @@ class QwpSinkTask extends SinkTask {
         throwDeferredFailure();
         if (recovery != null) {
             processRecoverySlice();
-            if (!records.isEmpty()) {
-                throw new RetriableException("QWP replay isolation is in progress");
+            if (recovery != null) {
+                if (!records.isEmpty()) {
+                    throw new RetriableException("QWP replay isolation is in progress");
+                }
+                return;
             }
-            return;
+            // Isolation finished inside that slice, so this batch is handled below rather than
+            // refused. Connect holds a refused batch and keeps every partition paused until a
+            // put() returns normally; isolation has just resumed those partitions itself, so
+            // refusing here lets the next poll fetch records while Connect still owns an
+            // undelivered batch. That breaks its `messageBatch.isEmpty() || msgs.isEmpty()`
+            // invariant: with assertions on - which is every surefire run - the AssertionError
+            // kills the task, and with them off convertMessages() appends the new records to
+            // the batch still in hand and delivers the two merged.
         }
         boolean batchAdmitted = false;
         try {
@@ -173,8 +183,12 @@ class QwpSinkTask extends SinkTask {
             return Collections.emptyMap();
         }
         try {
-            probeTerminalError();
             if (recovery == null) {
+                // Probing only makes sense while the sender is ours. A replay owns it, and its
+                // rejections belong to the slice that provoked them: surfacing one here instead
+                // would rebuild the plan from scratch, throwing away a bisection in progress and
+                // making records that already settled eligible for a second write.
+                probeTerminalError();
                 // A commit cycle may be the last thing before a rebalance close(),
                 // whose drain cannot influence the commit (Connect uses this method's
                 // return value after close() runs). Publish buffered rows now and give

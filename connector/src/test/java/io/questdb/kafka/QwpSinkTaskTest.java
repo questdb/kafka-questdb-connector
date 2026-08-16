@@ -439,6 +439,56 @@ class QwpSinkTaskTest {
     }
 
     /**
+     * A commit cycle runs between isolation slices and must leave a running replay alone. The
+     * replay owns the sender, so probing it here surfaces the rejection the next slice is about
+     * to handle - and answering it by rebuilding the plan discards the bisection and re-publishes
+     * rows that already settled. Only two senders are available here, so a restart shows up as
+     * an unexpected sender recreation.
+     */
+    @Test
+    void aCommitDoesNotRestartIsolationThatIsAlreadyRunning() {
+        FakeSender initial = new FakeSender();
+        FakeSender replay = new FakeSender();
+        replay.drainSucceeds = false;
+        TestTask task = startTask(new TestTask(initial, replay), 1);
+        task.put(Collections.singletonList(record(0L, 10L)));
+        initial.terminal = schemaMismatch(0L);
+        task.put(Collections.emptyList());
+
+        replay.terminal = schemaMismatch(0L); // the replay's own rejection, not yet drained
+        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
+        assertEquals(0L, task.preCommit(current).get(SOURCE).offset());
+        assertEquals(1, task.fakeContext.pauseCalls, "the running isolation must not be restarted");
+    }
+
+    /**
+     * Connect holds a batch that put() refused and keeps every partition paused until some
+     * put() returns normally. Isolation lifts that pause itself when it ends, so the batch in
+     * hand has to be accepted in the very same call - refusing it leaves Connect owning an
+     * undelivered batch while the consumer fetches again, which breaks its
+     * `messageBatch.isEmpty() || msgs.isEmpty()` invariant and kills the task.
+     */
+    @Test
+    void theBatchInHandIsAcceptedAsSoonAsIsolationEnds() {
+        FakeSender initial = new FakeSender();
+        FakeSender replay = new FakeSender();
+        replay.drainSucceeds = false;
+        TestTask task = startTask(new TestTask(initial, replay), 1);
+        task.put(Collections.singletonList(record(0L, 10L)));
+        initial.terminal = schemaMismatch(0L);
+
+        task.put(Collections.emptyList());
+        assertEquals(1, task.fakeContext.pauseCalls);
+        assertThrows(RetriableException.class, () -> task.put(Collections.singletonList(record(1L, 11L))),
+                "while isolation owns the sender the batch has to go back to Connect");
+
+        replay.drainSucceeds = true; // the replayed row is acked, so the next slice finishes
+        assertDoesNotThrow(() -> task.put(Collections.singletonList(record(1L, 11L))));
+        assertTrue(replay.flushedValues.contains(11L), "the batch must be written, not refused again");
+        assertEquals(1, task.fakeContext.resumeCalls);
+    }
+
+    /**
      * Bisecting a rejected batch is forward progress: the server answered and the search space
      * halved. Counting only settlements would let progress.timeout.ms kill a task that is doing
      * exactly what isolation asks of it.

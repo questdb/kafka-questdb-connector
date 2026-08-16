@@ -67,6 +67,14 @@
             <artifactId>okhttp</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- Without a binding, slf4j discards every log line the embedded Kafka Connect
+             worker and this connector emit, which makes an integration failure unreadable. -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-reload4j</artifactId>
+            <version>2.0.17</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.awaitility</groupId>
             <artifactId>awaitility</artifactId>

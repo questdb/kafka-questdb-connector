@@ -730,6 +730,51 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         Assertions.assertEquals(badRecord, new String(fetchedRecords.iterator().next().value()));
     }
 
+    /**
+     * The same rejection, but with the burst still arriving while the connector runs. The
+     * records that isolation never saw are the point: Connect holds the batch it could not
+     * deliver and keeps every partition paused until a put() returns normally, so the task has
+     * to hand that batch back the moment the replay ends instead of refusing it again.
+     */
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDeadLetterQueue_rejectionWhileRecordsKeepArriving(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP,
+                "TCP has no server-side row rejection to isolate");
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
+        props.put("value.converter.schemas.enable", "false");
+        props.put("errors.deadletterqueue.topic.name", "dlq");
+        props.put("errors.deadletterqueue.topic.replication.factor", "1");
+        props.put("errors.tolerance", "all");
+        props.put("qwp.isolation.slice.ms", "5");
+
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
+                "create table " + topicName + " (id long, w long, ts timestamp) timestamp(ts) partition by day wal",
+                httpPort,
+                QuestDBUtils.Endpoint.EXEC);
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        int total = 2000;
+        int badIndex = 5;
+        String badRecord = "{\"id\":" + badIndex + ",\"w\":\"not a number\"}";
+        for (int i = 0; i < total; i++) {
+            connect.kafka().produce(topicName, "key", i == badIndex ? badRecord : "{\"id\":" + i + "}");
+        }
+
+        QuestDBUtils.assertSqlEventually("\"count()\"\r\n" + (total - 1) + "\r\n",
+                "select count() from " + topicName,
+                httpPort);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        ConsumerRecords<byte[], byte[]> fetchedRecords = connect.kafka().consume(1, 120_000, "dlq");
+        Assertions.assertEquals(1, fetchedRecords.count());
+        Assertions.assertEquals(badRecord, new String(fetchedRecords.iterator().next().value()));
+    }
+
     @Test
     public void testDeadLetterQueue_sendBatchOnError() {
         connect.kafka().createTopic(topicName, 1);
