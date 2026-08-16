@@ -413,6 +413,62 @@ class QwpSinkTaskTest {
         assertTrue(failure.getMessage().contains("replay isolation made no progress"));
     }
 
+    /**
+     * Isolation runs one slice per put() with the partitions paused, so Connect's next poll is
+     * the only thing that resumes it - and that poll lasts until the offset-commit deadline
+     * (offset.flush.interval.ms, 60s by default) unless the task asks for an earlier callback.
+     * Without the request, a replay that outlives its first slice advances once a minute.
+     */
+    @Test
+    void unfinishedIsolationAsksConnectToPollBeforeTheCommitDeadline() {
+        FakeSender initial = new FakeSender();
+        FakeSender replay = new FakeSender();
+        replay.drainSucceeds = false; // no slice can finish the replay
+        TestTask task = startTask(new TestTask(initial, replay), 1, Collections.singletonMap(
+                QuestDBSinkConnectorConfig.QWP_ISOLATION_SLICE_MS_CONFIG, "25"));
+        task.put(Collections.singletonList(record(0L, 10L)));
+        initial.terminal = schemaMismatch(0L);
+        assertTrue(task.fakeContext.timeouts.isEmpty());
+
+        task.put(Collections.emptyList());
+        assertEquals(Collections.singletonList(25L), task.fakeContext.timeouts);
+
+        // Connect consumes the request on every poll, so each slice has to re-arm it.
+        task.put(Collections.emptyList());
+        assertEquals(java.util.List.of(25L, 25L), task.fakeContext.timeouts);
+    }
+
+    /**
+     * Bisecting a rejected batch is forward progress: the server answered and the search space
+     * halved. Counting only settlements would let progress.timeout.ms kill a task that is doing
+     * exactly what isolation asks of it.
+     */
+    @Test
+    void bisectingARejectedBatchCountsAsProgress() {
+        FakeSender initial = new FakeSender();
+        FakeSender rejectsBatch = new FakeSender();
+        rejectsBatch.rejectedValue = 11L;
+        FakeSender bisected = new FakeSender();
+        bisected.drainSucceeds = false; // the halves are still in flight when the slice ends
+        Map<String, String> extra = new HashMap<>();
+        extra.put(QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "10");
+        TestTask task = startTask(new TestTask(initial, rejectsBatch, bisected), 2, extra);
+        task.put(java.util.List.of(record(0L, 10L), record(1L, 11L)));
+
+        // The rejected frame belongs to no entry the task recorded, so the whole window is
+        // replayed as one batch - and that batch is rejected again, which forces a bisection.
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(8);
+        initial.terminal = schemaMismatch(5L);
+        task.put(Collections.emptyList());
+
+        // 7ms after the split, well inside the 10ms budget - but 15ms after the last settlement.
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(15);
+        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
+        assertThrows(RetriableException.class, () -> task.put(Collections.singletonList(record(2L, 12L))),
+                "the bisection is still unfinished, so the split was the only progress on record");
+        assertTrue(task.fakeContext.reportedValues.isEmpty(), "nothing is blamed until a half is isolated");
+    }
+
     @Test
     void validatesExplicitPollIntervalAgainstAppendDeadline() {
         TestTask task = new TestTask(new FakeSender());
@@ -623,8 +679,11 @@ class QwpSinkTaskTest {
         public void offset(TopicPartition partition, long offset) {
         }
 
+        private final java.util.List<Long> timeouts = new ArrayList<>();
+
         @Override
         public void timeout(long timeoutMs) {
+            timeouts.add(timeoutMs);
         }
 
         @Override

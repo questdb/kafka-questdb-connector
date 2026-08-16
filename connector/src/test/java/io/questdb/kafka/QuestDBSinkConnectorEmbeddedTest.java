@@ -697,6 +697,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         props.put("errors.deadletterqueue.topic.name", "dlq");
         props.put("errors.deadletterqueue.topic.replication.factor", "1");
         props.put("errors.tolerance", "all");
+        // A bisection of 2000 records cannot fit in a 5ms slice on any machine, so the replay
+        // has to survive being handed back to Connect between slices. With the default budget
+        // that only happened on hosts slow enough to run out of it mid-search.
+        props.put("qwp.isolation.slice.ms", "5");
 
         QuestDBUtils.assertSql(
                 "{\"ddl\":\"OK\"}",

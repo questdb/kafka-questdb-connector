@@ -194,6 +194,9 @@ class QwpSinkTask extends SinkTask {
             if (!beginRecovery(e)) {
                 deferredFailure = terminalFailure(e);
             }
+            // The commit that follows resets Connect's poll deadline, so the first slice would
+            // otherwise wait out a full offset.flush.interval.ms before put() ever runs.
+            requestNextRecoverySlice();
             return Collections.emptyMap();
         } catch (Throwable e) {
             deferredFailure = e;
@@ -579,6 +582,28 @@ class QwpSinkTask extends SinkTask {
         if (recovery == null) {
             return;
         }
+        try {
+            runRecoverySlice();
+        } finally {
+            requestNextRecoverySlice();
+        }
+    }
+
+    /**
+     * Isolation advances by one slice per put(), and the partitions are paused for its duration,
+     * so nothing else brings the task back. Ask Connect to call us again as soon as the next
+     * slice is due: its poll would otherwise run to the offset-commit deadline
+     * (offset.flush.interval.ms, 60s by default), stretching a replay that needs a handful of
+     * slices into minutes and eventually tripping progress.timeout.ms. Connect consumes the
+     * value on every poll, so it has to be re-armed for each slice.
+     */
+    private void requestNextRecoverySlice() {
+        if (recovery != null) {
+            context.timeout(config.getQwpIsolationSliceMs());
+        }
+    }
+
+    private void runRecoverySlice() {
         long now = nanoTime();
         if (now - lastProgressNanos >= TimeUnit.MILLISECONDS.toNanos(config.getQwpProgressTimeoutMs())) {
             recovery = null;
@@ -623,11 +648,17 @@ class QwpSinkTask extends SinkTask {
                     lastProgressNanos = nanoTime();
                     resetSenderForRecovery();
                 } else {
+                    // Halving the suspect batch is progress: the server answered, and the
+                    // search space shrank irreversibly. Without this, an isolation whose
+                    // rejections outnumber its settlements looks stalled to detectStall()
+                    // and the progress timeout kills a task that is doing exactly its job.
+                    lastProgressNanos = nanoTime();
                     recovery.splitCurrentStep();
                     resetSenderForRecovery();
                 }
             } catch (InvalidDataException e) {
                 if (step.records.size() != 1) {
+                    lastProgressNanos = nanoTime();
                     recovery.splitCurrentStep();
                     resetSenderForRecovery();
                     continue;
