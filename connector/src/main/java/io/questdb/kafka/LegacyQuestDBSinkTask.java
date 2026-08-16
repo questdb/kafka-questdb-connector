@@ -11,6 +11,7 @@ import io.questdb.kafka.compat.datetime.microtime.Micros;
 import io.questdb.client.std.str.StringSink;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.connect.data.Date;
 import org.apache.kafka.connect.data.*;
 import org.apache.kafka.connect.errors.ConnectException;
@@ -55,6 +56,16 @@ final class LegacyQuestDBSinkTask extends SinkTask {
     public void start(Map<String, String> map) {
         log.info("Starting QuestDB sink task [version={}, commit={}]", VersionUtil.getVersion(), VersionUtil.getGitHash());
         this.config = new QuestDBSinkConnectorConfig(map);
+        // The QuestDB client speaks the whole Sender contract over QWP, so this task
+        // would happily drive a ws:: sender through its HTTP code path - silently,
+        // and without any of the QWP delivery machinery. Refuse it: QwpSinkTask has
+        // the mirror-image guard, so between them the transport a task serves is a
+        // checked invariant rather than a property of the dispatcher's branch alone.
+        String confStr = ClientConfUtils.resolveConfString(config);
+        if (confStr != null && ClientConfUtils.isQwp(confStr)) {
+            throw new ConfigException("ws:: and wss:: client configuration strings require the QWP task; "
+                    + "this task serves the http::, https:: and tcp:: transports");
+        }
         this.sender = createSender();
         this.recordHandler = new RecordToRowHandler(config, sender, httpTransport, true);
         this.remainingRetries = config.getMaxRetries();
@@ -156,6 +167,15 @@ final class LegacyQuestDBSinkTask extends SinkTask {
                         inflightSinkRecords.setPos(inflightSinkRecords.size() - 1);
                         context.errantRecordReporter().report(record, ex);
                     } else {
+                        if (reporter != null) {
+                            // A dead letter queue is configured but cannot be used here: the row
+                            // was already partly written and TCP cannot discard it (cancelRow()
+                            // is illegal over TCP), so carrying on would emit a malformed line.
+                            // Say so, otherwise this looks like the DLQ silently not working.
+                            log.error("Cannot route an invalid record to the dead letter queue over the TCP transport, "
+                                    + "because a partially written row cannot be discarded. Failing the task instead. "
+                                    + "Use the http:: or ws:: transport if you need dead letter queue support.");
+                        }
                         // ok, no DQL, let's error the connector
                         throw ex;
                     }

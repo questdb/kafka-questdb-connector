@@ -1,6 +1,10 @@
 package io.questdb.kafka;
 
 import io.questdb.client.Sender;
+import org.apache.kafka.connect.data.Schema;
+import org.apache.kafka.connect.data.SchemaBuilder;
+import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.junit.jupiter.api.Test;
 
@@ -12,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * QWP accepts symbols interleaved with other columns, so the configured symbol
@@ -57,12 +62,61 @@ class RecordToRowHandlerSymbolTest {
                 recorder.calls);
     }
 
+    /**
+     * A symbol must store the text of the value the column would otherwise have held, which is
+     * what the legacy transports store because they route symbols after the type conversion.
+     * Stringifying the raw Java object would write {@code Date.toString()} - the worker's
+     * timezone and locale, not the timestamp - and would print a float at float precision.
+     */
+    @Test
+    void symbolsStoreTheConvertedValueRatherThanTheRawJavaObject() {
+        Recorder recorder = new Recorder();
+        RecordToRowHandler handler = newHandler(recorder, true, "ts,f,n");
+
+        Schema schema = SchemaBuilder.struct()
+                .field("ts", Timestamp.SCHEMA)
+                .field("f", Schema.FLOAT32_SCHEMA)
+                .field("n", Schema.INT64_SCHEMA)
+                .build();
+        Struct struct = new Struct(schema)
+                .put("ts", new java.util.Date(1_700_000_000_000L))
+                .put("f", 1.1f)
+                .put("n", 42L);
+        handler.handle(new SinkRecord("tab", 0, null, null, schema, struct, 0L));
+
+        assertEquals(
+                List.of("table(tab)",
+                        "symbol(ts,1700000000000)",     // epoch millis, not "Tue Nov 14 ..."
+                        "symbol(f,1.100000023841858)",  // widened to double first
+                        "symbol(n,42)",
+                        "atNow()"),
+                recorder.calls);
+    }
+
+    @Test
+    void nonScalarValuesNamedAsSymbolsAreNotStringified() {
+        Recorder recorder = new Recorder();
+        RecordToRowHandler handler = newHandler(recorder, true, "blob");
+
+        Schema schema = SchemaBuilder.struct().field("blob", Schema.BYTES_SCHEMA).build();
+        Struct struct = new Struct(schema).put("blob", new byte[]{1, 2, 3});
+
+        // Falls through to the unsupported-type path instead of storing an identity hash,
+        // which would make every record its own symbol value.
+        assertThrows(InvalidDataException.class,
+                () -> handler.handle(new SinkRecord("tab", 0, null, null, schema, struct, 0L)));
+    }
+
     private static RecordToRowHandler newHandler(Recorder recorder, boolean routeSymbolsDirectly) {
+        return newHandler(recorder, routeSymbolsDirectly, "sym,num");
+    }
+
+    private static RecordToRowHandler newHandler(Recorder recorder, boolean routeSymbolsDirectly, String symbols) {
         Map<String, String> props = new HashMap<>();
         props.put("client.conf.string", "ws::addr=localhost:9000;");
         props.put("topics", "tab");
         props.put("table", "tab");
-        props.put("symbols", "sym,num");
+        props.put("symbols", symbols);
         props.put("include.key", "false");
         QuestDBSinkConnectorConfig config = new QuestDBSinkConnectorConfig(props);
         return new RecordToRowHandler(config, recorder.proxy(), true, false, routeSymbolsDirectly);

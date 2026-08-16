@@ -237,11 +237,23 @@ class QwpSinkTask extends SinkTask {
 
     @Override
     public void close(Collection<TopicPartition> partitions) {
-        bestEffortDrain();
+        // No drain here on purpose. Connect calls preCommit() before close(), so nothing we
+        // learn now can change the offsets that were just committed, and rows already handed
+        // to the client are on their way to the server whether or not we wait for the acks.
+        // Waiting only holds up the rebalance for every other member of the group.
         if (partitions.isEmpty()) {
             return;
         }
         Set<TopicPartition> revoked = new HashSet<>(partitions);
+        if (partitionsPaused) {
+            // Connect records the pause we requested and re-applies it when these partitions
+            // are assigned again, while our own flag only describes the current assignment.
+            // Hand the pause back before letting go, so a re-assignment starts unpaused;
+            // open() re-pauses whatever comes back if we are still holding partitions.
+            // Otherwise a revocation that empties the assignment clears our flag while
+            // Connect keeps the pause, and nothing is left that can ever resume it.
+            context.resume(revoked.toArray(new TopicPartition[0]));
+        }
         assignment.removeAll(revoked);
         retained.subList(head, retained.size()).removeIf(pending -> revoked.contains(pending.partition));
         dlqPending.removeIf(pending -> revoked.contains(pending.partition));
@@ -260,7 +272,9 @@ class QwpSinkTask extends SinkTask {
 
     @Override
     public void stop() {
-        bestEffortDrain();
+        // Sender.close() flushes whatever is still buffered and then drains, bounded by the
+        // client's close_flush_timeout_millis. Draining separately first would simply serialise
+        // two waits for the same acks.
         closeSenderSilently();
     }
 
@@ -360,6 +374,7 @@ class QwpSinkTask extends SinkTask {
                 dlqPending.remove(i--);
             }
         }
+        int headBefore = head;
         while (head < retained.size()) {
             PendingRecord pending = retained.get(head);
             if (!pending.complete) {
@@ -371,6 +386,9 @@ class QwpSinkTask extends SinkTask {
             }
             head++;
         }
+        // Records settled elsewhere (replay, DLQ) are already complete when the prefix reaches
+        // them, so an advancing prefix is itself commit-worthy news even if nothing completed here.
+        completedRecord |= head != headBefore;
         if (head == retained.size() || head >= COMPACTION_THRESHOLD) {
             retained.subList(0, head).clear();
             head = 0;
@@ -500,15 +518,20 @@ class QwpSinkTask extends SinkTask {
             return true;
         }
 
+        // The client publishes on its own cadence (auto_flush_rows/interval), which is far
+        // tighter than our checkpoint, so a rejected frame frequently belongs to no entry we
+        // recorded - the ledger is empty between checkpoints, and emptied again every time
+        // acks prune it. A null suspect therefore means "we cannot name the frame", not
+        // "this cannot be isolated": the plan below already replays every unacked record,
+        // and a batch step that is rejected again is split into per-record steps. Leaving
+        // suspect null simply starts that narrowing one round earlier instead of failing
+        // the task with an empty DLQ.
         FlushEntry suspect = null;
         for (FlushEntry entry : flushEntries) {
             if (entry.fromFsn <= error.getToFsn() && error.getFromFsn() <= entry.toFsn) {
                 suspect = entry;
                 break;
             }
-        }
-        if (suspect == null) {
-            return false;
         }
 
         List<RecoveryStep> steps = new ArrayList<>();
@@ -538,6 +561,12 @@ class QwpSinkTask extends SinkTask {
         }
         if (!tail.isEmpty()) {
             steps.add(new RecoveryStep(tail, false));
+        }
+        if (steps.isEmpty()) {
+            // Nothing left to replay: the rejection cannot be attributed to any record we
+            // still hold, so there is no record to isolate and none to blame. Fail loudly
+            // rather than silently swallowing a terminal error.
+            return false;
         }
 
         recovery = new Recovery(steps);
@@ -577,7 +606,7 @@ class QwpSinkTask extends SinkTask {
                 if (!sender.drain(waitMillis)) {
                     return;
                 }
-                lastAckedFsn = Math.max(lastAckedFsn, step.fsn);
+                settleRecoveryStep(step);
                 lastProgressNanos = nanoTime();
                 updateCompletions();
                 recovery.index++;
@@ -629,16 +658,46 @@ class QwpSinkTask extends SinkTask {
             }
         }
         long fsn = sender.flushAndGetSequence();
+        step.fsn = fsn;
+        step.published = true;
         if (fsn < 0L) {
-            throw new ConnectException("QWP recovery flush did not return a frame sequence number");
+            // A replay step can be larger than the client's own auto-flush trigger, so the
+            // client may have published every row before this checkpoint and left nothing
+            // to seal. The rows are still on the wire; their frame numbers are simply not
+            // ours to record. settleRecoveryStep() resolves them from the ack watermark
+            // once drain() reports that everything published has been acknowledged.
+            return;
         }
         for (PendingRecord pending : step.records) {
             pending.dependencyFsn = fsn;
         }
-        step.fsn = fsn;
-        step.published = true;
         flushEntries.add(new FlushEntry(lastPublishedFsn + 1L, fsn, new ArrayList<>(step.records)));
         lastPublishedFsn = fsn;
+    }
+
+    /**
+     * Called once a replay step has drained successfully. A step the client published on our
+     * behalf carries no frame number of its own, so its rows complete at the current acked
+     * watermark - drain() returning true means everything published is acknowledged.
+     */
+    private void settleRecoveryStep(RecoveryStep step) {
+        if (step.fsn >= 0L) {
+            lastAckedFsn = Math.max(lastAckedFsn, step.fsn);
+        } else {
+            long acked = Math.max(0L, sender.getAckedFsn());
+            for (PendingRecord pending : step.records) {
+                pending.dependencyFsn = acked;
+            }
+            lastAckedFsn = Math.max(lastAckedFsn, acked);
+        }
+        // These rows are durable now, so record that as a fact about each record rather than
+        // leaving it to be inferred later from an FSN. Recreating the sender resets the frame
+        // numbering, and the completed prefix cannot advance past a record whose DLQ future is
+        // still in flight - so a record settled here but not marked would be silently un-settled
+        // by the next sender reset, and nothing would ever republish it.
+        for (PendingRecord pending : step.records) {
+            pending.complete = true;
+        }
     }
 
     private void resetSenderForRecovery() {
@@ -651,7 +710,9 @@ class QwpSinkTask extends SinkTask {
         lastPublishedFsn = -1L;
         for (int i = head, n = retained.size(); i < n; i++) {
             PendingRecord pending = retained.get(i);
-            if (pending.rowRequired) {
+            // A settled record keeps its result: the new sender restarts frame numbering, so
+            // only records that still have to be republished may carry a dependency on it.
+            if (pending.rowRequired && !pending.complete) {
                 pending.dependencyFsn = UNFLUSHED;
                 pending.rowWritten = false;
             }
@@ -679,19 +740,6 @@ class QwpSinkTask extends SinkTask {
             log.warn("QuestDB QWP terminal error: {}", error);
         } else {
             log.warn("QuestDB QWP transient error; the client will retry: {}", error);
-        }
-    }
-
-    private void bestEffortDrain() {
-        if (sender == null) {
-            return;
-        }
-        try {
-            if (!sender.drain(config.getQwpDrainTimeoutMs())) {
-                log.warn("Timed out while draining QWP sender during task cleanup");
-            }
-        } catch (Exception e) {
-            log.warn("Failed to drain QWP sender during task cleanup", e);
         }
     }
 
@@ -806,11 +854,24 @@ class QwpSinkTask extends SinkTask {
             }
         }
 
+        /**
+         * Halve a rejected step instead of exploding it into one step per record. A rejected
+         * batch is not written at all, so the offender can be bisected: ~log2(n) rejections
+         * rather than n, and the innocent records are replayed in bulk instead of one server
+         * round trip each. That difference is what keeps isolating a large in-flight window
+         * a matter of seconds rather than hours.
+         */
         private void splitCurrentStep() {
             RecoveryStep current = steps.remove(index);
-            for (int i = current.records.size() - 1; i >= 0; i--) {
-                steps.add(index, new RecoveryStep(Collections.singletonList(current.records.get(i)), true));
+            List<PendingRecord> records = current.records;
+            if (records.size() == 1) {
+                steps.add(index, new RecoveryStep(records, true));
+                return;
             }
+            int mid = records.size() / 2;
+            // insert the tail first, so the head ends up ahead of it and record order holds
+            steps.add(index, new RecoveryStep(records.subList(mid, records.size()), records.size() - mid == 1));
+            steps.add(index, new RecoveryStep(records.subList(0, mid), mid == 1));
         }
     }
 }

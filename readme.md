@@ -26,6 +26,17 @@ backstop. Keep `sf_append_deadline_millis` below the worker consumer's
 `max.poll.interval.ms` (or set `consumer.override.max.poll.interval.ms` so the
 connector can validate the relationship).
 
+Shutdown is deliberately brief. Kafka Connect allows all tasks on a worker a
+combined `task.shutdown.graceful.timeout.ms` (5s by default) and cannot
+interrupt a task that overruns it, so the connector defaults the client's
+`close_flush_timeout_millis` to 5s rather than the client's own 60s. Rows
+already handed to the client reach QuestDB regardless, and rows whose offsets
+were never committed are redelivered, so a short budget costs duplicates at
+worst - never data. Raise it in the configuration string if you would rather
+wait. Partition revocation does not drain at all: offsets for the revoked
+partitions were already decided by the preceding `preCommit`, so waiting would
+only stall the rebalance for the whole consumer group.
+
 Delivery is validated by a chaos integration test (containers killed mid-stream
 while 5M records flow, asserting an exact deduplicated row count), a
 multi-worker test proving each worker resolves its own transport, and tests
@@ -46,6 +57,16 @@ solely because row construction threw that exception; it fails the task
 instead. Mapping errors represented as `InvalidDataException` remain
 record-DLQ eligible, and typed `LineSenderServerException` rejections continue
 through the terminal-category policy above.
+
+The most common way to meet that limitation is schemaless JSON whose field
+types drift between records - `{"v":1}` followed by `{"v":1.5}`. The WebSocket
+sender remembers the type it sent for each column for the lifetime of the
+connection, so it raises the mismatch itself, before the row reaches QuestDB,
+and the task fails. The `http::` transport does not keep that state: the server
+rejects the row instead, which is a typed rejection and can be sent to the DLQ.
+Pin the column type to avoid it - declare the field in `doubles`, or publish
+with a schema - which is worth doing regardless, since a column's type in
+QuestDB is otherwise decided by whichever record happens to arrive first.
 
 ## Raw JSON fast path (experimental)
 
@@ -98,6 +119,13 @@ Limitations and differences:
   is documented rather than prevented.
 - Composed timestamps (multiple `timestamp.string.fields`) are not supported
   and are rejected at startup.
+- On the `tcp::` transport a malformed payload fails the task even when a dead
+  letter queue is configured, and it does so on every restart. The parse error
+  surfaces part-way through building the row, and TCP cannot discard a partial
+  row, so continuing would emit a malformed line. `JsonConverter` does not have
+  this problem because it fails before the connector sees the record, in a
+  stage Kafka Connect can route to the DLQ itself. Use `http::` or `ws::` if
+  you need dead letter queue support with this option.
 - Only the value is parsed by the connector. The key still goes through the
   key converter, and only JSON is supported (`value.format=json` or
   `json_envelope`).

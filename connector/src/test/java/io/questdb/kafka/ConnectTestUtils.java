@@ -110,9 +110,25 @@ public final class ConnectTestUtils {
         for (ConnectorStateInfo.TaskState taskState : taskStates) {
             if (!Objects.equals(taskState.state(), expectedState.toString())) {
                 fail("Task " + taskState.id() + " for connector " + connectorName + " is in state " + taskState.state()
-                        + " but expected " + expectedState + ". Trace: " + taskState.trace());
+                        + " but expected " + expectedState + ". Trace: " + singleLine(taskState.trace()));
             }
         }
+    }
+
+    /**
+     * A task trace is a full stack trace. Embedding one in a failure message corrupts
+     * surefire's fork channel ("Corrupted channel by directly writing to native stream"),
+     * and a corrupted channel loses every result for the class: the run then reports
+     * "Tests run: 0" and the build goes GREEN despite a genuine failure. Measured on this
+     * suite: a ~2000 char trace corrupts, 300 does not. The head of the trace is also the
+     * useful part - exception type, message, and the frame that threw.
+     */
+    private static String singleLine(String trace) {
+        if (trace == null || trace.isEmpty()) {
+            return "<no trace>";
+        }
+        String flattened = trace.replaceAll("\\R+", " | ").replace('\t', ' ');
+        return flattened.length() <= 300 ? flattened : flattened.substring(0, 300) + " ...(truncated)";
     }
 
     static String newTopicName() {

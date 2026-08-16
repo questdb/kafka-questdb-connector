@@ -17,6 +17,12 @@ final class ClientConfUtils {
     // to 90% of the server-advertised batch cap; 0 (the WS default) disables
     // the trigger AND the clamp, leaving batches free to exceed the cap.
     static final int DEFAULT_QWP_AUTO_FLUSH_BYTES = 100 * 1024 * 1024;
+    // Sender.close() flushes and then waits for acks. The client's own default is 60s, which
+    // dwarfs Kafka Connect's task.shutdown.graceful.timeout.ms (5s for ALL tasks on a worker)
+    // and applies equally when the server is simply unreachable. Rows already published are
+    // processed by the server regardless, and rows whose offsets were never committed are
+    // redelivered, so a short budget costs duplicates at worst - never data.
+    static final long DEFAULT_QWP_CLOSE_FLUSH_TIMEOUT_MILLIS = 5_000L;
 
     private ClientConfUtils() {
     }
@@ -40,15 +46,12 @@ final class ClientConfUtils {
             // no patching for TCP transport
             return false;
         }
-        if (!hasUnescapedTrailingSemicolon(confStr)) {
-            sink.put(confStr);
-            return true;
-        }
         sink.put(tmpSink).put("::");
 
         boolean hasAtLeastOneParam = false;
         boolean hasSfAppendDeadline = false;
         boolean hasAutoFlushBytes = false;
+        boolean hasCloseFlushTimeout = false;
         while (ConfStringParser.hasNext(confStr, pos)) {
             hasAtLeastOneParam = true;
             pos = ConfStringParser.nextKey(confStr, pos, tmpSink);
@@ -118,6 +121,8 @@ final class ClientConfUtils {
                 // copy other params
                 if (isQwpTransport && Chars.equals(tmpSink, "auto_flush_bytes")) {
                     hasAutoFlushBytes = true;
+                } else if (isQwpTransport && Chars.equals(tmpSink, "close_flush_timeout_millis")) {
+                    hasCloseFlushTimeout = true;
                 }
                 boolean isSfAppendDeadline = isQwpTransport && Chars.equals(tmpSink, "sf_append_deadline_millis");
                 sink.put(tmpSink).put('=');
@@ -158,6 +163,9 @@ final class ClientConfUtils {
         if (isQwpTransport && !hasAutoFlushBytes) {
             sink.put("auto_flush_bytes=").put(DEFAULT_QWP_AUTO_FLUSH_BYTES).put(';');
         }
+        if (isQwpTransport && !hasCloseFlushTimeout) {
+            sink.put("close_flush_timeout_millis=").put(DEFAULT_QWP_CLOSE_FLUSH_TIMEOUT_MILLIS).put(';');
+        }
         if (!isQwpTransport) {
             sink.put("auto_flush=off;");
         }
@@ -187,11 +195,4 @@ final class ClientConfUtils {
         return ConfStringEnvInterpolator.expand(confStr);
     }
 
-    private static boolean hasUnescapedTrailingSemicolon(String confStr) {
-        int semicolons = 0;
-        for (int i = confStr.length() - 1; i >= 0 && confStr.charAt(i) == ';'; i--) {
-            semicolons++;
-        }
-        return (semicolons & 1) == 1;
-    }
 }

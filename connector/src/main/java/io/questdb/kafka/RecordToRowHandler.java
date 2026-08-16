@@ -543,8 +543,13 @@ final class RecordToRowHandler {
         if (!symbolColumns.isEmpty()) {
             String symbolName = sanitizeName(name.isEmpty() ? fallbackName : name);
             if (symbolColumns.contains(symbolName)) {
-                sender.symbol(symbolName, value instanceof CharSequence ? (CharSequence) value : String.valueOf(value));
-                return;
+                CharSequence symbolValue = symbolText(schema, value);
+                if (symbolValue != null) {
+                    sender.symbol(symbolName, symbolValue);
+                    return;
+                }
+                // Not a scalar the sender could have written: fall through and let the normal
+                // path flatten it or reject it, exactly as if it were not named in `symbols`.
             }
         }
         if (tryWriteLogicalType(name.isEmpty() ? fallbackName : name, schema, value)) {
@@ -959,6 +964,51 @@ final class RecordToRowHandler {
         } else {
             throw new InvalidDataException("Unsupported type: " + type + ", name: " + name);
         }
+    }
+
+    /**
+     * The legacy transports route symbols inside the sender - that is, after a value has been
+     * converted to the physical type the column would otherwise hold - and stringify that.
+     * QWP routes symbols here instead, so it has to perform the same conversion to store the
+     * same text. It matters most for logical date/time types: stringifying the raw
+     * {@link java.util.Date} would record whatever the worker's default timezone and locale
+     * happen to render, so the same record would land differently on different workers.
+     * <p>
+     * Returns null when the value is not a scalar the sender could have written, so the caller
+     * falls back to the normal path rather than storing something like an array's identity
+     * hash as a symbol.
+     */
+    private CharSequence symbolText(Schema schema, Object value) {
+        if (schema != null && schema.name() != null) {
+            switch (schema.name()) {
+                case "io.debezium.time.MicroTimestamp":
+                    return String.valueOf((Long) value);
+                case "io.debezium.time.Date":
+                    return String.valueOf(Micros.addDays(0, (Integer) value));
+                case Timestamp.LOGICAL_NAME:
+                case org.apache.kafka.connect.data.Date.LOGICAL_NAME:
+                case Time.LOGICAL_NAME:
+                    return String.valueOf(((java.util.Date) value).getTime());
+                case Decimal.LOGICAL_NAME:
+                    return null; // unsupported either way; let onUnsupportedType decide
+                default:
+                    break;
+            }
+        }
+        if (value instanceof CharSequence) {
+            return (CharSequence) value;
+        }
+        if (value instanceof Float) {
+            // the physical path widens to double, and 1.1f prints differently once widened
+            return String.valueOf(((Float) value).doubleValue());
+        }
+        if (value instanceof Number || value instanceof Boolean) {
+            return String.valueOf(value);
+        }
+        if (value instanceof java.util.Date) {
+            return String.valueOf(TimeUnit.MILLISECONDS.toMicros(((java.util.Date) value).getTime()));
+        }
+        return null;
     }
 
     private boolean tryWriteLogicalType(String name, Schema schema, Object value) {

@@ -206,6 +206,14 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.kafka().produce(topicName, "bad", "{\"broken\":");
         connect.kafka().produce(topicName, "good", "{\"px\":9.5}");
 
+        if (transport == ConnectTestUtils.Transport.TCP) {
+            // A malformed payload is detected part-way through building the row, and a partial
+            // row cannot be discarded over TCP - cancelRow() is illegal there - so continuing
+            // would emit a malformed line. The task must fail instead. Documented limitation.
+            ConnectTestUtils.assertConnectorTaskFailedEventually(connect);
+            return;
+        }
+
         QuestDBUtils.assertSqlEventually("\"px\"\r\n9.5\r\n",
                 "select px from " + topicName, httpPort);
         ConsumerRecords<byte[], byte[]> fetched = connect.kafka().consume(1, 60_000, "dlq");
@@ -668,6 +676,54 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 "select firstname,lastname,age, id from " + topicName,
                 httpPort);
 
+    }
+
+    /**
+     * A burst large enough that the client publishes frames on its own cadence before the
+     * connector ever checkpoints. The rejected frame then belongs to no flush entry the
+     * connector recorded, which must still isolate the offending record instead of failing
+     * the task with an empty DLQ. Sized above the client's 1000-row auto-flush trigger.
+     */
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDeadLetterQueue_rejectionInsideAClientPublishedFrame(ConnectTestUtils.Transport transport) {
+        // ILP over TCP is fire-and-forget: the server never reports a rejected row, so there is
+        // nothing to isolate and no record to blame. Record isolation is an HTTP/QWP contract.
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP,
+                "TCP has no server-side row rejection to isolate");
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
+        props.put("value.converter.schemas.enable", "false");
+        props.put("errors.deadletterqueue.topic.name", "dlq");
+        props.put("errors.deadletterqueue.topic.replication.factor", "1");
+        props.put("errors.tolerance", "all");
+
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
+                "create table " + topicName + " (id long, w long, ts timestamp) timestamp(ts) partition by day wal",
+                httpPort,
+                QuestDBUtils.Endpoint.EXEC);
+
+        // 'w' is never written by a good record, so the client holds no cached type for it
+        // and the rejection comes from the server rather than from client-side validation.
+        int total = 2000;
+        int badIndex = 5;
+        String badRecord = "{\"id\":" + badIndex + ",\"w\":\"not a number\"}";
+        for (int i = 0; i < total; i++) {
+            connect.kafka().produce(topicName, "key", i == badIndex ? badRecord : "{\"id\":" + i + "}");
+        }
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        QuestDBUtils.assertSqlEventually("\"count()\"\r\n" + (total - 1) + "\r\n",
+                "select count() from " + topicName,
+                httpPort);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        ConsumerRecords<byte[], byte[]> fetchedRecords = connect.kafka().consume(1, 120_000, "dlq");
+        Assertions.assertEquals(1, fetchedRecords.count());
+        Assertions.assertEquals(badRecord, new String(fetchedRecords.iterator().next().value()));
     }
 
     @Test

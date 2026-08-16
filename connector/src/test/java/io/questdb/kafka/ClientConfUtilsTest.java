@@ -37,8 +37,16 @@ public class ClientConfUtilsTest {
         assertConfStringIsPatched("https::addr=localhost:9000;auto_flush=on;", "https::addr=localhost:9000;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
         assertConfStringIsPatched("https::addr=localhost:9000;foo=bar;auto_flush_interval=100;", "https::addr=localhost:9000;foo=bar;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, TimeUnit.MILLISECONDS.toNanos(100));
         assertConfStringIsPatched("https::addr=localhost:9000;foo=bar;auto_flush_interval=100;auto_flush_rows=42;", "https::addr=localhost:9000;foo=bar;auto_flush=off;",42, TimeUnit.MILLISECONDS.toNanos(100));
-        assertConfStringIsPatched("ws::addr=localhost:9000;auto_flush_interval=100;auto_flush_rows=42;", "ws::addr=localhost:9000;auto_flush_interval=100;auto_flush_rows=42;sf_append_deadline_millis=30000;auto_flush_bytes=104857600;", 42, TimeUnit.MILLISECONDS.toNanos(100));
-        assertConfStringIsPatched("wss::addr=localhost:9000;sf_max_total_bytes=1048576;sf_append_deadline_millis=1234;auto_flush_bytes=104857600;", "wss::addr=localhost:9000;sf_max_total_bytes=1048576;sf_append_deadline_millis=1234;auto_flush_bytes=104857600;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
+        assertConfStringIsPatched("ws::addr=localhost:9000;auto_flush_interval=100;auto_flush_rows=42;", "ws::addr=localhost:9000;auto_flush_interval=100;auto_flush_rows=42;sf_append_deadline_millis=30000;auto_flush_bytes=104857600;close_flush_timeout_millis=5000;", 42, TimeUnit.MILLISECONDS.toNanos(100));
+        assertConfStringIsPatched("wss::addr=localhost:9000;sf_max_total_bytes=1048576;sf_append_deadline_millis=1234;auto_flush_bytes=104857600;", "wss::addr=localhost:9000;sf_max_total_bytes=1048576;sf_append_deadline_millis=1234;auto_flush_bytes=104857600;close_flush_timeout_millis=5000;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
+
+        // The trailing semicolon is optional in the client's grammar, and such a string is
+        // parseable and usable - so it must be patched like any other. Skipping it silently
+        // reverted the configured flush settings to defaults and left the client's own
+        // auto-flush armed, which the connector's flush accounting assumes is off.
+        assertConfStringIsPatched("https::addr=localhost:9000;foo=bar", "https::addr=localhost:9000;foo=bar;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
+        assertConfStringIsPatched("http::addr=localhost:9000;auto_flush_rows=1000", "http::addr=localhost:9000;auto_flush=off;", 1000, DEFAULT_FLUSH_INTERVAL_NANOS);
+        assertConfStringIsPatched("ws::addr=localhost:9000", "ws::addr=localhost:9000;sf_append_deadline_millis=30000;auto_flush_bytes=104857600;close_flush_timeout_millis=5000;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
 
         // with escaped semi-colon
         assertConfStringIsPatched("https::addr=localhost:9000;foo=b;;ar;auto_flush_interval=100;auto_flush_rows=42;", "https::addr=localhost:9000;foo=b;;ar;auto_flush=off;",42, TimeUnit.MILLISECONDS.toNanos(100));
@@ -47,8 +55,9 @@ public class ClientConfUtilsTest {
         assertConfStringIsNotPatched("https::addr=localhost:9000;auto_flush_interval=");
         assertConfStringIsNotPatched("https::addr=localhost:9000;auto_flush_rows=");
         assertConfStringIsNotPatched("https::addr=localhost:9000;auto_flush=");
-        assertConfStringIsNotPatched("https::addr=localhost:9000;foo=bar"); // missing trailing semicolon
-        assertConfStringIsNotPatched("https::addr=");
+        // An empty value still parses, so it is copied through and the client rejects it -
+        // spotting that here would mean duplicating the client's own validation.
+        assertConfStringIsPatched("https::addr=", "https::addr=;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
         assertConfStringIsNotPatched("https::addr");
         assertConfStringIsNotPatched("https");
         assertConfStringIsNotPatched("http!");
@@ -65,7 +74,7 @@ public class ClientConfUtilsTest {
         assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush_interval=off;", "QuestDB Kafka connector cannot have auto_flush_interval disabled");
         assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush_rows=off;", "QuestDB Kafka connector cannot have auto_flush_rows disabled");
         // auto_flush_bytes passes through to the QWP client, which clamps its effective byte trigger to the server batch cap
-        assertConfStringIsPatched("ws::addr=localhost:9000;auto_flush_bytes=1024;", "ws::addr=localhost:9000;auto_flush_bytes=1024;sf_append_deadline_millis=30000;", 75_000, TimeUnit.SECONDS.toNanos(1));
+        assertConfStringIsPatched("ws::addr=localhost:9000;auto_flush_bytes=1024;", "ws::addr=localhost:9000;auto_flush_bytes=1024;sf_append_deadline_millis=30000;close_flush_timeout_millis=5000;", 75_000, TimeUnit.SECONDS.toNanos(1));
         assertConfStringPatchingThrowsConfigException("ws::addr=localhost:9000;sf_dir=/var/lib/qdb;", "QuestDB Kafka connector supports memory-only store-and-forward; sf_dir is not allowed with QWP");
         assertConfStringPatchingThrowsConfigException("wss::addr=localhost:9000;sf_durability=sync;", "QuestDB Kafka connector supports memory-only store-and-forward; sf_durability is not allowed with QWP");
         assertConfStringPatchingThrowsConfigException("ws::addr=localhost:9000;sf_append_deadline_millis=invalid;", "Invalid sf_append_deadline_millis value [sf_append_deadline_millis=invalid]");

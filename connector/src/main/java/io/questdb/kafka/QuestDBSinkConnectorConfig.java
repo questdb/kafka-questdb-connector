@@ -103,9 +103,6 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG = "qwp.commit.ack.timeout.ms";
     private static final String QWP_COMMIT_ACK_TIMEOUT_MS_DOC = "Bounded time preCommit waits for server acks of just-published QWP rows so clean rebalances commit instead of redelivering. A timeout only withholds offsets.";
 
-    public static final String QWP_DRAIN_TIMEOUT_MS_CONFIG = "qwp.drain.timeout.ms";
-    private static final String QWP_DRAIN_TIMEOUT_MS_DOC = "Best-effort QWP drain timeout used during partition close and task stop.";
-
     public static final String QWP_ISOLATION_SLICE_MS_CONFIG = "qwp.isolation.slice.ms";
     private static final String QWP_ISOLATION_SLICE_MS_DOC = "Maximum producer-thread time budget for one QWP replay-isolation slice.";
 
@@ -150,7 +147,6 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(QWP_PROGRESS_TIMEOUT_MS_CONFIG, Type.LONG, 300_000L, ConfigDef.Range.atLeast(1L), Importance.MEDIUM, QWP_PROGRESS_TIMEOUT_MS_DOC)
                 .define(QWP_MAX_INFLIGHT_ROWS_CONFIG, Type.INT, 150_000, ConfigDef.Range.atLeast(1), Importance.MEDIUM, QWP_MAX_INFLIGHT_ROWS_DOC)
                 .define(QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG, Type.LONG, 500L, ConfigDef.Range.atLeast(0L), Importance.LOW, QWP_COMMIT_ACK_TIMEOUT_MS_DOC)
-                .define(QWP_DRAIN_TIMEOUT_MS_CONFIG, Type.LONG, 30_000L, ConfigDef.Range.atLeast(0L), Importance.LOW, QWP_DRAIN_TIMEOUT_MS_DOC)
                 .define(QWP_ISOLATION_SLICE_MS_CONFIG, Type.LONG, 100L, ConfigDef.Range.atLeast(1L), Importance.LOW, QWP_ISOLATION_SLICE_MS_DOC)
                 .define(QWP_DLQ_TERMINAL_CATEGORIES_CONFIG, Type.LIST, "SCHEMA_MISMATCH", Importance.LOW, QWP_DLQ_TERMINAL_CATEGORIES_DOC);
     }
@@ -272,10 +268,6 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public int getQwpMaxInflightRows() {
         return getInt(QWP_MAX_INFLIGHT_ROWS_CONFIG);
-    }
-
-    public long getQwpDrainTimeoutMs() {
-        return getLong(QWP_DRAIN_TIMEOUT_MS_CONFIG);
     }
 
     public long getQwpCommitAckTimeoutMs() {

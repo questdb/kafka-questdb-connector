@@ -137,17 +137,24 @@ class QwpSinkTaskTest {
         assertEquals(10L, task.fakeContext.reportedValues.get(0));
     }
 
+    /**
+     * A typed server terminal can surface while a row is being built, because the client
+     * latches an asynchronous rejection and rethrows it from the next call. The error then
+     * belongs to an already published frame, not to the record in hand, so that record must
+     * never be blamed on the strength of the timing alone - replay decides. Here the replay
+     * succeeds, so nothing is reported.
+     */
     @Test
-    void typedTerminalDuringRowBuildingNeverGoesToDlq() {
-        FakeSender fakeSender = new FakeSender();
-        fakeSender.rowFailure = schemaMismatch(0L);
-        TestTask task = startTask(fakeSender, 1);
+    void typedTerminalDuringRowBuildingIsolatesRatherThanBlamingTheRecord() {
+        FakeSender initial = new FakeSender();
+        FakeSender recovery = new FakeSender();
+        initial.rowFailure = schemaMismatch(0L);
+        TestTask task = startTask(new TestTask(initial, recovery), 1);
 
-        ConnectException failure = assertThrows(
-                ConnectException.class,
-                () -> task.put(Collections.singletonList(record(0L, 10L))));
-        assertTrue(failure.getMessage().contains("SCHEMA_MISMATCH"));
-        assertTrue(task.fakeContext.reportedValues.isEmpty());
+        task.put(Collections.singletonList(record(0L, 10L)));
+
+        assertTrue(task.fakeContext.reportedValues.isEmpty(), "the record must not be blamed without evidence");
+        assertEquals(1, recovery.rows, "it must be replayed to find out whether it is the offender");
     }
 
     @Test
@@ -162,6 +169,74 @@ class QwpSinkTaskTest {
         task.put(Collections.emptyList());
 
         assertTrue(task.fakeContext.reportedValues.isEmpty());
+    }
+
+    /**
+     * The client publishes on its own cadence, so a rejected frame routinely belongs to no
+     * flush entry the connector recorded - the ledger is empty between checkpoints. That
+     * must still isolate the offending record rather than kill the task with an empty DLQ.
+     */
+    @Test
+    void rejectionOfAFrameTheLedgerDoesNotCoverIsStillIsolated() {
+        FakeSender initial = new FakeSender();
+        FakeSender recovery = new FakeSender();
+        // Flush threshold far above the batch, so the connector never checkpoints and holds
+        // no flush entry at all - the state the client's own auto-flush leaves behind.
+        TestTask task = startTask(new TestTask(initial, recovery), 1_000);
+        task.put(java.util.List.of(record(0L, 10L), record(1L, 11L), record(2L, 12L)));
+
+        initial.terminal = schemaMismatch(7L); // an FSN no recorded entry covers
+        task.put(Collections.emptyList());
+
+        assertEquals(3, recovery.rows, "every unacked record must be replayed");
+        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(3L));
+        assertEquals(3L, task.preCommit(current).get(SOURCE).offset());
+    }
+
+    @Test
+    void unattributableRejectionWithNothingLeftToReplayStillFailsTheTask() {
+        FakeSender initial = new FakeSender();
+        TestTask task = startTask(new TestTask(initial), 1);
+        task.put(Collections.singletonList(record(0L, 10L)));
+        task.preCommit(Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L)));
+
+        initial.terminal = schemaMismatch(7L);
+        ConnectException failure = assertThrows(ConnectException.class, () -> task.put(Collections.emptyList()));
+        assertTrue(failure.getMessage().contains("QuestDB rejected QWP frames"), failure.getMessage());
+    }
+
+    /**
+     * Kafka's errant-record reporter completes its future on broker ack, so a DLQ'd record
+     * stays pending for a while and the completed prefix cannot move past it. A record
+     * replayed successfully behind that gap must keep its result when the sender is recreated
+     * for a later rejection - otherwise nothing republishes it and the partition's offset is
+     * pinned for good, with the task still reporting itself healthy.
+     */
+    @Test
+    void replayedRecordsSurviveASenderResetTriggeredByALaterRejection() {
+        FakeSender initial = new FakeSender();
+        FakeSender first = new FakeSender();
+        FakeSender second = new FakeSender();
+        FakeSender third = new FakeSender();
+        TestTask task = startTask(new TestTask(initial, first, second, third), 3);
+        task.fakeContext.dlqFuturesPending = true;
+        task.put(java.util.List.of(record(0L, 10L), record(1L, 11L), record(2L, 12L)));
+
+        first.rejectedValue = 10L;   // first isolated replay is rejected
+        second.rejectedValue = 12L;  // 11 replays cleanly, then 12 is rejected
+        initial.terminal = schemaMismatch(0L);
+        task.put(Collections.emptyList());
+
+        assertEquals(java.util.List.of(10L, 12L), task.fakeContext.reportedValues);
+        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(3L));
+        assertEquals(0L, task.preCommit(current).get(SOURCE).offset(),
+                "offsets stay withheld while the DLQ writes are still in flight");
+
+        task.fakeContext.completeDlqFutures();
+        task.put(Collections.emptyList());
+
+        assertEquals(3L, task.preCommit(current).get(SOURCE).offset(),
+                "every record is resolved, so the offset must advance");
     }
 
     @Test
@@ -265,6 +340,30 @@ class QwpSinkTaskTest {
         assertEquals(1, recovery.rows);
         assertTrue(task.fakeContext.reportedValues.isEmpty());
         assertEquals(1L, task.preCommit(Collections.singletonMap(retainedPartition, new OffsetAndMetadata(1L))).get(retainedPartition).offset());
+    }
+
+    /**
+     * Kafka's default assignor is eager, so every rebalance revokes the whole assignment.
+     * A backpressure pause must not outlive that: Connect re-applies its own record of the
+     * pause when the partitions come back, while the task's flag is cleared with the
+     * assignment - leaving partitions paused with nothing able to resume them, no error, and
+     * a task that still reports itself healthy.
+     */
+    @Test
+    void backpressurePauseIsHandedBackWhenPartitionsAreRevoked() {
+        FakeSender sender = new FakeSender();
+        TestTask task = new TestTask(sender);
+        Map<String, String> extra = new HashMap<>();
+        extra.put(QuestDBSinkConnectorConfig.QWP_MAX_INFLIGHT_ROWS_CONFIG, "1");
+        startTask(task, 2, extra);
+
+        task.put(java.util.List.of(record(0L, 10L), record(1L, 11L)));
+        assertTrue(task.fakeContext.frameworkPaused.contains(SOURCE), "backpressure should pause the partition");
+
+        task.close(Collections.singleton(SOURCE));
+
+        assertTrue(task.fakeContext.frameworkPaused.isEmpty(),
+                "a re-assignment must not inherit a pause that nothing can lift");
     }
 
     @Test
@@ -533,15 +632,27 @@ class QwpSinkTaskTest {
             return assignment;
         }
 
+        /**
+         * Kafka Connect keeps its own record of the partitions a task asked to pause, and
+         * re-applies it whenever those partitions are assigned again - the set outlives a
+         * revocation. Model that here, otherwise a pause the task forgets to hand back looks
+         * harmless in tests and strands the partitions in production.
+         */
+        private final Set<TopicPartition> frameworkPaused = new HashSet<>();
+
         @Override
         public void pause(TopicPartition... partitions) {
             pauseCalls++;
             Collections.addAll(assignment, partitions);
+            Collections.addAll(frameworkPaused, partitions);
         }
 
         @Override
         public void resume(TopicPartition... partitions) {
             resumeCalls++;
+            for (TopicPartition partition : partitions) {
+                frameworkPaused.remove(partition);
+            }
         }
 
         @Override
@@ -549,11 +660,31 @@ class QwpSinkTaskTest {
             requestCommitCalls++;
         }
 
+        /**
+         * Kafka's own reporter hands back the DLQ producer's future, which completes on broker
+         * ack rather than immediately. Set this to model that, and complete the futures when
+         * the test wants the broker to catch up.
+         */
+        private boolean dlqFuturesPending;
+        private final java.util.List<CompletableFuture<Void>> issuedDlqFutures = new ArrayList<>();
+
+        private void completeDlqFutures() {
+            for (CompletableFuture<Void> future : issuedDlqFutures) {
+                future.complete(null);
+            }
+        }
+
         @Override
         public ErrantRecordReporter errantRecordReporter() {
             return (record, error) -> {
                 reportedValues.add(record.value() instanceof Number ? ((Number) record.value()).longValue() : -1L);
-                return CompletableFuture.completedFuture(null);
+                CompletableFuture<Void> future = new CompletableFuture<>();
+                if (dlqFuturesPending) {
+                    issuedDlqFutures.add(future);
+                } else {
+                    future.complete(null);
+                }
+                return future;
             };
         }
     }
