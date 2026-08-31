@@ -1,6 +1,7 @@
 package io.questdb.kafka;
 
 import io.questdb.client.Sender;
+import io.questdb.client.cairo.TableUtils;
 import io.questdb.client.cutlass.line.LineSenderException;
 import io.questdb.client.std.NumericException;
 import io.questdb.kafka.compat.datetime.DateFormat;
@@ -145,6 +146,7 @@ final class RecordToRowHandler {
         if (tableName == null || tableName.length() == 0) {
             throw new InvalidDataException("Table name cannot be empty");
         }
+        validateTableName(tableName);
         boolean partialRecord = false;
         try {
             sender.table(tableName);
@@ -422,6 +424,7 @@ final class RecordToRowHandler {
         if (tableName == null || tableName.equals("")) {
             throw new InvalidDataException("Table name cannot be empty");
         }
+        validateTableName(tableName);
 
         boolean partialRecord = false;
         try {
@@ -642,7 +645,17 @@ final class RecordToRowHandler {
 
     private static String sanitizeName(String name) {
         // todo: proper implementation
-        return name.replace('.', '_');
+        String sanitized = name.replace('.', '_');
+        if (!TableUtils.isValidColumnName(sanitized, Integer.MAX_VALUE)) {
+            throw new InvalidDataException("Column name contains illegal characters: " + sanitized);
+        }
+        return sanitized;
+    }
+
+    private static void validateTableName(CharSequence tableName) {
+        if (!TableUtils.isValidTableName(tableName, Integer.MAX_VALUE)) {
+            throw new InvalidDataException("Table name contains illegal characters: " + tableName);
+        }
     }
 
     private boolean tryWritePhysicalTypeFromSchema(String name, Schema schema, Object value, String fallbackName) {
