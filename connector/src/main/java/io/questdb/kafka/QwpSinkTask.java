@@ -34,16 +34,14 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 class QwpSinkTask extends SinkTask {
-    private static final long UNFLUSHED = Long.MIN_VALUE;
     private static final int COMPACTION_THRESHOLD = 1024;
     private static final Logger log = LoggerFactory.getLogger(QwpSinkTask.class);
 
     private final List<FlushEntry> flushEntries = new ArrayList<>();
     private final List<PendingRecord> retained = new ArrayList<>();
-    // Records complete in FSN order, which is the order they were appended, so
-    // completion consumes a prefix: `head` walks forward and the prefix is
-    // dropped in bulk. Rescanning the whole window on every put() made the cost
-    // per record proportional to retained/batch, which dominated the task's CPU.
+    // Settled records can be out of order across QuestDB and the DLQ. `head` only
+    // finds the reclaimable retained prefix; acknowledgements are copied to records
+    // through their FlushEntry before that entry is removed.
     private int head;
     // Records whose completion is a DLQ delivery rather than an ack; those can
     // land out of order, so they are tracked separately. Normally empty.
@@ -119,8 +117,7 @@ class QwpSinkTask extends SinkTask {
         }
         boolean batchAdmitted = false;
         try {
-            probeTerminalError();
-            updateCompletions();
+            refreshSenderState();
             detectStall();
             if (records.isEmpty()) {
                 // An empty poll signals quiescence: publish buffered rows now instead of
@@ -139,7 +136,9 @@ class QwpSinkTask extends SinkTask {
                 }
             }
             batchAdmitted = true;
-            if (!hadPendingRecords && hasServerPending()) {
+            if (!hadPendingRecords && retained.size() > retainedStart) {
+                // This is also the recovery progress epoch if a latched terminal surfaces while
+                // the first row is being built, before it can reach WRITTEN_NO_FSN.
                 lastProgressNanos = nanoTime();
             }
 
@@ -151,7 +150,7 @@ class QwpSinkTask extends SinkTask {
                 PendingRecord pending = retained.get(retainedIndex++);
                 try {
                     if (recordHandler.handle(record)) {
-                        pending.rowWritten = true;
+                        pending.markWritten();
                         pendingRows++;
                     }
                 } catch (InvalidDataException e) {
@@ -164,6 +163,7 @@ class QwpSinkTask extends SinkTask {
             flushIfDue();
             applyBackpressure();
         } catch (LineSenderServerException e) {
+            updateCompletionsAfterServerFailure(e);
             if (beginRecovery(e)) {
                 processRecoverySlice();
                 if (!batchAdmitted && !records.isEmpty()) {
@@ -188,7 +188,7 @@ class QwpSinkTask extends SinkTask {
                 // rejections belong to the slice that provoked them: surfacing one here instead
                 // would rebuild the plan from scratch, throwing away a bisection in progress and
                 // making records that already settled eligible for a second write.
-                probeTerminalError();
+                refreshSenderState();
                 // A commit cycle may be the last thing before a rebalance close(),
                 // whose drain cannot influence the commit (Connect uses this method's
                 // return value after close() runs). Publish buffered rows now and give
@@ -205,6 +205,7 @@ class QwpSinkTask extends SinkTask {
             updateCompletions();
             detectStall();
         } catch (LineSenderServerException e) {
+            updateCompletionsAfterServerFailure(e);
             if (!beginRecovery(e)) {
                 deferredFailure = terminalFailure(e);
             }
@@ -222,7 +223,7 @@ class QwpSinkTask extends SinkTask {
         Map<TopicPartition, Long> earliestIncomplete = new HashMap<>();
         for (int i = head, n = retained.size(); i < n; i++) {
             PendingRecord pending = retained.get(i);
-            if (pending.complete) {
+            if (pending.isSettled()) {
                 continue;
             }
             earliestIncomplete.putIfAbsent(pending.partition, pending.offset);
@@ -333,7 +334,7 @@ class QwpSinkTask extends SinkTask {
         records.clear();
         for (int i = head, n = retained.size(); i < n; i++) {
             PendingRecord pending = retained.get(i);
-            if (pending.rowRequired && pending.rowWritten && pending.dependencyFsn == UNFLUSHED) {
+            if (pending.isWrittenWithoutFsn()) {
                 records.add(pending);
             }
         }
@@ -351,17 +352,23 @@ class QwpSinkTask extends SinkTask {
             if (!sender.drain(0L)) {
                 return;
             }
-            long acked = Math.max(0L, sender.getAckedFsn());
+            long acked = Math.max(sender.getAckedFsn(), lastAckedFsn);
+            if (acked > lastAckedFsn) {
+                lastAckedFsn = acked;
+                lastProgressNanos = nanoTime();
+            }
+            boolean completedRecord = false;
             for (PendingRecord pending : records) {
-                pending.dependencyFsn = acked;
+                completedRecord |= pending.acknowledgeByQuestDb();
             }
             pendingRows = 0;
             nextFlushNanos = nanoTime() + flushConfig.autoFlushNanos;
+            finishCompletionUpdate(completedRecord);
             return;
         }
         long fromFsn = lastPublishedFsn + 1L;
         for (PendingRecord pending : records) {
-            pending.dependencyFsn = fsn;
+            pending.waitForQuestDbAck();
         }
         flushEntries.add(new FlushEntry(fromFsn, fsn, new ArrayList<>(records)));
         lastPublishedFsn = fsn;
@@ -369,38 +376,64 @@ class QwpSinkTask extends SinkTask {
         nextFlushNanos = nanoTime() + flushConfig.autoFlushNanos;
     }
 
-    private void probeTerminalError() {
-        long acked = Math.max(sender.getAckedFsn(), lastAckedFsn);
-        sender.awaitAckedFsn(acked, 0L);
+    private void refreshSenderState() {
+        updateCompletions();
+        sender.awaitAckedFsn(lastAckedFsn, 0L);
     }
 
     private void updateCompletions() {
+        updateCompletions(false);
+    }
+
+    private void updateCompletionsAfterServerFailure(LineSenderServerException serverFailure) {
+        try {
+            updateCompletions();
+        } catch (RuntimeException completionFailure) {
+            if (completionFailure != serverFailure) {
+                completionFailure.addSuppressed(serverFailure);
+            }
+            throw completionFailure;
+        }
+    }
+
+    private void updateCompletions(boolean completedRecord) {
         long acked = Math.max(sender.getAckedFsn(), lastAckedFsn);
         if (acked > lastAckedFsn) {
             lastAckedFsn = acked;
             lastProgressNanos = nanoTime();
         }
 
-        boolean completedRecord = false;
+        int acknowledgedEntries = 0;
+        for (int i = 0, n = flushEntries.size(); i < n; i++) {
+            FlushEntry entry = flushEntries.get(i);
+            if (entry.toFsn > acked) {
+                break;
+            }
+            for (PendingRecord pending : entry.records) {
+                completedRecord |= pending.acknowledgeByQuestDb();
+            }
+            acknowledgedEntries++;
+        }
+        if (acknowledgedEntries > 0) {
+            flushEntries.subList(0, acknowledgedEntries).clear();
+        }
+
         for (int i = 0; i < dlqPending.size(); i++) {
             PendingRecord pending = dlqPending.get(i);
-            if (pending.dlqFuture.isDone()) {
-                completeDlqFuture(pending.dlqFuture);
-                pending.complete = true;
+            Future<Void> future = pending.dlqFuture();
+            if (future.isDone()) {
+                completeDlqFuture(future);
+                pending.acknowledgeByDlq();
                 completedRecord = true;
                 dlqPending.remove(i--);
             }
         }
+        finishCompletionUpdate(completedRecord);
+    }
+
+    private void finishCompletionUpdate(boolean completedRecord) {
         int headBefore = head;
-        while (head < retained.size()) {
-            PendingRecord pending = retained.get(head);
-            if (!pending.complete) {
-                if (pending.dependencyFsn < 0L || pending.dependencyFsn > acked) {
-                    break;
-                }
-                pending.complete = true;
-                completedRecord = true;
-            }
+        while (head < retained.size() && retained.get(head).isSettled()) {
             head++;
         }
         // Records settled elsewhere (replay, DLQ) are already complete when the prefix reaches
@@ -410,7 +443,6 @@ class QwpSinkTask extends SinkTask {
             retained.subList(0, head).clear();
             head = 0;
         }
-        flushEntries.removeIf(entry -> entry.toFsn <= acked || entry.records.isEmpty());
         if (completedRecord) {
             context.requestCommit();
         }
@@ -443,7 +475,7 @@ class QwpSinkTask extends SinkTask {
     private boolean hasServerPending() {
         for (int i = head, n = retained.size(); i < n; i++) {
             PendingRecord pending = retained.get(i);
-            if (pending.rowRequired) {
+            if (pending.isWaitingForQuestDbProgress()) {
                 return true;
             }
         }
@@ -492,10 +524,8 @@ class QwpSinkTask extends SinkTask {
     }
 
     private void reportToDlq(PendingRecord pending, Throwable error) {
-        pending.rowRequired = false;
-        pending.rowWritten = false;
-        pending.dependencyFsn = UNFLUSHED;
-        pending.dlqFuture = reporter.report(pending.record, error);
+        Future<Void> future = reporter.report(pending.record, error);
+        pending.sendToDlq(future);
         dlqPending.add(pending);
     }
 
@@ -503,7 +533,7 @@ class QwpSinkTask extends SinkTask {
         int count = 0;
         for (int i = head, n = retained.size(); i < n; i++) {
             PendingRecord pending = retained.get(i);
-            if (pending.rowRequired && pending.rowWritten && pending.dependencyFsn == UNFLUSHED) {
+            if (pending.isWrittenWithoutFsn()) {
                 count++;
             }
         }
@@ -526,7 +556,7 @@ class QwpSinkTask extends SinkTask {
         if (config.isDlqSendBatchOnError()) {
             for (int i = head, n = retained.size(); i < n; i++) {
                 PendingRecord pending = retained.get(i);
-                if (pending.rowRequired) {
+                if (pending.needsQuestDbDelivery()) {
                     reportToDlq(pending, exception);
                 }
             }
@@ -556,7 +586,7 @@ class QwpSinkTask extends SinkTask {
         for (FlushEntry entry : flushEntries) {
             List<PendingRecord> eligible = new ArrayList<>(entry.records.size());
             for (PendingRecord pending : entry.records) {
-                if (pending.rowRequired) {
+                if (pending.needsQuestDbDelivery()) {
                     eligible.add(pending);
                     scheduled.add(pending);
                 }
@@ -572,7 +602,7 @@ class QwpSinkTask extends SinkTask {
         List<PendingRecord> tail = new ArrayList<>();
         for (int i = head, n = retained.size(); i < n; i++) {
             PendingRecord pending = retained.get(i);
-            if (pending.rowRequired && !scheduled.contains(pending)) {
+            if (pending.needsQuestDbDelivery() && !scheduled.contains(pending)) {
                 tail.add(pending);
             }
         }
@@ -627,7 +657,7 @@ class QwpSinkTask extends SinkTask {
 
         while (recovery.index < recovery.steps.size()) {
             RecoveryStep step = recovery.steps.get(recovery.index);
-            step.records.removeIf(pending -> !pending.rowRequired);
+            step.records.removeIf(pending -> !pending.needsQuestDbDelivery());
             if (step.records.isEmpty()) {
                 recovery.index++;
                 continue;
@@ -645,9 +675,9 @@ class QwpSinkTask extends SinkTask {
                 if (!sender.drain(waitMillis)) {
                     return;
                 }
-                settleRecoveryStep(step);
+                boolean completedRecord = settleRecoveryStep(step);
                 lastProgressNanos = nanoTime();
-                updateCompletions();
+                updateCompletions(completedRecord);
                 recovery.index++;
             } catch (LineSenderServerException e) {
                 SenderError error = e.getServerError();
@@ -699,7 +729,7 @@ class QwpSinkTask extends SinkTask {
     private void publishRecoveryStep(RecoveryStep step) {
         for (PendingRecord pending : step.records) {
             if (recordHandler.handle(pending.record)) {
-                pending.rowWritten = true;
+                pending.markWritten();
             }
         }
         long fsn = sender.flushAndGetSequence();
@@ -714,7 +744,7 @@ class QwpSinkTask extends SinkTask {
             return;
         }
         for (PendingRecord pending : step.records) {
-            pending.dependencyFsn = fsn;
+            pending.waitForQuestDbAck();
         }
         flushEntries.add(new FlushEntry(lastPublishedFsn + 1L, fsn, new ArrayList<>(step.records)));
         lastPublishedFsn = fsn;
@@ -725,14 +755,11 @@ class QwpSinkTask extends SinkTask {
      * behalf carries no frame number of its own, so its rows complete at the current acked
      * watermark - drain() returning true means everything published is acknowledged.
      */
-    private void settleRecoveryStep(RecoveryStep step) {
+    private boolean settleRecoveryStep(RecoveryStep step) {
         if (step.fsn >= 0L) {
             lastAckedFsn = Math.max(lastAckedFsn, step.fsn);
         } else {
             long acked = Math.max(0L, sender.getAckedFsn());
-            for (PendingRecord pending : step.records) {
-                pending.dependencyFsn = acked;
-            }
             lastAckedFsn = Math.max(lastAckedFsn, acked);
         }
         // These rows are durable now, so record that as a fact about each record rather than
@@ -740,9 +767,11 @@ class QwpSinkTask extends SinkTask {
         // numbering, and the completed prefix cannot advance past a record whose DLQ future is
         // still in flight - so a record settled here but not marked would be silently un-settled
         // by the next sender reset, and nothing would ever republish it.
+        boolean completedRecord = false;
         for (PendingRecord pending : step.records) {
-            pending.complete = true;
+            completedRecord |= pending.acknowledgeByQuestDb();
         }
+        return completedRecord;
     }
 
     private void resetSenderForRecovery() {
@@ -757,9 +786,8 @@ class QwpSinkTask extends SinkTask {
             PendingRecord pending = retained.get(i);
             // A settled record keeps its result: the new sender restarts frame numbering, so
             // only records that still have to be republished may carry a dependency on it.
-            if (pending.rowRequired && !pending.complete) {
-                pending.dependencyFsn = UNFLUSHED;
-                pending.rowWritten = false;
+            if (pending.needsQuestDbDelivery()) {
+                pending.queueForReplay();
             }
         }
         if (recovery != null && recovery.index < recovery.steps.size()) {
@@ -856,20 +884,114 @@ class QwpSinkTask extends SinkTask {
         }
     }
 
+    private enum DeliveryState {
+        READY_TO_WRITE,
+        WRITTEN_NO_FSN,
+        WAITING_FOR_QDB_ACK,
+        WAITING_FOR_DLQ_ACK,
+        ACKED_BY_QDB,
+        ACKED_BY_DLQ
+    }
+
     private static final class PendingRecord {
         private final SinkRecord record;
         private final TopicPartition partition;
         private final long offset;
-        private long dependencyFsn = UNFLUSHED;
+        private DeliveryState state = DeliveryState.READY_TO_WRITE;
         private Future<Void> dlqFuture;
-        private boolean rowRequired = true;
-        private boolean rowWritten;
-        private boolean complete;
 
         private PendingRecord(SinkRecord record, TopicPartition partition) {
             this.record = record;
             this.partition = partition;
             this.offset = record.originalKafkaOffset();
+        }
+
+        private void acknowledgeByDlq() {
+            if (state != DeliveryState.WAITING_FOR_DLQ_ACK) {
+                throw illegalTransition("acknowledge by DLQ");
+            }
+            state = DeliveryState.ACKED_BY_DLQ;
+            dlqFuture = null;
+        }
+
+        private boolean acknowledgeByQuestDb() {
+            if (state == DeliveryState.ACKED_BY_QDB) {
+                return false;
+            }
+            if (state != DeliveryState.WRITTEN_NO_FSN && state != DeliveryState.WAITING_FOR_QDB_ACK) {
+                throw illegalTransition("acknowledge by QuestDB");
+            }
+            state = DeliveryState.ACKED_BY_QDB;
+            return true;
+        }
+
+        private Future<Void> dlqFuture() {
+            if (state != DeliveryState.WAITING_FOR_DLQ_ACK || dlqFuture == null) {
+                throw illegalTransition("read DLQ future");
+            }
+            return dlqFuture;
+        }
+
+        private IllegalStateException illegalTransition(String attempted) {
+            return new IllegalStateException("Illegal QWP record transition [state=" + state
+                    + ", attempted=" + attempted
+                    + ", topic=" + partition.topic()
+                    + ", partition=" + partition.partition()
+                    + ", offset=" + offset + ']');
+        }
+
+        private boolean isSettled() {
+            return state == DeliveryState.ACKED_BY_QDB || state == DeliveryState.ACKED_BY_DLQ;
+        }
+
+        private boolean isWaitingForQuestDbProgress() {
+            return state == DeliveryState.WRITTEN_NO_FSN || state == DeliveryState.WAITING_FOR_QDB_ACK;
+        }
+
+        private boolean isWrittenWithoutFsn() {
+            return state == DeliveryState.WRITTEN_NO_FSN;
+        }
+
+        private void markWritten() {
+            if (state != DeliveryState.READY_TO_WRITE) {
+                throw illegalTransition("mark written");
+            }
+            state = DeliveryState.WRITTEN_NO_FSN;
+        }
+
+        private boolean needsQuestDbDelivery() {
+            return state == DeliveryState.READY_TO_WRITE
+                    || state == DeliveryState.WRITTEN_NO_FSN
+                    || state == DeliveryState.WAITING_FOR_QDB_ACK;
+        }
+
+        private void queueForReplay() {
+            if (state == DeliveryState.READY_TO_WRITE) {
+                return;
+            }
+            if (state != DeliveryState.WRITTEN_NO_FSN && state != DeliveryState.WAITING_FOR_QDB_ACK) {
+                throw illegalTransition("queue for replay");
+            }
+            state = DeliveryState.READY_TO_WRITE;
+        }
+
+        private void sendToDlq(Future<Void> future) {
+            if (!needsQuestDbDelivery()) {
+                throw illegalTransition("send to DLQ");
+            }
+            if (future == null) {
+                throw new ConnectException("QWP DLQ reporter returned no future [topic=" + partition.topic()
+                        + ", partition=" + partition.partition() + ", offset=" + offset + ']');
+            }
+            state = DeliveryState.WAITING_FOR_DLQ_ACK;
+            dlqFuture = future;
+        }
+
+        private void waitForQuestDbAck() {
+            if (state != DeliveryState.WRITTEN_NO_FSN) {
+                throw illegalTransition("wait for QuestDB ACK");
+            }
+            state = DeliveryState.WAITING_FOR_QDB_ACK;
         }
     }
 

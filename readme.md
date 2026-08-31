@@ -21,8 +21,10 @@ server failure can replay rows that QuestDB already committed. Configure
 
 The connector keeps Kafka as the durable log, so QWP store-and-forward is
 memory-only: `sf_dir` and `sf_durability` are rejected. `max.inflight.rows` is
-a soft pause threshold; `sf_max_total_bytes` is the hard client-memory
-backstop. Keep `sf_append_deadline_millis` below the worker consumer's
+a soft pause threshold, and the current poll batch may overshoot it.
+`sf_max_total_bytes` caps the client's encoded store-and-forward segments; it
+does not bound the heap retained by the connector's `SinkRecord` payloads.
+Keep `sf_append_deadline_millis` below the worker consumer's
 `max.poll.interval.ms` (or set `consumer.override.max.poll.interval.ms` so the
 connector can validate the relationship).
 

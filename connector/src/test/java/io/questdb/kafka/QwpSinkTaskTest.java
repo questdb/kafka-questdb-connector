@@ -28,6 +28,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -149,9 +150,11 @@ class QwpSinkTaskTest {
         FakeSender initial = new FakeSender();
         FakeSender recovery = new FakeSender();
         initial.rowFailure = schemaMismatch(0L);
-        TestTask task = startTask(new TestTask(initial, recovery), 1);
+        TestTask task = startTask(new TestTask(initial, recovery), 1, Collections.singletonMap(
+                QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "1"));
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(2);
 
-        task.put(Collections.singletonList(record(0L, 10L)));
+        assertDoesNotThrow(() -> task.put(Collections.singletonList(record(0L, 10L))));
 
         assertTrue(task.fakeContext.reportedValues.isEmpty(), "the record must not be blamed without evidence");
         assertEquals(1, recovery.rows, "it must be replayed to find out whether it is the offender");
@@ -228,6 +231,8 @@ class QwpSinkTaskTest {
         task.put(Collections.emptyList());
 
         assertEquals(java.util.List.of(10L, 12L), task.fakeContext.reportedValues);
+        assertEquals(1, task.fakeContext.requestCommitCalls,
+                "the replayed record should request a commit check without waiting for the retained head");
         Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(3L));
         assertEquals(0L, task.preCommit(current).get(SOURCE).offset(),
                 "offsets stay withheld while the DLQ writes are still in flight");
@@ -237,6 +242,83 @@ class QwpSinkTaskTest {
 
         assertEquals(3L, task.preCommit(current).get(SOURCE).offset(),
                 "every record is resolved, so the offset must advance");
+    }
+
+    @Test
+    void acknowledgedRecordBehindPendingDlqIsNotReplayedAfterLedgerEntryIsPruned() {
+        FakeSender initial = new FakeSender();
+        initial.drainSucceeds = false;
+        FakeSender rejectsTwelve = new FakeSender();
+        rejectsTwelve.rejectedValue = 12L;
+        FakeSender afterRejected = new FakeSender();
+        TestTask task = startTask(new TestTask(initial, rejectsTwelve, afterRejected), 1);
+        task.fakeContext.dlqFuturesPending = true;
+
+        task.put(Collections.singletonList(recordWithValue(0L, new Object())));
+        task.put(Collections.singletonList(record(1L, 11L)));
+        initial.ackedFsn = 0L;
+        task.put(Collections.emptyList());
+
+        task.put(Collections.singletonList(record(2L, 12L)));
+        initial.terminal = schemaMismatch(1L);
+        task.put(Collections.emptyList());
+
+        assertEquals(java.util.List.of(-1L, 12L), task.fakeContext.reportedValues);
+        assertEquals(1, rejectsTwelve.rows, "only the unresolved record should enter recovery");
+        assertEquals(0, afterRejected.rows, "the acknowledged record must remain settled after sender reset");
+
+        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(3L));
+        assertEquals(0L, task.preCommit(current).get(SOURCE).offset());
+        task.fakeContext.completeDlqFutures();
+        task.put(Collections.emptyList());
+        assertEquals(3L, task.preCommit(current).get(SOURCE).offset());
+    }
+
+    @Test
+    void appliesAckWatermarkBeforeBuildingRecoveryPlan() {
+        FakeSender initial = new FakeSender();
+        initial.drainSucceeds = false;
+        FakeSender recovery = new FakeSender();
+        recovery.rejectedValue = 12L;
+        FakeSender afterRejected = new FakeSender();
+        TestTask task = startTask(new TestTask(initial, recovery, afterRejected), 1);
+
+        task.put(Collections.singletonList(record(0L, 11L)));
+        task.put(Collections.singletonList(record(1L, 12L)));
+        initial.ackedFsn = 0L;
+        initial.terminal = schemaMismatch(1L);
+        task.put(Collections.emptyList());
+
+        assertEquals(Collections.singletonList(12L), task.fakeContext.reportedValues);
+        assertEquals(1, recovery.rows, "the sampled ACK must exclude the first record from recovery");
+        assertEquals(0, afterRejected.rows);
+    }
+
+    @Test
+    void successfulNoFsnDrainSettlesRecordBehindPendingDlq() {
+        FakeSender initial = new FakeSender();
+        initial.drainSucceeds = false;
+        initial.returnNoFsn = true;
+        FakeSender recovery = new FakeSender();
+        recovery.rejectedValue = 12L;
+        FakeSender afterRejected = new FakeSender();
+        TestTask task = startTask(new TestTask(initial, recovery, afterRejected), 1);
+        task.fakeContext.dlqFuturesPending = true;
+
+        task.put(Collections.singletonList(recordWithValue(0L, new Object())));
+        task.put(Collections.singletonList(record(1L, 11L)));
+        initial.drainSucceeds = true;
+        task.put(Collections.emptyList());
+
+        initial.returnNoFsn = false;
+        initial.drainSucceeds = false;
+        task.put(Collections.singletonList(record(2L, 12L)));
+        initial.terminal = schemaMismatch(2L);
+        task.put(Collections.emptyList());
+
+        assertEquals(java.util.List.of(-1L, 12L), task.fakeContext.reportedValues);
+        assertEquals(1, recovery.rows);
+        assertEquals(0, afterRejected.rows, "the no-FSN drain must make acknowledgement final");
     }
 
     @Test
@@ -323,6 +405,28 @@ class QwpSinkTaskTest {
     }
 
     @Test
+    void batchDlqModeExcludesAcknowledgedAndAlreadyReportedRecords() {
+        FakeSender initial = new FakeSender();
+        initial.drainSucceeds = false;
+        TestTask task = new TestTask(initial, new FakeSender());
+        startTask(task, 1, Collections.singletonMap(
+                QuestDBSinkConnectorConfig.DLQ_SEND_BATCH_ON_ERROR_CONFIG, "true"));
+        task.fakeContext.dlqFuturesPending = true;
+
+        task.put(Collections.singletonList(recordWithValue(0L, new Object())));
+        task.put(Collections.singletonList(record(1L, 11L)));
+        initial.ackedFsn = 0L;
+        task.put(Collections.emptyList());
+        task.put(Collections.singletonList(record(2L, 12L)));
+
+        initial.terminal = schemaMismatch(1L);
+        task.put(Collections.emptyList());
+
+        assertEquals(java.util.List.of(-1L, 12L), task.fakeContext.reportedValues,
+                "batch mode should report only unresolved QuestDB-bound records");
+    }
+
+    @Test
     void partialRevokeRemovesOnlyRevokedRecordsFromRecovery() {
         TopicPartition retainedPartition = new TopicPartition("source", 4);
         FakeSender initial = new FakeSender();
@@ -395,6 +499,72 @@ class QwpSinkTaskTest {
         task.nowNanos = TimeUnit.MILLISECONDS.toNanos(2);
         ConnectException failure = assertThrows(ConnectException.class, () -> task.put(Collections.emptyList()));
         assertTrue(failure.getMessage().contains("did not advance"));
+    }
+
+    @Test
+    void pendingDlqDoesNotLookLikeAQuestDbAcknowledgementStall() {
+        FakeSender sender = new FakeSender();
+        sender.drainSucceeds = false;
+        Map<String, String> extra = new HashMap<>();
+        extra.put(QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "1");
+        TestTask task = startTask(new TestTask(sender), 1, extra);
+        task.fakeContext.dlqFuturesPending = true;
+
+        task.put(Collections.singletonList(recordWithValue(0L, new Object())));
+        task.put(Collections.singletonList(record(1L, 11L)));
+        sender.ackedFsn = 0L;
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(2);
+
+        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(4);
+        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
+    }
+
+    @Test
+    void failedDlqFutureFailsTaskWithoutCommittingOffset() {
+        TestTask task = startTask(new FakeSender(), 1);
+        task.fakeContext.dlqFuturesPending = true;
+        task.put(Collections.singletonList(recordWithValue(0L, new Object())));
+        task.fakeContext.failDlqFutures();
+
+        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
+        assertTrue(task.preCommit(current).isEmpty());
+        ConnectException failure = assertThrows(ConnectException.class, () -> task.put(Collections.emptyList()));
+        assertTrue(failure.getMessage().contains("Failed to deliver a QWP record to the DLQ"));
+    }
+
+    @Test
+    void putPreservesServerFailureWhenDlqCompletionAlsoFails() {
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(sender, 1);
+        task.fakeContext.dlqFuturesPending = true;
+        task.put(Collections.singletonList(recordWithValue(0L, new Object())));
+
+        LineSenderServerException serverFailure = schemaMismatch(0L);
+        sender.terminal = serverFailure;
+        sender.beforeTerminal = task.fakeContext::failDlqFutures;
+
+        ConnectException failure = assertThrows(ConnectException.class, () -> task.put(Collections.emptyList()));
+        assertTrue(failure.getMessage().contains("Failed to deliver a QWP record to the DLQ"));
+        assertEquals(1, failure.getSuppressed().length);
+        assertSame(serverFailure, failure.getSuppressed()[0]);
+    }
+
+    @Test
+    void preCommitPreservesServerFailureWhenDlqCompletionAlsoFails() {
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(sender, 1);
+        task.fakeContext.dlqFuturesPending = true;
+        task.put(java.util.List.of(recordWithValue(0L, new Object()), record(1L, 11L)));
+
+        sender.rejectedValue = 11L;
+        sender.beforeTerminal = task.fakeContext::failDlqFutures;
+
+        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(2L));
+        ConnectException failure = assertThrows(ConnectException.class, () -> task.preCommit(current));
+        assertTrue(failure.getMessage().contains("Failed to deliver a QWP record to the DLQ"));
+        assertEquals(1, failure.getSuppressed().length);
+        assertSame(sender.terminal, failure.getSuppressed()[0]);
     }
 
     @Test
@@ -652,7 +822,9 @@ class QwpSinkTaskTest {
         private Long rejectedValue;
         private Long currentValue;
         private boolean drainSucceeds = true;
+        private boolean returnNoFsn;
         private RuntimeException rowFailure;
+        private Runnable beforeTerminal;
         private final java.util.List<Long> flushedValues = new ArrayList<>();
 
         private Sender proxy() {
@@ -676,11 +848,15 @@ class QwpSinkTaskTest {
                                     flushedValues.add(currentValue);
                                     currentValue = null;
                                 }
-                                return (long) flushes++;
+                                long published = flushes++;
+                                return returnNoFsn ? -1L : published;
                             case "getAckedFsn":
                                 return ackedFsn;
                             case "awaitAckedFsn":
                                 if (terminal != null) {
+                                    if (beforeTerminal != null) {
+                                        beforeTerminal.run();
+                                    }
                                     throw terminal;
                                 }
                                 return (long) args[0] <= ackedFsn;
@@ -690,6 +866,9 @@ class QwpSinkTaskTest {
                                 }
                                 if (rejectedValue != null && flushedValues.contains(rejectedValue)) {
                                     terminal = schemaMismatch(Math.max(0, flushes - 1L));
+                                    if (beforeTerminal != null) {
+                                        beforeTerminal.run();
+                                    }
                                     throw terminal;
                                 }
                                 ackedFsn = Math.max(ackedFsn, flushes - 1L);
@@ -780,6 +959,12 @@ class QwpSinkTaskTest {
         private void completeDlqFutures() {
             for (CompletableFuture<Void> future : issuedDlqFutures) {
                 future.complete(null);
+            }
+        }
+
+        private void failDlqFutures() {
+            for (CompletableFuture<Void> future : issuedDlqFutures) {
+                future.completeExceptionally(new RuntimeException("broker rejected DLQ write"));
             }
         }
 

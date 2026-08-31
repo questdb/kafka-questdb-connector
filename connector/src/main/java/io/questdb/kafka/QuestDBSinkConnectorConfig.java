@@ -87,7 +87,8 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public static final String DLQ_SEND_BATCH_ON_ERROR_CONFIG = "dlq.send.batch.on.error";
     private static final String DLQ_SEND_BATCH_ON_ERROR_DOC = "When true and a Dead Letter Queue (DLQ) is configured, " +
-            "send the entire batch to DLQ on parsing errors instead of trying to send records one-by-one to the database first. " +
+            "legacy transports send the current batch to the DLQ on parsing errors. For QWP terminal errors, send every unresolved " +
+            "QuestDB-bound record in the retained error window, excluding records already acknowledged by QuestDB or submitted to the DLQ. " +
             "This can be useful to avoid additional database load when errors are expected to affect multiple records. " +
             "Default is false (try one-by-one).";
 
@@ -98,7 +99,8 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     private static final String QWP_PROGRESS_TIMEOUT_MS_DOC = "Maximum time in milliseconds that QWP data may remain pending without the acknowledged frame sequence advancing before the task fails.";
 
     public static final String QWP_MAX_INFLIGHT_ROWS_CONFIG = "max.inflight.rows";
-    private static final String QWP_MAX_INFLIGHT_ROWS_DOC = "Soft QWP backpressure threshold for retained rows. The current poll batch may overshoot this value; sf_max_total_bytes is the hard memory backstop.";
+    private static final String QWP_MAX_INFLIGHT_ROWS_DOC = "Soft QWP backpressure threshold for retained rows. The current poll batch may overshoot this value. " +
+            "This row limit and the client's sf_max_total_bytes setting do not bound the heap retained by SinkRecord payloads.";
 
     public static final String QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG = "qwp.commit.ack.timeout.ms";
     private static final String QWP_COMMIT_ACK_TIMEOUT_MS_DOC = "Bounded time preCommit waits for server acks of just-published QWP rows so clean rebalances commit instead of redelivering. A timeout only withholds offsets.";
