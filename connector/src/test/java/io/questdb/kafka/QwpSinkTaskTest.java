@@ -105,6 +105,18 @@ class QwpSinkTaskTest {
     }
 
     @Test
+    void unresolvedPublishedRowsAskConnectToPollBeforeTheCommitDeadline() {
+        FakeSender sender = new FakeSender();
+        sender.drainSucceeds = false;
+        TestTask task = startTask(new TestTask(sender), 1, Collections.singletonMap(
+                QuestDBSinkConnectorConfig.ALLOWED_LAG_CONFIG, "25"));
+
+        task.put(Collections.singletonList(record(0L, 10L)));
+
+        assertEquals(Collections.singletonList(25L), task.fakeContext.timeouts);
+    }
+
+    @Test
     void isolatesRejectedEntryAndDlqsOnlyRejectedRecord() {
         FakeSender initial = new FakeSender();
         FakeSender recoveryOne = new FakeSender();
@@ -597,6 +609,7 @@ class QwpSinkTaskTest {
         TestTask task = startTask(new TestTask(initial, replay), 1, Collections.singletonMap(
                 QuestDBSinkConnectorConfig.QWP_ISOLATION_SLICE_MS_CONFIG, "25"));
         task.put(Collections.singletonList(record(0L, 10L)));
+        task.fakeContext.timeouts.clear();
         initial.terminal = schemaMismatch(0L);
         assertTrue(task.fakeContext.timeouts.isEmpty());
 

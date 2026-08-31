@@ -112,6 +112,9 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         httpPort = selfGenericContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT);
         ilpPort = selfGenericContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT);
+        // The server-main log line can precede stable HTTP service after recovery. A restart
+        // test immediately reuses the fixed port, so wait for an actual request to succeed.
+        QuestDBUtils.awaitReady(httpPort);
 
         return selfGenericContainer;
     }

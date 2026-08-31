@@ -125,6 +125,7 @@ class QwpSinkTask extends SinkTask {
                 // legacy HTTP path. Publishing is an async write, so this is cheap.
                 publishPendingRows();
                 applyBackpressure();
+                requestNextSenderCheck();
                 return;
             }
 
@@ -160,6 +161,7 @@ class QwpSinkTask extends SinkTask {
                     reportToDlq(pending, e);
                 }
             }
+            requestNextSenderCheck();
             flushIfDue();
             applyBackpressure();
         } catch (LineSenderServerException e) {
@@ -644,6 +646,21 @@ class QwpSinkTask extends SinkTask {
     private void requestNextRecoverySlice() {
         if (recovery != null) {
             context.timeout(config.getQwpIsolationSliceMs());
+        }
+    }
+
+    /**
+     * QWP acknowledgements and terminal errors arrive asynchronously. Once the last Kafka
+     * record has been delivered, Connect may otherwise block in poll() until the next offset
+     * commit (60 seconds by default), leaving the task RUNNING long after QuestDB rejected a
+     * frame. Keep asking the worker thread to observe the sender while QuestDB-bound records
+     * remain unresolved.
+     */
+    private void requestNextSenderCheck() {
+        if (hasServerPending()) {
+            long timeoutMs = Math.min(config.getAllowedLag(), config.getQwpProgressTimeoutMs());
+            // WorkerSinkTask ignores non-positive task timeouts.
+            context.timeout(Math.max(1L, timeoutMs));
         }
     }
 

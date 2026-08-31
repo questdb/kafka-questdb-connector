@@ -52,6 +52,10 @@ public final class QuestDBUtils {
         }
     }
 
+    public static void awaitReady(int port) {
+        assertSqlEventually("\"ready\"\r\n1\r\n", "select 1 ready", port);
+    }
+
     /**
      * Drops every table, best-effort. Tests share one QuestDB instance per class
      * and QuestDB preallocates tens of megabytes per table, so keeping every
