@@ -466,7 +466,7 @@ class QwpSinkTaskTest {
      * a task that still reports itself healthy.
      */
     @Test
-    void backpressurePauseIsHandedBackWhenPartitionsAreRevoked() {
+    void backpressurePauseIsHandedBackOnlyForAssignedPartitions() {
         FakeSender sender = new FakeSender();
         TestTask task = new TestTask(sender);
         Map<String, String> extra = new HashMap<>();
@@ -476,7 +476,9 @@ class QwpSinkTaskTest {
         task.put(java.util.List.of(record(0L, 10L), record(1L, 11L)));
         assertTrue(task.fakeContext.frameworkPaused.contains(SOURCE), "backpressure should pause the partition");
 
-        task.close(Collections.singleton(SOURCE));
+        TopicPartition previouslyRevoked = new TopicPartition("source", 4);
+        assertDoesNotThrow(() -> task.close(java.util.List.of(SOURCE, previouslyRevoked)),
+                "shutdown may pass stale offsets, but resume accepts only assigned partitions");
 
         assertTrue(task.fakeContext.frameworkPaused.isEmpty(),
                 "a re-assignment must not inherit a pause that nothing can lift");
@@ -952,6 +954,9 @@ class QwpSinkTaskTest {
         public void resume(TopicPartition... partitions) {
             resumeCalls++;
             for (TopicPartition partition : partitions) {
+                if (!assignment.contains(partition)) {
+                    throw new IllegalStateException("Cannot resume unassigned partition " + partition);
+                }
                 frameworkPaused.remove(partition);
             }
         }

@@ -266,13 +266,17 @@ class QwpSinkTask extends SinkTask {
         }
         Set<TopicPartition> revoked = new HashSet<>(partitions);
         if (partitionsPaused) {
+            Set<TopicPartition> resumable = new HashSet<>(revoked);
+            resumable.retainAll(assignment);
             // Connect records the pause we requested and re-applies it when these partitions
             // are assigned again, while our own flag only describes the current assignment.
             // Hand the pause back before letting go, so a re-assignment starts unpaused;
             // open() re-pauses whatever comes back if we are still holding partitions.
             // Otherwise a revocation that empties the assignment clears our flag while
             // Connect keeps the pause, and nothing is left that can ever resume it.
-            context.resume(revoked.toArray(new TopicPartition[0]));
+            if (!resumable.isEmpty()) {
+                context.resume(resumable.toArray(new TopicPartition[0]));
+            }
         }
         assignment.removeAll(revoked);
         retained.subList(head, retained.size()).removeIf(pending -> revoked.contains(pending.partition));
