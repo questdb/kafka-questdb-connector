@@ -1779,6 +1779,25 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testIllegalColumnNameOnEmptyContainersIsIgnored(ConnectTestUtils.Transport transport) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
+        props.put("value.converter.schemas.enable", "false");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"meta-data\":{}}");
+        connect.kafka().produce(topicName, "key", "{\"firstname\":\"Jane\",\"meta-data\":[]}");
+
+        QuestDBUtils.assertSqlEventually("\"firstname\"\r\n"
+                        + "\"John\"\r\n"
+                        + "\"Jane\"\r\n",
+                "select firstname from " + topicName,
+                httpPort);
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testJsonNoSchema_mixedFlotingAndIntTypes(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
@@ -1973,7 +1992,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
-    public void testSkipUnsupportedType_Bytes(ConnectTestUtils.Transport transport) {
+    public void testSkipUnsupportedType_BytesWithIllegalColumnName(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.SKIP_UNSUPPORTED_TYPES_CONFIG, "true");
@@ -1982,13 +2001,13 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
-                .field("age", Schema.BYTES_SCHEMA)
+                .field("meta-data", Schema.BYTES_SCHEMA)
                 .build();
 
         Struct struct = new Struct(schema)
                 .put("firstname", "John")
                 .put("lastname", "Doe")
-                .put("age", new byte[]{1, 2, 3});
+                .put("meta-data", new byte[]{1, 2, 3});
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 

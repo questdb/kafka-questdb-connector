@@ -223,7 +223,7 @@ final class RecordToRowHandler {
                     // element types, skip.unsupported.types) is intricate. Materialise the
                     // array in the same shape the converter produces and reuse that code
                     // rather than reimplementing the rules here.
-                    handleArrayWithoutSchema(sanitizeName(name), readJsonList(parser, depth + 1));
+                    handleArrayWithoutSchema(name.replace('.', '_'), readJsonList(parser, depth + 1));
                     break;
                 case VALUE_STRING:
                     writeJsonString(name, parser.getText());
@@ -544,11 +544,11 @@ final class RecordToRowHandler {
             return;
         }
         if (!symbolColumns.isEmpty()) {
-            String symbolName = sanitizeName(name.isEmpty() ? fallbackName : name);
+            String symbolName = (name.isEmpty() ? fallbackName : name).replace('.', '_');
             if (symbolColumns.contains(symbolName)) {
                 CharSequence symbolValue = symbolText(schema, value);
                 if (symbolValue != null) {
-                    sender.symbol(symbolName, symbolValue);
+                    sender.symbol(sanitizeName(symbolName), symbolValue);
                     return;
                 }
                 // Not a scalar the sender could have written: fall through and let the normal
@@ -594,38 +594,38 @@ final class RecordToRowHandler {
         if (value == null) {
             return;
         }
-        String actualName = name.isEmpty() ? fallbackName : sanitizeName(name);
+        String actualName = (name.isEmpty() ? fallbackName : name).replace('.', '_');
         if (value instanceof String) {
             String stringVal = (String) value;
             if (stringTimestampColumns.contains(actualName)) {
                 long timestamp = parseToMicros(stringVal);
-                sender.timestampColumn(actualName, timestamp, ChronoUnit.MICROS);
+                sender.timestampColumn(sanitizeName(actualName), timestamp, ChronoUnit.MICROS);
             } else {
-                sender.stringColumn(actualName, stringVal);
+                sender.stringColumn(sanitizeName(actualName), stringVal);
             }
         } else if (value instanceof Long) {
             Long longValue = (Long) value;
             if (doubleColumns.contains(actualName)) {
-                sender.doubleColumn(actualName, longValue.doubleValue());
+                sender.doubleColumn(sanitizeName(actualName), longValue.doubleValue());
             } else {
-                sender.longColumn(actualName, longValue);
+                sender.longColumn(sanitizeName(actualName), longValue);
             }
         } else if (value instanceof Integer) {
             Integer intValue = (Integer) value;
             if (doubleColumns.contains(actualName)) {
-                sender.doubleColumn(actualName, intValue.doubleValue());
+                sender.doubleColumn(sanitizeName(actualName), intValue.doubleValue());
             } else {
-                sender.longColumn(actualName, intValue);
+                sender.longColumn(sanitizeName(actualName), intValue);
             }
         } else if (value instanceof Boolean) {
-            sender.boolColumn(actualName, (Boolean) value);
+            sender.boolColumn(sanitizeName(actualName), (Boolean) value);
         } else if (value instanceof Double) {
-            sender.doubleColumn(actualName, (Double) value);
+            sender.doubleColumn(sanitizeName(actualName), (Double) value);
         } else if (value instanceof Map) {
             handleMap(name, (Map<?, ?>) value, fallbackName);
         } else if (value instanceof java.util.Date) {
             long epochMillis = ((java.util.Date) value).getTime();
-            sender.timestampColumn(actualName, TimeUnit.MILLISECONDS.toMicros(epochMillis), ChronoUnit.MICROS);
+            sender.timestampColumn(sanitizeName(actualName), TimeUnit.MILLISECONDS.toMicros(epochMillis), ChronoUnit.MICROS);
         } else if (value instanceof List) {
             handleArrayWithoutSchema(actualName, (List<?>) value);
         } else {
@@ -664,43 +664,43 @@ final class RecordToRowHandler {
         }
         Schema.Type type = schema.type();
         String primitiveTypesName = name.isEmpty() ? fallbackName : name;
-        String sanitizedName = sanitizeName(primitiveTypesName);
+        String actualName = primitiveTypesName.replace('.', '_');
         switch (type) {
             case INT8:
             case INT16:
             case INT32:
             case INT64:
                 Number l = (Number) value;
-                sender.longColumn(sanitizedName, l.longValue());
+                sender.longColumn(sanitizeName(actualName), l.longValue());
                 break;
             case FLOAT32:
             case FLOAT64:
                 Number d = (Number) value;
-                sender.doubleColumn(sanitizedName, d.doubleValue());
+                sender.doubleColumn(sanitizeName(actualName), d.doubleValue());
                 break;
             case BOOLEAN:
                 Boolean b = (Boolean) value;
-                sender.boolColumn(sanitizedName, b);
+                sender.boolColumn(sanitizeName(actualName), b);
                 break;
             case STRING:
                 String s = (String) value;
                 if (stringTimestampColumns.contains(primitiveTypesName)) {
                     long timestamp = parseToMicros(s);
-                    sender.timestampColumn(sanitizedName, timestamp, ChronoUnit.MICROS);
+                    sender.timestampColumn(sanitizeName(actualName), timestamp, ChronoUnit.MICROS);
                 } else {
-                    sender.stringColumn(sanitizedName, s);
+                    sender.stringColumn(sanitizeName(actualName), s);
                 }
                 break;
             case STRUCT:
                 handleStruct(name, (Struct) value, schema);
                 break;
             case ARRAY:
-                handleArray(sanitizedName, value, schema);
+                handleArray(actualName, value, schema);
                 break;
             case BYTES:
             case MAP:
             default:
-                onUnsupportedType(name, type);
+                onUnsupportedType(actualName, type);
         }
         return true;
     }
@@ -728,7 +728,7 @@ final class RecordToRowHandler {
                 }
                 doubleArray[i] = ((Number) element).doubleValue();
             }
-            sender.doubleArray(name, doubleArray);
+            sender.doubleArray(sanitizeName(name), doubleArray);
         } else if (elementType == Schema.Type.ARRAY) {
             Schema nestedValueSchema = valueSchema.valueSchema();
             if (nestedValueSchema != null && (nestedValueSchema.type() == Schema.Type.FLOAT32 || nestedValueSchema.type() == Schema.Type.FLOAT64)) {
@@ -762,7 +762,7 @@ final class RecordToRowHandler {
                         doubleArray2D[i][j] = ((Number) element).doubleValue();
                     }
                 }
-                sender.doubleArray(name, doubleArray2D);
+                sender.doubleArray(sanitizeName(name), doubleArray2D);
             } else if (nestedValueSchema != null && nestedValueSchema.type() == Schema.Type.ARRAY) {
                 Schema nestedNestedValueSchema = nestedValueSchema.valueSchema();
                 if (nestedNestedValueSchema != null && (nestedNestedValueSchema.type() == Schema.Type.FLOAT32 || nestedNestedValueSchema.type() == Schema.Type.FLOAT64)) {
@@ -815,7 +815,7 @@ final class RecordToRowHandler {
                             }
                         }
                     }
-                    sender.doubleArray(name, doubleArray3D);
+                    sender.doubleArray(sanitizeName(name), doubleArray3D);
                 } else {
                     onUnsupportedType(name, "Multidimensional ARRAY with unsupported element type");
                 }
@@ -850,7 +850,7 @@ final class RecordToRowHandler {
                     doubleArray[i] = ((Number) element).doubleValue();
                 }
             }
-            sender.doubleArray(name, doubleArray);
+            sender.doubleArray(sanitizeName(name), doubleArray);
         } else if (firstElement instanceof List) {
             List<?> firstList = (List<?>) firstElement;
             if (firstList.isEmpty()) {
@@ -894,7 +894,7 @@ final class RecordToRowHandler {
                         doubleArray2D[i][j] = ((Number) element).doubleValue();
                     }
                 }
-                sender.doubleArray(name, doubleArray2D);
+                sender.doubleArray(sanitizeName(name), doubleArray2D);
             } else if (firstNestedElement instanceof List) {
                 List<?> firstNestedList = (List<?>) firstNestedElement;
                 if (firstNestedList.isEmpty()) {
@@ -959,7 +959,7 @@ final class RecordToRowHandler {
                             }
                         }
                     }
-                    sender.doubleArray(name, doubleArray3D);
+                    sender.doubleArray(sanitizeName(name), doubleArray3D);
                 } else {
                     onUnsupportedType(name, "3D ARRAY with unsupported element type: " + firstNestedNestedElement.getClass().getSimpleName());
                 }
