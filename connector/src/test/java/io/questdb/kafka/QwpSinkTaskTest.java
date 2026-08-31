@@ -458,6 +458,53 @@ class QwpSinkTaskTest {
         assertEquals(1L, task.preCommit(Collections.singletonMap(retainedPartition, new OffsetAndMetadata(1L))).get(retainedPartition).offset());
     }
 
+    @Test
+    void partialRevokeDuringPublishedNoFsnRecoveryDoesNotCreatePendingRows() {
+        TopicPartition retainedPartition = new TopicPartition("source", 4);
+        FakeSender initial = new FakeSender();
+        FakeSender recovery = new FakeSender();
+        recovery.returnNoFsn = true;
+        recovery.drainSucceeds = false;
+        TestTask task = startTask(new TestTask(initial, recovery), 1_000);
+        task.open(Collections.singleton(retainedPartition));
+        task.put(java.util.List.of(record(SOURCE, 0L, 10L), record(retainedPartition, 0L, 20L)));
+
+        // No connector flush entry covers this rejection, so both records are replayed in one
+        // step. The client publishes that step itself and leaves it draining without an FSN.
+        initial.terminal = schemaMismatch(7L);
+        task.put(Collections.emptyList());
+        assertEquals(2, recovery.rows);
+
+        task.close(Collections.singleton(SOURCE));
+        recovery.drainSucceeds = true;
+        assertDoesNotThrow(() -> task.put(Collections.emptyList()),
+                "settling replay must not leave a normal-path flush count behind");
+
+        Map<TopicPartition, OffsetAndMetadata> current =
+                Collections.singletonMap(retainedPartition, new OffsetAndMetadata(1L));
+        assertEquals(1L, task.preCommit(current).get(retainedPartition).offset());
+    }
+
+    @Test
+    void partialRevokePreservesNormalPathPendingRows() {
+        TopicPartition retainedPartition = new TopicPartition("source", 4);
+        FakeSender sender = new FakeSender();
+        sender.drainSucceeds = false;
+        TestTask task = startTask(sender, 1_000);
+        task.open(Collections.singleton(retainedPartition));
+        task.put(java.util.List.of(record(SOURCE, 0L, 10L), record(retainedPartition, 0L, 20L)));
+
+        task.close(Collections.singleton(SOURCE));
+        task.put(Collections.emptyList());
+
+        assertEquals(Collections.singletonList(20L), sender.flushedValues,
+                "the surviving normal-path row must still trigger a flush");
+        sender.ackedFsn = 0L;
+        Map<TopicPartition, OffsetAndMetadata> current =
+                Collections.singletonMap(retainedPartition, new OffsetAndMetadata(1L));
+        assertEquals(1L, task.preCommit(current).get(retainedPartition).offset());
+    }
+
     /**
      * Kafka's default assignor is eager, so every rebalance revokes the whole assignment.
      * A backpressure pause must not outlive that: Connect re-applies its own record of the

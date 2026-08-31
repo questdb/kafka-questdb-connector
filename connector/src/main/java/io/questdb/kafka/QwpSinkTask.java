@@ -285,10 +285,13 @@ class QwpSinkTask extends SinkTask {
             flushEntry.records.removeIf(pending -> revoked.contains(pending.partition));
         }
         flushEntries.removeIf(entry -> entry.records.isEmpty());
-        pendingRows = countUnflushedRows();
         if (recovery != null) {
             recovery.removeRevoked(revoked);
         }
+        // RecoveryStep owns publication state while replay isolation owns the sender.
+        // resetSenderForRecovery() cleared this normal-path counter, and replay must not
+        // repopulate it merely because an FSN-less published step is still draining.
+        pendingRows = recovery == null ? countUnflushedRows() : 0;
         if (assignment.isEmpty()) {
             partitionsPaused = false;
         }
