@@ -378,48 +378,54 @@ class QwpSinkTask extends SinkTask {
     }
 
     private void publishPendingRows() {
+        List<PendingRecord> records = publishBuffer;
+        records.clear();
         if (pendingRows == 0) {
             return;
         }
-        List<PendingRecord> records = publishBuffer;
-        records.clear();
-        for (int i = head, n = retained.size(); i < n; i++) {
-            PendingRecord pending = retained.get(i);
-            if (pending.isWrittenWithoutFsn()) {
-                records.add(pending);
+        try {
+            for (int i = head, n = retained.size(); i < n; i++) {
+                PendingRecord pending = retained.get(i);
+                if (pending.isWrittenWithoutFsn()) {
+                    records.add(pending);
+                }
             }
-        }
-        long fsn = sender.flushAndGetSequence();
-        if (records.isEmpty()) {
-            throw new ConnectException("QWP flush published rows the ledger does not track");
-        }
-        if (fsn < 0L) {
-            // The client auto-flushed every buffered row before this checkpoint,
-            // so this call published nothing and the rows' real FSNs are unknown.
-            // drain(0) is a nonblocking "everything published is acked" probe:
-            // when it reports true the rows are durably acked and complete at
-            // the current acked watermark; until then they stay pending and a
-            // later checkpoint (or preCommit's bounded drain) settles them.
-            if (!sender.drain(0L)) {
+            long fsn = sender.flushAndGetSequence();
+            if (records.isEmpty()) {
+                throw new ConnectException("QWP flush published rows the ledger does not track");
+            }
+            if (fsn < 0L) {
+                // The client auto-flushed every buffered row before this checkpoint,
+                // so this call published nothing and the rows' real FSNs are unknown.
+                // drain(0) is a nonblocking "everything published is acked" probe:
+                // when it reports true the rows are durably acked and complete at
+                // the current acked watermark; until then they stay pending and a
+                // later checkpoint (or preCommit's bounded drain) settles them.
+                if (!sender.drain(0L)) {
+                    return;
+                }
+                long acked = Math.max(sender.getAckedFsn(), lastAckedFsn);
+                if (acked > lastAckedFsn) {
+                    lastAckedFsn = acked;
+                    lastProgressNanos = nanoTime();
+                }
+                boolean completedRecord = settleWrittenRowsAfterDrain();
+                finishCompletionUpdate(completedRecord);
                 return;
             }
-            long acked = Math.max(sender.getAckedFsn(), lastAckedFsn);
-            if (acked > lastAckedFsn) {
-                lastAckedFsn = acked;
-                lastProgressNanos = nanoTime();
+            long fromFsn = lastPublishedFsn + 1L;
+            for (PendingRecord pending : records) {
+                pending.waitForQuestDbAck();
             }
-            boolean completedRecord = settleWrittenRowsAfterDrain();
-            finishCompletionUpdate(completedRecord);
-            return;
+            flushEntries.add(new FlushEntry(fromFsn, fsn, new ArrayList<>(records)));
+            lastPublishedFsn = fsn;
+            pendingRows = 0;
+            nextFlushNanos = nanoTime() + flushConfig.autoFlushNanos;
+        } finally {
+            // This list is scratch space only. Keeping the last window here would retain each
+            // settled SinkRecord and its payload after the authoritative ledgers release it.
+            records.clear();
         }
-        long fromFsn = lastPublishedFsn + 1L;
-        for (PendingRecord pending : records) {
-            pending.waitForQuestDbAck();
-        }
-        flushEntries.add(new FlushEntry(fromFsn, fsn, new ArrayList<>(records)));
-        lastPublishedFsn = fsn;
-        pendingRows = 0;
-        nextFlushNanos = nanoTime() + flushConfig.autoFlushNanos;
     }
 
     private void refreshSenderState() {

@@ -15,9 +15,10 @@ import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTaskContext;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
-import java.util.Collection;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -72,6 +73,16 @@ class QwpSinkTaskTest {
     }
 
     @Test
+    void publicationDoesNotRetainScratchRecords() {
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(sender, 1);
+
+        task.put(Collections.singletonList(record(0L, 10L)));
+
+        assertEquals(0, publishBufferSize(task));
+    }
+
+    @Test
     void preCommitSettlesAutoFlushedRowsWhenBoundedDrainSucceeds() {
         FakeSender sender = new FakeSender();
         sender.returnNoFsn = true;
@@ -79,11 +90,13 @@ class QwpSinkTaskTest {
         TestTask task = startTask(new TestTask(sender), 1, Collections.singletonMap(
                 QuestDBSinkConnectorConfig.QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG, "37"));
         task.put(Collections.singletonList(record(0L, 10L)));
+        assertEquals(0, publishBufferSize(task));
 
         Map<TopicPartition, OffsetAndMetadata> current =
                 Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
         assertEquals(1L, task.preCommit(current).get(SOURCE).offset());
         assertEquals(java.util.List.of(0L, 0L, 37L), sender.drainTimeouts);
+        assertEquals(0, publishBufferSize(task));
     }
 
     @Test
@@ -1203,6 +1216,16 @@ class QwpSinkTaskTest {
 
     private static TestTask startTask(FakeSender sender, int flushRows) {
         return startTask(new TestTask(sender), flushRows);
+    }
+
+    private static int publishBufferSize(QwpSinkTask task) {
+        try {
+            Field field = QwpSinkTask.class.getDeclaredField("publishBuffer");
+            field.setAccessible(true);
+            return ((java.util.List<?>) field.get(task)).size();
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError(e);
+        }
     }
 
     private static void assertOverlongColumnNameIsDlqd(String acceptedName, String rejectedName) {
