@@ -195,6 +195,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testRawJsonFormat_malformedPayloadGoesToDlq(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter", "org.apache.kafka.connect.converters.ByteArrayConverter");
@@ -493,6 +495,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testDeadLetterQueue_wrongJson(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
@@ -519,6 +523,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testDeadLetterQueue_invalidTableName(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("errors.deadletterqueue.topic.name", "dlq");
@@ -551,6 +557,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testDeadLetterQueue_invalidColumnName(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("errors.deadletterqueue.topic.name", "dlq");
@@ -582,6 +590,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testDeadLetterQueue_unsupportedType(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("errors.deadletterqueue.topic.name", "dlq");
@@ -613,6 +623,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testDeadLetterQueue_emptyTable(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, "${key}");
@@ -644,6 +656,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testDeadLetterQueue_badColumnType(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
@@ -696,10 +710,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testDeadLetterQueue_rejectionInsideAClientPublishedFrame(ConnectTestUtils.Transport transport) {
-        // ILP over TCP is fire-and-forget: the server never reports a rejected row, so there is
-        // nothing to isolate and no record to blame. Record isolation is an HTTP/QWP contract.
-        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP,
-                "TCP has no server-side row rejection to isolate");
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
@@ -748,8 +760,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testDeadLetterQueue_rejectionWhileRecordsKeepArriving(ConnectTestUtils.Transport transport) {
-        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP,
-                "TCP has no server-side row rejection to isolate");
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
@@ -787,6 +799,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testDeadLetterQueue_sendBatchOnError(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
@@ -830,6 +844,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testBadColumnType_noDLQ(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");

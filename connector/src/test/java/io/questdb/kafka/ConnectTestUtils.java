@@ -46,15 +46,10 @@ public final class ConnectTestUtils {
         HTTP, TCP, QWP
     }
 
-    /**
-     * Transports the parameterized tests run against by default. TCP is
-     * effectively legacy and excluded; opt it back in ad hoc with
-     * -Dquestdb.test.transports=HTTP,TCP,QWP.
-     */
     static java.util.stream.Stream<Transport> defaultTransports() {
         String override = System.getProperty("questdb.test.transports");
         if (override == null || override.trim().isEmpty()) {
-            return java.util.stream.Stream.of(Transport.HTTP, Transport.QWP);
+            return java.util.stream.Stream.of(Transport.HTTP, Transport.QWP, Transport.TCP);
         }
         return java.util.Arrays.stream(override.split(","))
                 .map(String::trim)
