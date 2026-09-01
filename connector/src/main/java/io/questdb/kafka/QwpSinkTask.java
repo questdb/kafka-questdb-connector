@@ -64,6 +64,7 @@ class QwpSinkTask extends SinkTask {
     private long nextFlushNanos;
     private int pendingRows;
     private boolean partitionsPaused;
+    private boolean senderNeedsReplacement;
     private Recovery recovery;
 
     @Override
@@ -105,6 +106,7 @@ class QwpSinkTask extends SinkTask {
     @Override
     public void put(Collection<SinkRecord> records) {
         throwDeferredFailure();
+        prepareAfterRevocationIfNeeded();
         if (recovery != null) {
             processRecoverySlice();
             if (recovery != null) {
@@ -192,27 +194,34 @@ class QwpSinkTask extends SinkTask {
             return Collections.emptyMap();
         }
         try {
-            if (recovery == null) {
-                // Probing only makes sense while the sender is ours. A replay owns it, and its
-                // rejections belong to the slice that provoked them: surfacing one here instead
-                // would rebuild the plan from scratch, throwing away a bisection in progress and
-                // making records that already settled eligible for a second write.
-                refreshSenderState();
-                // A commit cycle may be the last thing before a rebalance close(),
-                // whose drain cannot influence the commit (Connect uses this method's
-                // return value after close() runs). Publish buffered rows now and give
-                // acks a short bounded window so a clean rebalance commits instead of
-                // redelivering the whole window. A timeout just withholds offsets.
-                publishPendingRows();
-                if (hasServerPending()) {
-                    // drain uses watermark semantics: flush, then wait (bounded)
-                    // until everything published so far - including frames the
-                    // client auto-flushed on its own - is acked.
-                    sender.drain(config.getQwpCommitAckTimeoutMs());
+            if (senderNeedsReplacement) {
+                // close() removed state that still depended on this sender. Its ACK and error
+                // watermarks are now ambiguous, but DLQ delivery is sender-independent and must
+                // still be allowed to release offsets while the task waits for the next put().
+                updateDlqCompletionsOnly();
+            } else {
+                if (recovery == null) {
+                    // Probing only makes sense while the sender is ours. A replay owns it, and its
+                    // rejections belong to the slice that provoked them: surfacing one here instead
+                    // would rebuild the plan from scratch, throwing away a bisection in progress and
+                    // making records that already settled eligible for a second write.
+                    refreshSenderState();
+                    // A commit cycle may be the last thing before a rebalance close(),
+                    // whose drain cannot influence the commit (Connect uses this method's
+                    // return value after close() runs). Publish buffered rows now and give
+                    // acks a short bounded window so a clean rebalance commits instead of
+                    // redelivering the whole window. A timeout just withholds offsets.
+                    publishPendingRows();
+                    if (hasServerPending()) {
+                        // drain uses watermark semantics: flush, then wait (bounded)
+                        // until everything published so far - including frames the
+                        // client auto-flushed on its own - is acked.
+                        sender.drain(config.getQwpCommitAckTimeoutMs());
+                    }
                 }
+                updateCompletions();
+                detectStall();
             }
-            updateCompletions();
-            detectStall();
         } catch (LineSenderServerException e) {
             try {
                 updateCompletionsAfterServerFailure(e);
@@ -280,6 +289,14 @@ class QwpSinkTask extends SinkTask {
             return;
         }
         Set<TopicPartition> revoked = new HashSet<>(partitions);
+        boolean removedSenderWork = false;
+        for (int i = head, n = retained.size(); i < n; i++) {
+            PendingRecord pending = retained.get(i);
+            if (revoked.contains(pending.partition) && pending.isWaitingForQuestDbProgress()) {
+                removedSenderWork = true;
+                break;
+            }
+        }
         if (partitionsPaused) {
             Set<TopicPartition> resumable = new HashSet<>(revoked);
             resumable.retainAll(assignment);
@@ -309,6 +326,12 @@ class QwpSinkTask extends SinkTask {
         pendingRows = recovery == null ? countUnflushedRows() : 0;
         if (assignment.isEmpty()) {
             partitionsPaused = false;
+        }
+        senderNeedsReplacement |= removedSenderWork;
+        if (senderNeedsReplacement) {
+            // Connect invokes put() on every poll iteration. This only shortens the quarantine
+            // window; correctness comes from senderNeedsReplacement gating preCommit().
+            context.timeout(1L);
         }
     }
 
@@ -443,6 +466,14 @@ class QwpSinkTask extends SinkTask {
             flushEntries.subList(0, acknowledgedEntries).clear();
         }
 
+        updateDlqCompletionsOnly(completedRecord);
+    }
+
+    private void updateDlqCompletionsOnly() {
+        updateDlqCompletionsOnly(false);
+    }
+
+    private void updateDlqCompletionsOnly(boolean completedRecord) {
         for (int i = 0; i < dlqPending.size(); i++) {
             PendingRecord pending = dlqPending.get(i);
             Future<Void> future = pending.dlqFuture();
@@ -570,6 +601,36 @@ class QwpSinkTask extends SinkTask {
         String message = "QuestDB rejected QWP frames [category=" + error.getCategory()
                 + ", fsn=" + error.getFromFsn() + "-" + error.getToFsn() + ']';
         return new ConnectException(message, e);
+    }
+
+    private void prepareAfterRevocationIfNeeded() {
+        if (!senderNeedsReplacement) {
+            return;
+        }
+
+        List<PendingRecord> replay = new ArrayList<>();
+        for (int i = head, n = retained.size(); i < n; i++) {
+            PendingRecord pending = retained.get(i);
+            if (pending.needsQuestDbDelivery()) {
+                replay.add(pending);
+            }
+        }
+
+        recovery = replay.isEmpty()
+                ? null
+                : new Recovery(Collections.singletonList(new RecoveryStep(replay, false)));
+        if (recovery != null) {
+            pauseAssignedPartitions();
+            requestNextRecoverySlice();
+        }
+
+        replaceSender(true);
+        for (PendingRecord pending : replay) {
+            pending.queueForReplay();
+        }
+        lastProgressNanos = nanoTime();
+        nextFlushNanos = nanoTime() + flushConfig.autoFlushNanos;
+        senderNeedsReplacement = false;
     }
 
     private boolean beginRecovery(LineSenderServerException exception) {
@@ -815,13 +876,7 @@ class QwpSinkTask extends SinkTask {
     }
 
     private void resetSenderForRecovery() {
-        closeSenderSilently();
-        sender = createSender();
-        recordHandler.setSender(sender);
-        flushEntries.clear();
-        pendingRows = 0;
-        lastAckedFsn = -1L;
-        lastPublishedFsn = -1L;
+        replaceSender(false);
         for (int i = head, n = retained.size(); i < n; i++) {
             PendingRecord pending = retained.get(i);
             // A settled record keeps its result: the new sender restarts frame numbering, so
@@ -833,6 +888,20 @@ class QwpSinkTask extends SinkTask {
         if (recovery != null && recovery.index < recovery.steps.size()) {
             recovery.steps.get(recovery.index).published = false;
         }
+    }
+
+    private void replaceSender(boolean afterRevocation) {
+        if (afterRevocation) {
+            closeSenderAfterRevocation();
+        } else {
+            closeSenderSilently();
+        }
+        sender = createSender();
+        recordHandler.setSender(sender);
+        flushEntries.clear();
+        pendingRows = 0;
+        lastAckedFsn = -1L;
+        lastPublishedFsn = -1L;
     }
 
     private void pauseAssignedPartitions() {
@@ -860,6 +929,24 @@ class QwpSinkTask extends SinkTask {
         if (sender != null) {
             try {
                 sender.close();
+            } catch (Exception e) {
+                log.warn("Failed to close QWP sender", e);
+            } finally {
+                sender = null;
+            }
+        }
+    }
+
+    private void closeSenderAfterRevocation() {
+        if (sender != null) {
+            try {
+                sender.close();
+            } catch (LineSenderServerException e) {
+                SenderError error = e.getServerError();
+                log.warn("Ignoring QWP rejection from a sender retired after partition revocation; "
+                                + "Kafka offsets were withheld and the records will be redelivered "
+                                + "[category={}, fsn={}-{}]",
+                        error.getCategory(), error.getFromFsn(), error.getToFsn());
             } catch (Exception e) {
                 log.warn("Failed to close QWP sender", e);
             } finally {

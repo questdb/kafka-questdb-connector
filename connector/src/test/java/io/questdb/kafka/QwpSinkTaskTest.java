@@ -495,7 +495,8 @@ class QwpSinkTaskTest {
 
         task.close(Collections.singleton(SOURCE));
         initial.terminal = schemaMismatch(0L);
-        assertTrue(task.preCommit(Collections.singletonMap(retainedPartition, new OffsetAndMetadata(1L))).isEmpty());
+        assertEquals(0L, task.preCommit(Collections.singletonMap(
+                retainedPartition, new OffsetAndMetadata(1L))).get(retainedPartition).offset());
         task.put(Collections.emptyList());
 
         assertEquals(1, recovery.rows);
@@ -510,7 +511,8 @@ class QwpSinkTaskTest {
         FakeSender recovery = new FakeSender();
         recovery.returnNoFsn = true;
         recovery.drainSucceeds = false;
-        TestTask task = startTask(new TestTask(initial, recovery), 1_000);
+        FakeSender fresh = new FakeSender();
+        TestTask task = startTask(new TestTask(initial, recovery, fresh), 1_000);
         task.open(Collections.singleton(retainedPartition));
         task.put(java.util.List.of(record(SOURCE, 0L, 10L), record(retainedPartition, 0L, 20L)));
 
@@ -521,9 +523,9 @@ class QwpSinkTaskTest {
         assertEquals(2, recovery.rows);
 
         task.close(Collections.singleton(SOURCE));
-        recovery.drainSucceeds = true;
         assertDoesNotThrow(() -> task.put(Collections.emptyList()),
                 "settling replay must not leave a normal-path flush count behind");
+        assertEquals(1, fresh.rows, "the surviving replay row must move to a fresh sender");
 
         Map<TopicPartition, OffsetAndMetadata> current =
                 Collections.singletonMap(retainedPartition, new OffsetAndMetadata(1L));
@@ -531,23 +533,319 @@ class QwpSinkTaskTest {
     }
 
     @Test
-    void partialRevokePreservesNormalPathPendingRows() {
+    void partialRevokeReplaysSurvivingNormalPathRows() {
         TopicPartition retainedPartition = new TopicPartition("source", 4);
         FakeSender sender = new FakeSender();
         sender.drainSucceeds = false;
-        TestTask task = startTask(sender, 1_000);
+        FakeSender fresh = new FakeSender();
+        TestTask task = startTask(new TestTask(sender, fresh), 1_000);
         task.open(Collections.singleton(retainedPartition));
         task.put(java.util.List.of(record(SOURCE, 0L, 10L), record(retainedPartition, 0L, 20L)));
 
         task.close(Collections.singleton(SOURCE));
         task.put(Collections.emptyList());
 
-        assertEquals(Collections.singletonList(20L), sender.flushedValues,
-                "the surviving normal-path row must still trigger a flush");
-        sender.ackedFsn = 0L;
+        assertEquals(Collections.singletonList(20L), fresh.flushedValues,
+                "the surviving normal-path row must be replayed on the fresh sender");
         Map<TopicPartition, OffsetAndMetadata> current =
                 Collections.singletonMap(retainedPartition, new OffsetAndMetadata(1L));
         assertEquals(1L, task.preCommit(current).get(retainedPartition).offset());
+    }
+
+    @Test
+    void lateRejectionAfterFullRevokeUsesFreshSender() {
+        FakeSender initial = new FakeSender();
+        initial.drainSucceeds = false;
+        FakeSender fresh = new FakeSender();
+        FakeSender isolation = new FakeSender();
+        isolation.rejectedValue = 10L;
+        FakeSender afterRejected = new FakeSender();
+        TestTask task = startTask(new TestTask(initial, fresh, isolation, afterRejected), 1);
+
+        task.put(Collections.singletonList(record(0L, 10L)));
+        Map<TopicPartition, OffsetAndMetadata> current =
+                Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
+        assertEquals(0L, task.preCommit(current).get(SOURCE).offset());
+        task.close(Collections.singleton(SOURCE));
+        assertEquals(1, task.senderIndex, "close must not construct a sender");
+
+        initial.terminal = schemaMismatch(0L);
+        initial.closeFailure = initial.terminal;
+        task.open(Collections.singleton(SOURCE));
+        assertDoesNotThrow(() -> task.put(Collections.singletonList(record(0L, 10L))));
+        assertEquals(1, fresh.rows, "the redelivered record must use a fresh sender");
+
+        fresh.terminal = schemaMismatch(0L);
+        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
+        assertEquals(Collections.singletonList(10L), task.fakeContext.reportedValues);
+        assertEquals(1L, task.preCommit(current).get(SOURCE).offset());
+    }
+
+    @Test
+    void closeDoesNotCreateReplacementSender() {
+        FakeSender initial = new FakeSender();
+        TestTask task = startTask(new TestTask(initial, new FakeSender()), 1);
+        task.put(Collections.singletonList(record(0L, 10L)));
+
+        task.fakeContext.timeouts.clear();
+        task.close(Collections.singleton(SOURCE));
+
+        assertEquals(1, task.senderIndex);
+        assertEquals(Collections.singletonList(1L), task.fakeContext.timeouts);
+        assertEquals(0, task.fakeContext.pauseCalls);
+        task.stop();
+        assertEquals(1, task.senderIndex, "shutdown must not construct a replacement sender");
+        assertEquals(1, initial.closeCalls);
+    }
+
+    @Test
+    void failedReplacementKeepsSenderStaleForRetry() {
+        FakeSender initial = new FakeSender();
+        FakeSender fresh = new FakeSender();
+        TestTask task = startTask(new TestTask(initial, fresh), 1);
+        task.put(Collections.singletonList(record(0L, 10L)));
+        task.close(Collections.singleton(SOURCE));
+        task.senderBuildFailure = new LineSenderException("replacement failed");
+
+        assertThrows(LineSenderException.class, () -> task.put(Collections.emptyList()));
+        assertEquals(1, task.senderIndex);
+        assertEquals(1, initial.closeCalls);
+
+        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
+        assertEquals(2, task.senderIndex, "the next put must retry the deferred replacement");
+        assertEquals(1, initial.closeCalls, "the already retired sender must not be closed twice");
+    }
+
+    @Test
+    void staleSenderPreCommitStillWaitsForDlq() {
+        TopicPartition retainedPartition = new TopicPartition("source", 4);
+        FakeSender initial = new FakeSender();
+        TestTask task = startTask(new TestTask(initial, new FakeSender()), 1);
+        task.open(Collections.singleton(retainedPartition));
+        task.fakeContext.dlqFuturesPending = true;
+        task.put(java.util.List.of(
+                recordWithValue(retainedPartition, 0L, new Object()),
+                record(SOURCE, 0L, 10L)
+        ));
+
+        task.close(Collections.singleton(SOURCE));
+        initial.terminal = schemaMismatch(0L);
+        int awaitCalls = initial.awaitAckCalls;
+        int getAckedCalls = initial.getAckedFsnCalls;
+        int drainCalls = initial.drainTimeouts.size();
+        Map<TopicPartition, OffsetAndMetadata> current =
+                Collections.singletonMap(retainedPartition, new OffsetAndMetadata(1L));
+
+        assertEquals(0L, task.preCommit(current).get(retainedPartition).offset());
+        assertEquals(awaitCalls, initial.awaitAckCalls, "a stale sender must not be queried");
+        assertEquals(getAckedCalls, initial.getAckedFsnCalls, "a stale sender must not sample ACKs");
+        assertEquals(drainCalls, initial.drainTimeouts.size(), "a stale sender must not be drained");
+
+        task.fakeContext.completeDlqFutures();
+        assertEquals(1L, task.preCommit(current).get(retainedPartition).offset());
+        assertEquals(awaitCalls, initial.awaitAckCalls);
+        assertEquals(getAckedCalls, initial.getAckedFsnCalls);
+        assertEquals(drainCalls, initial.drainTimeouts.size());
+    }
+
+    @Test
+    void staleSenderPreCommitDefersFailedDlqWithoutReplacingSender() {
+        TopicPartition retainedPartition = new TopicPartition("source", 4);
+        FakeSender initial = new FakeSender();
+        TestTask task = startTask(new TestTask(initial, new FakeSender()), 1);
+        task.open(Collections.singleton(retainedPartition));
+        task.fakeContext.dlqFuturesPending = true;
+        task.put(java.util.List.of(
+                recordWithValue(retainedPartition, 0L, new Object()),
+                record(SOURCE, 0L, 10L)
+        ));
+        task.close(Collections.singleton(SOURCE));
+        task.fakeContext.failDlqFutures();
+
+        assertTrue(task.preCommit(Collections.singletonMap(
+                retainedPartition, new OffsetAndMetadata(1L))).isEmpty());
+        assertEquals(1, task.senderIndex);
+        ConnectException failure = assertThrows(
+                ConnectException.class,
+                () -> task.put(Collections.emptyList())
+        );
+        assertTrue(failure.getMessage().contains("Failed to deliver a QWP record to the DLQ"));
+        assertEquals(1, task.senderIndex, "the deferred failure must win before sender replacement");
+    }
+
+    @Test
+    void partialRevokeReplaysSurvivingQuestDbWorkOnFreshSender() {
+        TopicPartition retainedPartition = new TopicPartition("source", 4);
+        FakeSender initial = new FakeSender();
+        initial.drainSucceeds = false;
+        FakeSender fresh = new FakeSender();
+        fresh.drainSucceeds = false;
+        TestTask task = startTask(new TestTask(initial, fresh), 2);
+        task.open(Collections.singleton(retainedPartition));
+        task.put(java.util.List.of(
+                record(SOURCE, 0L, 10L),
+                record(retainedPartition, 0L, 20L),
+                record(retainedPartition, 1L, 21L)
+        ));
+
+        task.close(Collections.singleton(SOURCE));
+        initial.terminal = schemaMismatch(0L);
+        int awaitCalls = initial.awaitAckCalls;
+        assertThrows(RetriableException.class, () -> task.put(Collections.singletonList(
+                record(retainedPartition, 2L, 22L))));
+
+        assertEquals(awaitCalls, initial.awaitAckCalls, "the old sender must stay quarantined");
+        assertEquals(java.util.List.of(20L, 21L), fresh.writtenValues,
+                "every surviving unresolved record must be replayed exactly once");
+        fresh.drainSucceeds = true;
+        assertDoesNotThrow(() -> task.put(Collections.singletonList(record(retainedPartition, 2L, 22L))));
+        assertEquals(java.util.List.of(20L, 21L, 22L), fresh.writtenValues,
+                "new input may be admitted after replay settles");
+    }
+
+    @Test
+    void fullRevokeDuringRecoveryRetiresRecoverySender() {
+        FakeSender initial = new FakeSender();
+        FakeSender recovery = new FakeSender();
+        recovery.drainSucceeds = false;
+        FakeSender fresh = new FakeSender();
+        TestTask task = startTask(new TestTask(initial, recovery, fresh), 1);
+        task.put(Collections.singletonList(record(0L, 10L)));
+        initial.terminal = schemaMismatch(0L);
+        task.put(Collections.emptyList());
+
+        task.close(Collections.singleton(SOURCE));
+        recovery.terminal = schemaMismatch(0L);
+        recovery.closeFailure = recovery.terminal;
+        task.open(Collections.singleton(SOURCE));
+
+        assertDoesNotThrow(() -> task.put(Collections.singletonList(record(0L, 10L))));
+        assertEquals(1, fresh.rows);
+        assertEquals(1, recovery.closeCalls);
+    }
+
+    @Test
+    void repeatedRebalancesReplaceSenderOnlyOnce() {
+        FakeSender initial = new FakeSender();
+        FakeSender fresh = new FakeSender();
+        TestTask task = startTask(new TestTask(initial, fresh), 1);
+        task.put(Collections.singletonList(record(0L, 10L)));
+
+        task.close(Collections.singleton(SOURCE));
+        initial.terminal = schemaMismatch(0L);
+        initial.closeFailure = initial.terminal;
+        int awaitCalls = initial.awaitAckCalls;
+        assertEquals(1L, task.preCommit(Collections.singletonMap(
+                SOURCE, new OffsetAndMetadata(1L))).get(SOURCE).offset());
+        task.open(Collections.singleton(SOURCE));
+        task.close(Collections.singleton(SOURCE));
+        task.open(Collections.singleton(SOURCE));
+
+        assertEquals(1, task.senderIndex, "rebalances must only mark the sender stale");
+        task.put(Collections.emptyList());
+        task.put(Collections.emptyList());
+        assertEquals(2, task.senderIndex, "the sticky stale state needs one replacement");
+        assertEquals(1, initial.closeCalls);
+        assertEquals(awaitCalls, initial.awaitAckCalls);
+    }
+
+    @Test
+    void quarantineWindowSurvivesPreCommitAndSecondRebalance() {
+        TopicPartition removedOnSecondRebalance = new TopicPartition("source", 4);
+        TopicPartition survivingPartition = new TopicPartition("source", 5);
+        FakeSender initial = new FakeSender();
+        initial.drainSucceeds = false;
+        FakeSender fresh = new FakeSender();
+        Map<String, String> extra = Collections.singletonMap(
+                QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "1");
+        TestTask task = startTask(new TestTask(initial, fresh), 3, extra);
+        task.open(java.util.List.of(removedOnSecondRebalance, survivingPartition));
+        task.put(java.util.List.of(
+                record(SOURCE, 0L, 10L),
+                record(removedOnSecondRebalance, 0L, 20L),
+                record(survivingPartition, 0L, 30L)
+        ));
+
+        task.close(Collections.singleton(SOURCE));
+        initial.terminal = schemaMismatch(0L);
+        int awaitCalls = initial.awaitAckCalls;
+        int getAckedCalls = initial.getAckedFsnCalls;
+        int drainCalls = initial.drainTimeouts.size();
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(2);
+
+        Map<TopicPartition, OffsetAndMetadata> current = new HashMap<>();
+        current.put(removedOnSecondRebalance, new OffsetAndMetadata(1L));
+        current.put(survivingPartition, new OffsetAndMetadata(1L));
+        Map<TopicPartition, OffsetAndMetadata> committed = task.preCommit(current);
+        assertEquals(0L, committed.get(removedOnSecondRebalance).offset());
+        assertEquals(0L, committed.get(survivingPartition).offset());
+        assertEquals(awaitCalls, initial.awaitAckCalls, "a stale sender must not be awaited");
+        assertEquals(getAckedCalls, initial.getAckedFsnCalls, "a stale sender must not be sampled");
+        assertEquals(drainCalls, initial.drainTimeouts.size(), "a stale sender must not be drained");
+
+        task.open(Collections.singleton(SOURCE));
+        task.close(java.util.List.of(SOURCE, removedOnSecondRebalance));
+        task.open(Collections.singleton(SOURCE));
+        assertEquals(1, task.senderIndex, "neither rebalance may replace the sender");
+
+        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
+        assertEquals(Collections.singletonList(30L), fresh.writtenValues,
+                "replay must use only the survivor set after the second rebalance");
+        assertEquals(2, task.senderIndex);
+        assertEquals(awaitCalls, initial.awaitAckCalls);
+        assertEquals(getAckedCalls, initial.getAckedFsnCalls);
+        assertEquals(drainCalls, initial.drainTimeouts.size());
+    }
+
+    @Test
+    void survivingAckBeforeLateRevokedNackDoesNotEmptyRecovery() {
+        TopicPartition revokedPartition = new TopicPartition("source", 4);
+        FakeSender initial = new FakeSender();
+        initial.drainSucceeds = false;
+        FakeSender fresh = new FakeSender();
+        TestTask task = startTask(new TestTask(initial, fresh), 1);
+        task.open(Collections.singleton(revokedPartition));
+        task.put(Collections.singletonList(record(SOURCE, 0L, 10L)));
+        task.put(Collections.singletonList(record(revokedPartition, 0L, 20L)));
+
+        task.close(Collections.singleton(revokedPartition));
+        initial.ackedFsn = 0L;
+        initial.terminal = schemaMismatch(1L);
+
+        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
+        assertEquals(Collections.singletonList(10L), fresh.flushedValues,
+                "the old ACK must not remove surviving work from the fresh replay plan");
+        assertTrue(task.fakeContext.reportedValues.isEmpty());
+    }
+
+    @Test
+    void revokingOnlyReadyRecoveryWorkKeepsSender() {
+        TopicPartition revokedPartition = new TopicPartition("source", 4);
+        TopicPartition retainedPartition = new TopicPartition("source", 5);
+        FakeSender initial = new FakeSender();
+        FakeSender recovery = new FakeSender();
+        Map<String, String> extra = Collections.singletonMap(
+                QuestDBSinkConnectorConfig.QWP_ISOLATION_SLICE_MS_CONFIG, "1");
+        TestTask task = startTask(new TestTask(initial, recovery), 1, extra);
+        task.open(java.util.List.of(revokedPartition, retainedPartition));
+        task.put(Collections.singletonList(record(SOURCE, 0L, 10L)));
+        task.put(Collections.singletonList(record(revokedPartition, 0L, 20L)));
+        task.put(Collections.singletonList(record(retainedPartition, 0L, 30L)));
+
+        task.nanoTimeStep = TimeUnit.MICROSECONDS.toNanos(600);
+        initial.terminal = schemaMismatch(0L);
+        task.put(Collections.emptyList());
+        assertEquals(Collections.singletonList(10L), recovery.writtenValues,
+                "the slice must leave the later recovery steps unpublished");
+
+        task.close(Collections.singleton(revokedPartition));
+        assertEquals(2, task.senderIndex, "READY_TO_WRITE work does not contaminate the sender");
+        task.nanoTimeStep = 0L;
+        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
+
+        assertEquals(java.util.List.of(10L, 30L), recovery.writtenValues,
+                "the surviving ready step must continue on the existing recovery sender");
+        assertEquals(2, task.senderIndex);
     }
 
     /**
@@ -966,10 +1264,14 @@ class QwpSinkTaskTest {
     }
 
     private static SinkRecord recordWithValue(long offset, Object value) {
+        return recordWithValue(SOURCE, offset, value);
+    }
+
+    private static SinkRecord recordWithValue(TopicPartition source, long offset, Object value) {
         return new SinkRecord(
                 "renamed", 9, null, null, null, value, offset,
                 null, TimestampType.NO_TIMESTAMP_TYPE, Collections.emptyList(),
-                SOURCE.topic(), SOURCE.partition(), offset);
+                source.topic(), source.partition(), offset);
     }
 
     private static final class TestTask extends QwpSinkTask {
@@ -978,6 +1280,7 @@ class QwpSinkTaskTest {
         private FakeContext fakeContext;
         private long nowNanos;
         private long nanoTimeStep;
+        private RuntimeException senderBuildFailure;
 
         private TestTask(FakeSender... senders) {
             this.senders = senders;
@@ -985,6 +1288,11 @@ class QwpSinkTaskTest {
 
         @Override
         Sender buildSender(String confString) {
+            if (senderBuildFailure != null) {
+                RuntimeException failure = senderBuildFailure;
+                senderBuildFailure = null;
+                throw failure;
+            }
             if (senderIndex >= senders.length) {
                 throw new AssertionError("Unexpected sender recreation");
             }
@@ -1004,7 +1312,11 @@ class QwpSinkTaskTest {
         private int flushes;
         private int rows;
         private int cancelRows;
+        private int awaitAckCalls;
+        private int getAckedFsnCalls;
+        private int closeCalls;
         private LineSenderServerException terminal;
+        private LineSenderServerException closeFailure;
         private Long rejectedValue;
         private Long currentValue;
         private boolean drainSucceeds = true;
@@ -1013,6 +1325,7 @@ class QwpSinkTaskTest {
         private Runnable beforeTerminal;
         private final java.util.List<Long> drainTimeouts = new ArrayList<>();
         private final java.util.List<Long> flushedValues = new ArrayList<>();
+        private final java.util.List<Long> writtenValues = new ArrayList<>();
 
         private Sender proxy() {
             return (Sender) Proxy.newProxyInstance(
@@ -1026,6 +1339,9 @@ class QwpSinkTaskTest {
                                     throw rowFailure;
                                 }
                                 rows++;
+                                if (currentValue != null) {
+                                    writtenValues.add(currentValue);
+                                }
                                 return null;
                             case "longColumn":
                                 currentValue = ((Number) args[1]).longValue();
@@ -1038,8 +1354,10 @@ class QwpSinkTaskTest {
                                 long published = flushes++;
                                 return returnNoFsn ? -1L : published;
                             case "getAckedFsn":
+                                getAckedFsnCalls++;
                                 return ackedFsn;
                             case "awaitAckedFsn":
+                                awaitAckCalls++;
                                 if (terminal != null) {
                                     if (beforeTerminal != null) {
                                         beforeTerminal.run();
@@ -1066,6 +1384,11 @@ class QwpSinkTaskTest {
                                 currentValue = null;
                                 return null;
                             case "close":
+                                closeCalls++;
+                                if (closeFailure != null) {
+                                    throw closeFailure;
+                                }
+                                return null;
                             case "reset":
                             case "flush":
                                 return null;
