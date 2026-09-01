@@ -72,6 +72,21 @@ class QwpSinkTaskTest {
     }
 
     @Test
+    void preCommitSettlesAutoFlushedRowsWhenBoundedDrainSucceeds() {
+        FakeSender sender = new FakeSender();
+        sender.returnNoFsn = true;
+        sender.zeroTimeoutDrainSucceeds = false;
+        TestTask task = startTask(new TestTask(sender), 1, Collections.singletonMap(
+                QuestDBSinkConnectorConfig.QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG, "37"));
+        task.put(Collections.singletonList(record(0L, 10L)));
+
+        Map<TopicPartition, OffsetAndMetadata> current =
+                Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
+        assertEquals(1L, task.preCommit(current).get(SOURCE).offset());
+        assertEquals(java.util.List.of(0L, 0L, 37L), sender.drainTimeouts);
+    }
+
+    @Test
     void tombstonesAndUndeliveredOffsetsDoNotCreateLedgerHoles() {
         FakeSender fakeSender = new FakeSender();
         fakeSender.drainSucceeds = false; // acks arrive only when the test says so
@@ -1320,6 +1335,7 @@ class QwpSinkTaskTest {
         private Long rejectedValue;
         private Long currentValue;
         private boolean drainSucceeds = true;
+        private boolean zeroTimeoutDrainSucceeds = true;
         private boolean returnNoFsn;
         private RuntimeException rowFailure;
         private Runnable beforeTerminal;
@@ -1367,6 +1383,9 @@ class QwpSinkTaskTest {
                                 return (long) args[0] <= ackedFsn;
                             case "drain":
                                 drainTimeouts.add((Long) args[0]);
+                                if ((Long) args[0] == 0L && !zeroTimeoutDrainSucceeds) {
+                                    return false;
+                                }
                                 if (!drainSucceeds) {
                                     return false;
                                 }

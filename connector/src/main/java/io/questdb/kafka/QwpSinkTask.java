@@ -200,6 +200,7 @@ class QwpSinkTask extends SinkTask {
                 // still be allowed to release offsets while the task waits for the next put().
                 updateDlqCompletionsOnly();
             } else {
+                boolean completedRecord = false;
                 if (recovery == null) {
                     // Probing only makes sense while the sender is ours. A replay owns it, and its
                     // rejections belong to the slice that provoked them: surfacing one here instead
@@ -216,10 +217,12 @@ class QwpSinkTask extends SinkTask {
                         // drain uses watermark semantics: flush, then wait (bounded)
                         // until everything published so far - including frames the
                         // client auto-flushed on its own - is acked.
-                        sender.drain(config.getQwpCommitAckTimeoutMs());
+                        if (sender.drain(config.getQwpCommitAckTimeoutMs())) {
+                            completedRecord = settleWrittenRowsAfterDrain();
+                        }
                     }
                 }
-                updateCompletions();
+                updateCompletions(completedRecord);
                 detectStall();
             }
         } catch (LineSenderServerException e) {
@@ -405,12 +408,7 @@ class QwpSinkTask extends SinkTask {
                 lastAckedFsn = acked;
                 lastProgressNanos = nanoTime();
             }
-            boolean completedRecord = false;
-            for (PendingRecord pending : records) {
-                completedRecord |= pending.acknowledgeByQuestDb();
-            }
-            pendingRows = 0;
-            nextFlushNanos = nanoTime() + flushConfig.autoFlushNanos;
+            boolean completedRecord = settleWrittenRowsAfterDrain();
             finishCompletionUpdate(completedRecord);
             return;
         }
@@ -427,6 +425,20 @@ class QwpSinkTask extends SinkTask {
     private void refreshSenderState() {
         updateCompletions();
         sender.awaitAckedFsn(lastAckedFsn, 0L);
+    }
+
+    /** A successful global drain covers rows auto-flushed before we could record their FSNs. */
+    private boolean settleWrittenRowsAfterDrain() {
+        boolean completedRecord = false;
+        for (int i = head, n = retained.size(); i < n; i++) {
+            PendingRecord pending = retained.get(i);
+            if (pending.isWrittenWithoutFsn()) {
+                completedRecord |= pending.acknowledgeByQuestDb();
+            }
+        }
+        pendingRows = 0;
+        nextFlushNanos = nanoTime() + flushConfig.autoFlushNanos;
+        return completedRecord;
     }
 
     private void updateCompletions() {
