@@ -37,9 +37,9 @@ public class ClientConfUtilsTest {
         assertConfStringIsPatched("https::addr=localhost:9000;auto_flush=on;", "https::addr=localhost:9000;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
         assertConfStringIsPatched("https::addr=localhost:9000;foo=bar;auto_flush_interval=100;", "https::addr=localhost:9000;foo=bar;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, TimeUnit.MILLISECONDS.toNanos(100));
         assertConfStringIsPatched("https::addr=localhost:9000;foo=bar;auto_flush_interval=100;auto_flush_rows=42;", "https::addr=localhost:9000;foo=bar;auto_flush=off;",42, TimeUnit.MILLISECONDS.toNanos(100));
-        assertConfStringIsPatched("ws::addr=localhost:9000;auto_flush_interval=100;auto_flush_rows=42;", "ws::addr=localhost:9000;auto_flush_interval=100;auto_flush_rows=42;sf_append_deadline_millis=30000;auto_flush_bytes=104857600;close_flush_timeout_millis=0;", 42, TimeUnit.MILLISECONDS.toNanos(100));
+        assertConfStringIsPatched("ws::addr=localhost:9000;auto_flush_interval=100;auto_flush_rows=42;", "ws::addr=localhost:9000;auto_flush_interval=100;auto_flush_rows=42;sf_append_deadline_millis=30000;auto_flush_bytes=16777216;close_flush_timeout_millis=0;", 42, TimeUnit.MILLISECONDS.toNanos(100));
         assertConfStringIsPatched("wss::addr=localhost:9000;sf_max_total_bytes=1048576;sf_append_deadline_millis=1234;auto_flush_bytes=104857600;", "wss::addr=localhost:9000;sf_max_total_bytes=1048576;sf_append_deadline_millis=1234;auto_flush_bytes=104857600;close_flush_timeout_millis=0;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
-        assertConfStringIsPatched("ws::addr=localhost:9000;close_flush_timeout_millis=2345;", "ws::addr=localhost:9000;close_flush_timeout_millis=2345;sf_append_deadline_millis=30000;auto_flush_bytes=104857600;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
+        assertConfStringIsPatched("ws::addr=localhost:9000;close_flush_timeout_millis=2345;", "ws::addr=localhost:9000;close_flush_timeout_millis=2345;sf_append_deadline_millis=30000;auto_flush_bytes=16777216;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
 
         // The trailing semicolon is optional in the client's grammar, and such a string is
         // parseable and usable - so it must be patched like any other. Skipping it silently
@@ -47,7 +47,7 @@ public class ClientConfUtilsTest {
         // auto-flush armed, which the connector's flush accounting assumes is off.
         assertConfStringIsPatched("https::addr=localhost:9000;foo=bar", "https::addr=localhost:9000;foo=bar;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
         assertConfStringIsPatched("http::addr=localhost:9000;auto_flush_rows=1000", "http::addr=localhost:9000;auto_flush=off;", 1000, DEFAULT_FLUSH_INTERVAL_NANOS);
-        assertConfStringIsPatched("ws::addr=localhost:9000", "ws::addr=localhost:9000;sf_append_deadline_millis=30000;auto_flush_bytes=104857600;close_flush_timeout_millis=0;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
+        assertConfStringIsPatched("ws::addr=localhost:9000", "ws::addr=localhost:9000;sf_append_deadline_millis=30000;auto_flush_bytes=16777216;close_flush_timeout_millis=0;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
 
         // with escaped semi-colon
         assertConfStringIsPatched("https::addr=localhost:9000;foo=b;;ar;auto_flush_interval=100;auto_flush_rows=42;", "https::addr=localhost:9000;foo=b;;ar;auto_flush=off;",42, TimeUnit.MILLISECONDS.toNanos(100));

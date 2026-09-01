@@ -13,10 +13,11 @@ import java.util.concurrent.TimeUnit;
 
 final class ClientConfUtils {
     static final long DEFAULT_QWP_SF_APPEND_DEADLINE_MILLIS = 30_000L;
-    // Any positive value arms the client's byte trigger, which it then clamps
-    // to 90% of the server-advertised batch cap; 0 (the WS default) disables
-    // the trigger AND the clamp, leaving batches free to exceed the cap.
-    static final int DEFAULT_QWP_AUTO_FLUSH_BYTES = 100 * 1024 * 1024;
+    // Any positive value arms the client's byte trigger, which it then clamps to 90% of the
+    // server-advertised batch cap. The server never advertises more than the 16 MiB QWP protocol
+    // ceiling, so this preserves the effective trigger without making the sender reserve two
+    // 200 MiB native buffers before the handshake applies that clamp.
+    static final int DEFAULT_QWP_AUTO_FLUSH_BYTES = 16 * 1024 * 1024;
     // Connect fixes the closing commit's offsets from preCommit() before it calls stop(). QWP
     // already publishes there and gives acks a bounded wait, so waiting again in Sender.close()
     // cannot make any additional offsets committable. Skip only that redundant close-time ack
