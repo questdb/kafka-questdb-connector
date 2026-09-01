@@ -57,6 +57,21 @@ class QwpSinkTaskTest {
     }
 
     @Test
+    void preCommitUsesConfiguredAckTimeout() {
+        FakeSender sender = new FakeSender();
+        sender.drainSucceeds = false;
+        TestTask task = startTask(new TestTask(sender), 10, Collections.singletonMap(
+                QuestDBSinkConnectorConfig.QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG, "37"));
+        task.put(Collections.singletonList(record(0L, 10L)));
+
+        Map<TopicPartition, OffsetAndMetadata> current =
+                Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
+        assertEquals(0L, task.preCommit(current).get(SOURCE).offset());
+
+        assertEquals(Collections.singletonList(37L), sender.drainTimeouts);
+    }
+
+    @Test
     void tombstonesAndUndeliveredOffsetsDoNotCreateLedgerHoles() {
         FakeSender fakeSender = new FakeSender();
         fakeSender.drainSucceeds = false; // acks arrive only when the test says so
@@ -562,6 +577,31 @@ class QwpSinkTaskTest {
     }
 
     @Test
+    void partialReassignmentReappliesBackpressurePause() {
+        TopicPartition retainedPartition = new TopicPartition("source", 4);
+        FakeSender sender = new FakeSender();
+        TestTask task = new TestTask(sender);
+        Map<String, String> extra = new HashMap<>();
+        extra.put(QuestDBSinkConnectorConfig.QWP_MAX_INFLIGHT_ROWS_CONFIG, "1");
+        startTask(task, 10, extra);
+        task.open(Collections.singleton(retainedPartition));
+
+        task.put(java.util.List.of(
+                record(SOURCE, 0L, 10L),
+                record(retainedPartition, 0L, 20L)
+        ));
+        assertEquals(Set.of(SOURCE, retainedPartition), task.fakeContext.frameworkPaused);
+
+        task.close(Collections.singleton(SOURCE));
+        assertEquals(Collections.singleton(retainedPartition), task.fakeContext.frameworkPaused,
+                "the partition still owned by the task must remain paused");
+
+        task.open(Collections.singleton(SOURCE));
+        assertEquals(Set.of(SOURCE, retainedPartition), task.fakeContext.frameworkPaused,
+                "a reassigned partition must join the existing backpressure pause");
+    }
+
+    @Test
     void pausesAboveSoftInflightLimitAndResumesAfterAck() {
         FakeSender sender = new FakeSender();
         TestTask task = new TestTask(sender);
@@ -971,6 +1011,7 @@ class QwpSinkTaskTest {
         private boolean returnNoFsn;
         private RuntimeException rowFailure;
         private Runnable beforeTerminal;
+        private final java.util.List<Long> drainTimeouts = new ArrayList<>();
         private final java.util.List<Long> flushedValues = new ArrayList<>();
 
         private Sender proxy() {
@@ -1007,6 +1048,7 @@ class QwpSinkTaskTest {
                                 }
                                 return (long) args[0] <= ackedFsn;
                             case "drain":
+                                drainTimeouts.add((Long) args[0]);
                                 if (!drainSucceeds) {
                                     return false;
                                 }

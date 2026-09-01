@@ -26,6 +26,12 @@ public class QuestDBSinkConnectorConfigTest {
         QuestDBSinkConnectorConfig config = new QuestDBSinkConnectorConfig(props);
         assertEquals(300_000L, config.getQwpProgressTimeoutMs());
         assertEquals(150_000, config.getQwpMaxInflightRows());
+        assertEquals(500L, config.getQwpCommitAckTimeoutMs());
+
+        props.put(QuestDBSinkConnectorConfig.QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG, "-1");
+        assertThrows(ConfigException.class, () -> new QuestDBSinkConnectorConfig(props));
+        props.put(QuestDBSinkConnectorConfig.QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG, "0");
+        assertEquals(0L, new QuestDBSinkConnectorConfig(props).getQwpCommitAckTimeoutMs());
 
         props.put(QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "0");
         assertThrows(ConfigException.class, () -> new QuestDBSinkConnectorConfig(props));
