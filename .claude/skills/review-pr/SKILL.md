@@ -329,8 +329,8 @@ fails if this is wrong?" When no assertion would catch a mutation, add an `UNTES
 a test nominally executes the line. Explicitly check whether each row is covered on every
 transport that reaches it.
 
-**Agent 6 — Code quality & standards:** Code smell, dead code, naming, unclear intent, member
-ordering, unresolved TODO/FIXME introduced by this PR.
+**Agent 6 — Code quality & standards:** Code smell, dead code, naming, unclear intent, and
+unresolved TODO/FIXME introduced by this PR.
 
 **Agent 7 — PR metadata & conventions:** Title format, description quality, commit messages.
 
