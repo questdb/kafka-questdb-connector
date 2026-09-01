@@ -126,7 +126,10 @@ class QwpSinkTaskTest {
                 null,
                 System.nanoTime()));
 
+        task.fakeContext.timeouts.clear();
         assertTrue(task.preCommit(Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L))).isEmpty());
+        assertEquals(Collections.singletonList(1L), task.fakeContext.timeouts,
+                "a deferred terminal failure must wake Connect's next poll promptly");
         ConnectException failure = assertThrows(ConnectException.class, () -> task.put(Collections.emptyList()));
         assertTrue(failure.getMessage().contains("SECURITY_ERROR"));
     }
@@ -639,7 +642,7 @@ class QwpSinkTaskTest {
     }
 
     @Test
-    void preCommitPreservesServerFailureWhenDlqCompletionAlsoFails() {
+    void preCommitDefersServerFailureWhenDlqCompletionAlsoFails() {
         FakeSender sender = new FakeSender();
         TestTask task = startTask(sender, 1);
         task.fakeContext.dlqFuturesPending = true;
@@ -649,10 +652,39 @@ class QwpSinkTaskTest {
         sender.beforeTerminal = task.fakeContext::failDlqFutures;
 
         Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(2L));
-        ConnectException failure = assertThrows(ConnectException.class, () -> task.preCommit(current));
+        assertTrue(task.preCommit(current).isEmpty());
+        ConnectException failure = assertThrows(ConnectException.class, () -> task.put(Collections.emptyList()));
         assertTrue(failure.getMessage().contains("Failed to deliver a QWP record to the DLQ"));
         assertEquals(1, failure.getSuppressed().length);
         assertSame(sender.terminal, failure.getSuppressed()[0]);
+    }
+
+    @Test
+    void preCommitDoesNotRepeatDlqReportWhenReporterThrows() {
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(new TestTask(sender), 1, Collections.singletonMap(
+                QuestDBSinkConnectorConfig.DLQ_SEND_BATCH_ON_ERROR_CONFIG, "true"));
+        task.put(Collections.singletonList(record(0L, 10L)));
+
+        sender.terminal = schemaMismatch(0L);
+        task.fakeContext.failReports = true;
+        task.fakeContext.timeouts.clear();
+
+        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
+        assertTrue(task.preCommit(current).isEmpty());
+        assertEquals(Collections.singletonList(10L), task.fakeContext.reportedValues);
+        assertEquals(Collections.singletonList(1L), task.fakeContext.timeouts,
+                "a deferred reporter failure must wake Connect's next poll promptly");
+
+        ConnectException failure = assertThrows(
+                ConnectException.class,
+                () -> task.put(Collections.singletonList(record(0L, 10L)))
+        );
+        assertTrue(failure.getMessage().contains("Tolerance exceeded in error handler"));
+        assertSame(sender.terminal, failure.getCause());
+        assertEquals(Collections.singletonList(10L), task.fakeContext.reportedValues,
+                "the deferred failure must stop the redelivered batch before a second DLQ report");
+        assertEquals(1, sender.rows, "the redelivered record must not be appended again");
     }
 
     @Test
@@ -1008,6 +1040,7 @@ class QwpSinkTaskTest {
     private static final class FakeContext implements SinkTaskContext {
         private final Set<TopicPartition> assignment = new HashSet<>();
         private final java.util.List<Long> reportedValues = new ArrayList<>();
+        private boolean failReports;
         private int pauseCalls;
         private int requestCommitCalls;
         private int resumeCalls;
@@ -1092,6 +1125,9 @@ class QwpSinkTaskTest {
         public ErrantRecordReporter errantRecordReporter() {
             return (record, error) -> {
                 reportedValues.add(record.value() instanceof Number ? ((Number) record.value()).longValue() : -1L);
+                if (failReports) {
+                    throw new ConnectException("Tolerance exceeded in error handler", error);
+                }
                 CompletableFuture<Void> future = new CompletableFuture<>();
                 if (dlqFuturesPending) {
                     issuedDlqFutures.add(future);

@@ -214,16 +214,24 @@ class QwpSinkTask extends SinkTask {
             updateCompletions();
             detectStall();
         } catch (LineSenderServerException e) {
-            updateCompletionsAfterServerFailure(e);
-            if (!beginRecovery(e)) {
-                deferredFailure = terminalFailure(e);
+            try {
+                updateCompletionsAfterServerFailure(e);
+                if (!beginRecovery(e)) {
+                    deferFailure(terminalFailure(e));
+                }
+                // The commit that follows resets Connect's poll deadline, so the first slice would
+                // otherwise wait out a full offset.flush.interval.ms before put() ever runs.
+                requestNextRecoverySlice();
+            } catch (Throwable handlingFailure) {
+                // WorkerSinkTask treats an exception from preCommit() as a commit failure: it
+                // rewinds the consumer and keeps the task alive. Defer failures raised while
+                // handling the server rejection so put() fails the task before it can repeat
+                // recovery or DLQ side effects for the redelivered batch.
+                deferFailure(handlingFailure);
             }
-            // The commit that follows resets Connect's poll deadline, so the first slice would
-            // otherwise wait out a full offset.flush.interval.ms before put() ever runs.
-            requestNextRecoverySlice();
             return Collections.emptyMap();
         } catch (Throwable e) {
-            deferredFailure = e;
+            deferFailure(e);
             return Collections.emptyMap();
         }
 
@@ -862,6 +870,21 @@ class QwpSinkTask extends SinkTask {
 
     long nanoTime() {
         return System.nanoTime();
+    }
+
+    private void deferFailure(Throwable failure) {
+        deferredFailure = failure;
+        try {
+            // WorkerSinkTask resets its poll deadline before preCommit() returns. Wake its next
+            // poll promptly so throwDeferredFailure() does not wait for offset.flush.interval.ms.
+            context.timeout(1L);
+        } catch (Throwable wakeupFailure) {
+            // A broken context must not let preCommit() leak the original task failure back into
+            // WorkerSinkTask's commit-failure path. Preserve it for the next put() instead.
+            if (wakeupFailure != failure) {
+                failure.addSuppressed(wakeupFailure);
+            }
+        }
     }
 
     private void throwDeferredFailure() {
