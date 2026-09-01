@@ -84,6 +84,33 @@ class QwpSinkTaskTest {
     }
 
     @Test
+    void overlongAsciiColumnNameIsDlqdWithoutStoppingTheBatch() {
+        assertOverlongColumnNameIsDlqd("x".repeat(127), "x".repeat(128));
+    }
+
+    @Test
+    void overlongUtf8ColumnNameIsDlqdWithoutStoppingTheBatch() {
+        assertOverlongColumnNameIsDlqd("x" + "é".repeat(63), "é".repeat(64));
+    }
+
+    @Test
+    void overlongTopicDerivedTableNameIsDlqd() {
+        FakeSender fakeSender = new FakeSender();
+        Map<String, String> extra = Collections.singletonMap(
+                QuestDBSinkConnectorConfig.TABLE_CONFIG, "${topic}");
+        TestTask task = startTask(new TestTask(fakeSender), 1, extra);
+
+        SinkRecord bad = recordOnTopic("t".repeat(128), 0L, 10L);
+        assertDoesNotThrow(() -> task.put(Collections.singletonList(bad)));
+
+        assertEquals(Collections.singletonList(10L), task.fakeContext.reportedValues);
+        assertEquals(0, fakeSender.rows);
+        assertEquals(0, fakeSender.cancelRows, "table validation runs before a row is started");
+        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
+        assertEquals(1L, task.preCommit(current).get(SOURCE).offset());
+    }
+
+    @Test
     void preCommitDefersTerminalFailureToPut() {
         FakeSender fakeSender = new FakeSender();
         TestTask task = startTask(fakeSender, 1);
@@ -793,6 +820,23 @@ class QwpSinkTaskTest {
         return startTask(new TestTask(sender), flushRows);
     }
 
+    private static void assertOverlongColumnNameIsDlqd(String acceptedName, String rejectedName) {
+        FakeSender fakeSender = new FakeSender();
+        TestTask task = startTask(fakeSender, 2);
+
+        assertDoesNotThrow(() -> task.put(java.util.List.of(
+                recordWithValue(0L, Collections.singletonMap(acceptedName, 10L)),
+                recordWithValue(1L, Collections.singletonMap(rejectedName, 11L)),
+                record(2L, 12L)
+        )));
+
+        assertEquals(Collections.singletonList(-1L), task.fakeContext.reportedValues);
+        assertEquals(2, fakeSender.rows, "records around the invalid one must still be written");
+        assertEquals(1, fakeSender.cancelRows, "the partially constructed invalid row must be cancelled");
+        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(3L));
+        assertEquals(3L, task.preCommit(current).get(SOURCE).offset());
+    }
+
     private static TestTask startTask(TestTask task, int flushRows) {
         return startTask(task, flushRows, Collections.emptyMap());
     }
@@ -833,6 +877,13 @@ class QwpSinkTaskTest {
                 "renamed", 9, null, null, null, value, offset,
                 null, TimestampType.NO_TIMESTAMP_TYPE, Collections.emptyList(),
                 source.topic(), source.partition(), offset);
+    }
+
+    private static SinkRecord recordOnTopic(String topic, long offset, long value) {
+        return new SinkRecord(
+                topic, 9, null, null, null, value, offset,
+                null, TimestampType.NO_TIMESTAMP_TYPE, Collections.emptyList(),
+                SOURCE.topic(), SOURCE.partition(), offset);
     }
 
     private static SinkRecord tombstone(long offset) {
@@ -880,6 +931,7 @@ class QwpSinkTaskTest {
         private long ackedFsn = -1L;
         private int flushes;
         private int rows;
+        private int cancelRows;
         private LineSenderServerException terminal;
         private Long rejectedValue;
         private Long currentValue;
@@ -935,8 +987,11 @@ class QwpSinkTaskTest {
                                 }
                                 ackedFsn = Math.max(ackedFsn, flushes - 1L);
                                 return true;
-                            case "close":
                             case "cancelRow":
+                                cancelRows++;
+                                currentValue = null;
+                                return null;
+                            case "close":
                             case "reset":
                             case "flush":
                                 return null;

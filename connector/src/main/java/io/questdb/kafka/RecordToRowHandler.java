@@ -3,7 +3,9 @@ package io.questdb.kafka;
 import io.questdb.client.Sender;
 import io.questdb.client.cairo.TableUtils;
 import io.questdb.client.cutlass.line.LineSenderException;
+import io.questdb.client.cutlass.qwp.protocol.QwpConstants;
 import io.questdb.client.std.NumericException;
+import io.questdb.client.std.str.Utf8s;
 import io.questdb.kafka.compat.datetime.DateFormat;
 import io.questdb.kafka.compat.datetime.DateLocaleFactory;
 import io.questdb.kafka.compat.datetime.microtime.Micros;
@@ -40,6 +42,7 @@ final class RecordToRowHandler {
     private final Set<String> stringTimestampColumns;
     private final DateFormat dataFormat;
     private final boolean kafkaTimestampsEnabled;
+    private final NameLimits nameLimits;
     private final String[] composedTimestampFields;
     private final String[] composedTimestampValues;
     private final MultiPartCharSequence composedBuffer;
@@ -52,15 +55,21 @@ final class RecordToRowHandler {
     private Sender sender;
 
     RecordToRowHandler(QuestDBSinkConnectorConfig config, Sender sender, boolean cancelPartialRow, boolean wrapSenderErrors) {
-        this(config, sender, cancelPartialRow, wrapSenderErrors, false);
+        this(config, sender, cancelPartialRow, wrapSenderErrors, false, NameLimits.UNBOUNDED);
     }
 
     RecordToRowHandler(QuestDBSinkConnectorConfig config, Sender sender, boolean cancelPartialRow, boolean wrapSenderErrors,
                        boolean routeSymbolsDirectly) {
+        this(config, sender, cancelPartialRow, wrapSenderErrors, routeSymbolsDirectly, NameLimits.UNBOUNDED);
+    }
+
+    RecordToRowHandler(QuestDBSinkConnectorConfig config, Sender sender, boolean cancelPartialRow, boolean wrapSenderErrors,
+                       boolean routeSymbolsDirectly, NameLimits nameLimits) {
         this.config = config;
         this.sender = sender;
         this.cancelPartialRow = cancelPartialRow;
         this.wrapSenderErrors = wrapSenderErrors;
+        this.nameLimits = nameLimits;
         this.rawJson = config.isRawJsonFormat();
         this.rawJsonEnvelope = config.isRawJsonEnvelope();
 
@@ -643,18 +652,48 @@ final class RecordToRowHandler {
         }
     }
 
-    private static String sanitizeName(String name) {
+    private String sanitizeName(String name) {
         // todo: proper implementation
         String sanitized = name.replace('.', '_');
         if (!TableUtils.isValidColumnName(sanitized, Integer.MAX_VALUE)) {
             throw new InvalidDataException("Column name contains illegal characters: " + sanitized);
         }
+        validateUtf8Length("Column", sanitized, nameLimits.maxColumnNameUtf8Bytes);
         return sanitized;
     }
 
-    private static void validateTableName(CharSequence tableName) {
+    private void validateTableName(CharSequence tableName) {
         if (!TableUtils.isValidTableName(tableName, Integer.MAX_VALUE)) {
             throw new InvalidDataException("Table name contains illegal characters: " + tableName);
+        }
+        validateUtf8Length("Table", tableName, nameLimits.maxTableNameUtf8Bytes);
+    }
+
+    private static void validateUtf8Length(String kind, CharSequence name, int maxUtf8Bytes) {
+        if (maxUtf8Bytes == Integer.MAX_VALUE) {
+            return;
+        }
+        int utf8Bytes = Utf8s.utf8Bytes(name);
+        if (utf8Bytes > maxUtf8Bytes) {
+            throw new InvalidDataException(kind + " name is too long [utf8Bytes=" + utf8Bytes
+                    + ", maxUtf8Bytes=" + maxUtf8Bytes + ']');
+        }
+    }
+
+    static final class NameLimits {
+        private static final NameLimits UNBOUNDED = new NameLimits(Integer.MAX_VALUE, Integer.MAX_VALUE);
+        // QWP puts UTF-8 byte lengths on the wire, so Java String.length() is not sufficient.
+        static final NameLimits QWP = new NameLimits(
+                QwpConstants.MAX_TABLE_NAME_LENGTH,
+                QwpConstants.MAX_COLUMN_NAME_LENGTH
+        );
+
+        private final int maxTableNameUtf8Bytes;
+        private final int maxColumnNameUtf8Bytes;
+
+        private NameLimits(int maxTableNameUtf8Bytes, int maxColumnNameUtf8Bytes) {
+            this.maxTableNameUtf8Bytes = maxTableNameUtf8Bytes;
+            this.maxColumnNameUtf8Bytes = maxColumnNameUtf8Bytes;
         }
     }
 

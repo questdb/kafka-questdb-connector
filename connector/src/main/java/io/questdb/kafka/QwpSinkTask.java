@@ -85,7 +85,14 @@ class QwpSinkTask extends SinkTask {
         validatePollInterval(props, flushConfig.sfAppendDeadlineMillis);
         dlqEligibleCategories = parseDlqEligibleCategories(config.getQwpDlqTerminalCategories());
         sender = createSender();
-        recordHandler = new RecordToRowHandler(config, sender, true, false, true);
+        recordHandler = new RecordToRowHandler(
+                config,
+                sender,
+                true,
+                false,
+                true,
+                RecordToRowHandler.NameLimits.QWP
+        );
         nextFlushNanos = nanoTime() + flushConfig.autoFlushNanos;
         lastProgressNanos = nanoTime();
         try {
