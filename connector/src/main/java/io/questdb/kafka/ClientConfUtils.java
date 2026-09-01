@@ -17,12 +17,12 @@ final class ClientConfUtils {
     // to 90% of the server-advertised batch cap; 0 (the WS default) disables
     // the trigger AND the clamp, leaving batches free to exceed the cap.
     static final int DEFAULT_QWP_AUTO_FLUSH_BYTES = 100 * 1024 * 1024;
-    // Sender.close() flushes and then waits for acks. The client's own default is 60s, which
-    // dwarfs Kafka Connect's task.shutdown.graceful.timeout.ms (5s for ALL tasks on a worker)
-    // and applies equally when the server is simply unreachable. Rows already published are
-    // processed by the server regardless, and rows whose offsets were never committed are
-    // redelivered, so a short budget costs duplicates at worst - never data.
-    static final long DEFAULT_QWP_CLOSE_FLUSH_TIMEOUT_MILLIS = 5_000L;
+    // Connect fixes the closing commit's offsets from preCommit() before it calls stop(). QWP
+    // already publishes there and gives acks a bounded wait, so waiting again in Sender.close()
+    // cannot make any additional offsets committable. Skip only that redundant close-time ack
+    // wait by default; the sender still closes its resources, and an explicit client setting is
+    // preserved. Unacknowledged offsets remain uncommitted and are redelivered by Kafka.
+    static final long DEFAULT_QWP_CLOSE_FLUSH_TIMEOUT_MILLIS = 0L;
 
     private ClientConfUtils() {
     }

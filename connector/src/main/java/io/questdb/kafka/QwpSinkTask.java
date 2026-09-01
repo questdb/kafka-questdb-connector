@@ -306,9 +306,10 @@ class QwpSinkTask extends SinkTask {
 
     @Override
     public void stop() {
-        // Sender.close() flushes whatever is still buffered and then drains, bounded by the
-        // client's close_flush_timeout_millis. Draining separately first would simply serialise
-        // two waits for the same acks.
+        // The closing preCommit() already published pending rows and performed the only ack wait
+        // that can affect committed offsets. Sender.close() still flushes and releases resources,
+        // but the connector defaults its close-time ack wait to zero; an explicit client setting
+        // is preserved.
         closeSenderSilently();
     }
 

@@ -30,14 +30,17 @@ connector can validate the relationship).
 
 Shutdown is deliberately brief. Kafka Connect allows all tasks on a worker a
 combined `task.shutdown.graceful.timeout.ms` (5s by default) and cannot
-interrupt a task that overruns it, so the connector defaults the client's
-`close_flush_timeout_millis` to 5s rather than the client's own 60s. Rows
-already handed to the client reach QuestDB regardless, and rows whose offsets
-were never committed are redelivered, so a short budget costs duplicates at
-worst - never data. Raise it in the configuration string if you would rather
-wait. Partition revocation does not drain at all: offsets for the revoked
-partitions were already decided by the preceding `preCommit`, so waiting would
-only stall the rebalance for the whole consumer group.
+interrupt a task that overruns it. The closing `preCommit` publishes pending
+rows and waits up to `qwp.commit.ack.timeout.ms` (500ms by default) before it
+selects the offsets to commit. A later acknowledgement during `Sender.close()`
+cannot change that selection, so the connector defaults the client's
+`close_flush_timeout_millis` to `0`: close still releases its resources but
+does not wait for acknowledgements again. Unacknowledged offsets are withheld
+and Kafka redelivers those records, so duplicates remain possible. An explicit
+client setting is preserved. Partition revocation does not drain at all:
+offsets for the revoked partitions were already decided by the preceding
+`preCommit`, so waiting would only stall the rebalance for the whole consumer
+group.
 
 Delivery is validated by a chaos integration test (containers killed mid-stream
 while 5M records flow, asserting an exact deduplicated row count), a
