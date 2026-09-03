@@ -550,6 +550,29 @@ class QwpSinkTaskTest {
     }
 
     @Test
+    void partialRevokeKeepsHeadAlignedWithSurvivingUnsettledRecord() {
+        TopicPartition retainedPartition = new TopicPartition("source", 4);
+        FakeSender sender = new FakeSender();
+        sender.drainSucceeds = false;
+        TestTask task = startTask(sender, 1);
+        task.open(Collections.singleton(retainedPartition));
+        task.put(Collections.singletonList(record(SOURCE, 0L, 10L)));
+        task.put(Collections.singletonList(record(retainedPartition, 0L, 20L)));
+
+        // Settle only the revoked record and advance the retained-list head past it. The
+        // surviving record remains at the head boundary, waiting for QuestDB acknowledgement.
+        sender.ackedFsn = 0L;
+        task.put(Collections.emptyList());
+
+        task.close(Collections.singleton(SOURCE));
+
+        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(
+                retainedPartition, new OffsetAndMetadata(1L));
+        assertEquals(0L, task.preCommit(current).get(retainedPartition).offset(),
+                "revoking a settled prefix must not skip the surviving unsettled record");
+    }
+
+    @Test
     void partialRevokeDuringPublishedNoFsnRecoveryDoesNotCreatePendingRows() {
         TopicPartition retainedPartition = new TopicPartition("source", 4);
         FakeSender initial = new FakeSender();
