@@ -598,6 +598,33 @@ class QwpSinkTaskTest {
     }
 
     @Test
+    void partialRevokeReplayRejectionIsIsolatedAndReportedToDlq() {
+        TopicPartition retainedPartition = new TopicPartition("source", 4);
+        FakeSender initial = new FakeSender();
+        initial.drainSucceeds = false;
+        FakeSender rejectsReplay = new FakeSender();
+        rejectsReplay.rejectedValue = 20L;
+        FakeSender rejectsIsolatedRecord = new FakeSender();
+        rejectsIsolatedRecord.rejectedValue = 20L;
+        FakeSender afterDlq = new FakeSender();
+        TestTask task = startTask(new TestTask(
+                initial, rejectsReplay, rejectsIsolatedRecord, afterDlq), 1_000);
+        task.open(Collections.singleton(retainedPartition));
+        task.put(java.util.List.of(
+                record(SOURCE, 0L, 10L),
+                record(retainedPartition, 0L, 20L)
+        ));
+
+        task.close(Collections.singleton(SOURCE));
+
+        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
+        assertEquals(Collections.singletonList(20L), task.fakeContext.reportedValues);
+        Map<TopicPartition, OffsetAndMetadata> current =
+                Collections.singletonMap(retainedPartition, new OffsetAndMetadata(1L));
+        assertEquals(1L, task.preCommit(current).get(retainedPartition).offset());
+    }
+
+    @Test
     void lateRejectionAfterFullRevokeUsesFreshSender() {
         FakeSender initial = new FakeSender();
         initial.drainSucceeds = false;

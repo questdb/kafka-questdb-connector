@@ -1172,7 +1172,7 @@ class QwpSinkTask extends SinkTask {
         private int index;
 
         private Recovery(List<RecoveryStep> steps) {
-            this.steps = steps;
+            this.steps = new ArrayList<>(steps);
         }
 
         private void removeRevoked(Set<TopicPartition> revoked) {
