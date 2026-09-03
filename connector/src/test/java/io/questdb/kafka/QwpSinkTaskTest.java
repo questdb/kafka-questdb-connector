@@ -3,1374 +3,744 @@ package io.questdb.kafka;
 import io.questdb.client.LineSenderServerException;
 import io.questdb.client.Sender;
 import io.questdb.client.SenderError;
+import io.questdb.client.cutlass.http.client.HttpClientException;
+import io.questdb.client.cutlass.http.client.WebSocketUpgradeException;
 import io.questdb.client.cutlass.line.LineSenderException;
+import io.questdb.client.cutlass.qwp.client.BatchTooLargeForCapException;
+import io.questdb.client.cutlass.qwp.client.QwpAuthFailedException;
+import io.questdb.client.cutlass.qwp.client.QwpDurableAckMismatchException;
+import io.questdb.client.cutlass.qwp.client.QwpProtocolVersionException;
+import io.questdb.client.cutlass.qwp.client.QwpRoleMismatchException;
+import io.questdb.client.cutlass.qwp.client.QwpVersionMismatchException;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.RetriableException;
-import org.apache.kafka.common.config.ConfigException;
-import org.apache.kafka.connect.data.Schema;
-import org.apache.kafka.connect.data.SchemaBuilder;
-import org.apache.kafka.connect.data.Struct;
-import org.apache.kafka.connect.data.Time;
-import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.sink.ErrantRecordReporter;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTaskContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class QwpSinkTaskTest {
     private static final TopicPartition SOURCE = new TopicPartition("source", 3);
+    private static final TopicPartition OTHER = new TopicPartition("source", 4);
 
     @Test
-    void clampsCommitsToOriginalCoordinatesUntilAcked() {
-        FakeSender fakeSender = new FakeSender();
-        fakeSender.drainSucceeds = false; // acks arrive only when the test says so
-        TestTask task = startTask(fakeSender, 2);
+    void startDoesNotConnectAndFirstPutRetriesBuildFailure() {
+        TestTask task = startTask(Collections.emptyList(), 1, Collections.emptyMap(), true);
+        task.buildFailure = new LineSenderException(new HttpClientException("offline"));
 
-        task.put(java.util.List.of(record(0L, 10L), record(1L, 11L)));
-        assertEquals(0, task.fakeContext.requestCommitCalls);
+        assertEquals(0, task.buildCalls);
+        RetriableException failure = assertThrows(RetriableException.class,
+                () -> task.put(Collections.singletonList(record(0, 10))));
+        assertTrue(failure.getMessage().contains("unreachable"));
+        assertEquals(Collections.singletonList(3_000L), task.fakeContext.timeouts);
+    }
 
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(2L));
-        assertEquals(0L, task.preCommit(current).get(SOURCE).offset());
-        assertEquals(0, task.fakeContext.requestCommitCalls);
-        fakeSender.ackedFsn = 0L;
-        assertEquals(2L, task.preCommit(current).get(SOURCE).offset());
-        assertEquals(1, task.fakeContext.requestCommitCalls);
-        task.preCommit(current);
-        assertEquals(1, task.fakeContext.requestCommitCalls);
-        assertEquals(1, fakeSender.flushes);
-        assertEquals(2, fakeSender.rows);
+    @ParameterizedTest
+    @MethodSource("terminalBuildFailures")
+    void firstPutFailsFastForTerminalBuildFailure(RuntimeException buildFailure) {
+        TestTask task = startTask(Collections.emptyList(), 1, Collections.emptyMap(), true);
+        task.buildFailure = buildFailure;
+
+        ConnectException failure = assertThrows(ConnectException.class,
+                () -> task.put(Collections.singletonList(record(0, 10))));
+
+        assertFalse(failure instanceof RetriableException);
+        assertEquals(buildFailure, failure.getCause());
+        assertTrue(task.fakeContext.timeouts.isEmpty());
+    }
+
+    @ParameterizedTest
+    @MethodSource("transientBuildFailures")
+    void firstPutRetriesOnlyTransientBuildFailure(RuntimeException buildFailure) {
+        TestTask task = startTask(Collections.emptyList(), 1, Collections.emptyMap(), true);
+        task.buildFailure = buildFailure;
+
+        RetriableException failure = assertThrows(RetriableException.class,
+                () -> task.put(Collections.singletonList(record(0, 10))));
+
+        assertEquals(buildFailure, failure.getCause());
+        assertEquals(Collections.singletonList(3_000L), task.fakeContext.timeouts);
     }
 
     @Test
-    void preCommitUsesConfiguredAckTimeout() {
+    void checkpointClampsUntilAcknowledgedThenMovesCommitForward() {
         FakeSender sender = new FakeSender();
         sender.drainSucceeds = false;
-        TestTask task = startTask(new TestTask(sender), 10, Collections.singletonMap(
-                QuestDBSinkConnectorConfig.QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG, "37"));
-        task.put(Collections.singletonList(record(0L, 10L)));
+        TestTask task = startTask(sender, 2);
 
-        Map<TopicPartition, OffsetAndMetadata> current =
-                Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
-        assertEquals(0L, task.preCommit(current).get(SOURCE).offset());
-
-        assertEquals(Collections.singletonList(37L), sender.drainTimeouts);
+        task.put(List.of(record(0, 10), record(1, 11)));
+        assertOffset(0, task.preCommit(offsets(SOURCE, 2)));
+        sender.ackedFsn = 0;
+        assertOffset(2, task.preCommit(offsets(SOURCE, 2)));
+        assertEquals(1, task.fakeContext.requestCommitCalls);
     }
 
     @Test
-    void publicationDoesNotRetainScratchRecords() {
+    void unknownCheckpointInheritsNextPublishedFsn() {
         FakeSender sender = new FakeSender();
+        sender.flushResults.add(-1L);
+        sender.flushResults.add(7L);
+        sender.zeroDrainSucceeds = false;
+        sender.drainSucceeds = false;
         TestTask task = startTask(sender, 1);
 
-        task.put(Collections.singletonList(record(0L, 10L)));
+        task.put(Collections.singletonList(record(0, 10)));
+        task.put(Collections.singletonList(record(1, 11)));
+        sender.ackedFsn = 7;
+        task.put(Collections.singletonList(tombstone(2)));
 
-        assertEquals(0, publishBufferSize(task));
+        assertOffset(3, task.preCommit(offsets(SOURCE, 3)));
     }
 
     @Test
-    void preCommitSettlesAutoFlushedRowsWhenBoundedDrainSucceeds() {
+    void trailingUnknownCheckpointUsesZeroDrainOnlyWithoutBufferedRows() {
         FakeSender sender = new FakeSender();
-        sender.returnNoFsn = true;
-        sender.zeroTimeoutDrainSucceeds = false;
-        TestTask task = startTask(new TestTask(sender), 1, Collections.singletonMap(
-                QuestDBSinkConnectorConfig.QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG, "37"));
-        task.put(Collections.singletonList(record(0L, 10L)));
-        assertEquals(0, publishBufferSize(task));
+        sender.flushResults.add(-1L);
+        sender.zeroDrainSucceeds = true;
+        TestTask task = startTask(sender, 1);
 
-        Map<TopicPartition, OffsetAndMetadata> current =
-                Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
-        assertEquals(1L, task.preCommit(current).get(SOURCE).offset());
-        assertEquals(java.util.List.of(0L, 0L, 37L), sender.drainTimeouts);
-        assertEquals(0, publishBufferSize(task));
+        task.put(Collections.singletonList(record(0, 10)));
+        task.put(Collections.singletonList(tombstone(1)));
+
+        assertTrue(sender.drainTimeouts.contains(0L));
+        assertOffset(2, task.preCommit(offsets(SOURCE, 2)));
     }
 
     @Test
-    void tombstonesAndUndeliveredOffsetsDoNotCreateLedgerHoles() {
-        FakeSender fakeSender = new FakeSender();
-        fakeSender.drainSucceeds = false; // acks arrive only when the test says so
-        TestTask task = startTask(fakeSender, 1);
+    void probeDoesNotFlushBufferedRows() {
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(sender, 10);
 
-        task.put(Collections.singletonList(tombstone(0L)));
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
-        assertEquals(1L, task.preCommit(current).get(SOURCE).offset());
+        task.put(Collections.singletonList(record(0, 10)));
+        task.put(Collections.singletonList(tombstone(1)));
 
-        task.put(Collections.singletonList(record(1L, 12L)));
-        current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(2L));
-        assertEquals(1L, task.preCommit(current).get(SOURCE).offset());
+        assertEquals(0, sender.flushes);
     }
 
     @Test
-    void clientDlqOnlyBatchDoesNotCreateLedgerHole() {
-        TestTask task = startTask(new FakeSender(), 1);
-        task.put(Collections.singletonList(recordWithValue(0L, new Object())));
-        assertEquals(0, task.fakeContext.requestCommitCalls);
-
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
-        assertEquals(1L, task.preCommit(current).get(SOURCE).offset());
-        assertEquals(1, task.fakeContext.requestCommitCalls);
-        assertEquals(Collections.singletonList(-1L), task.fakeContext.reportedValues);
+    void tombstoneOnlyPartitionPassesThroughPreCommit() {
+        TestTask task = startTask(new FakeSender(), 10);
+        task.put(Collections.singletonList(tombstone(0)));
+        assertOffset(1, task.preCommit(offsets(SOURCE, 1)));
     }
 
     @Test
-    void overlongAsciiColumnNameIsDlqdWithoutStoppingTheBatch() {
-        assertOverlongColumnNameIsDlqd("x".repeat(127), "x".repeat(128));
+    void rewindPendingClampsDroppedBatchUntilNextPut() {
+        FakeSender failed = new FakeSender();
+        failed.flushFailure = new LineSenderException("ring full");
+        FakeSender replacement = new FakeSender();
+        TestTask task = startTask(List.of(failed, replacement), 1, Collections.emptyMap(), true);
+
+        task.put(Collections.singletonList(record(0, 10)));
+        assertEquals(0L, task.fakeContext.rewinds.get(0).get(SOURCE));
+        assertOffset(0, task.preCommit(offsets(SOURCE, 1)));
+
+        task.put(Collections.singletonList(record(0, 10)));
+        assertOffset(1, task.preCommit(offsets(SOURCE, 1)));
     }
 
     @Test
-    void overlongUtf8ColumnNameIsDlqdWithoutStoppingTheBatch() {
-        assertOverlongColumnNameIsDlqd("x" + "é".repeat(63), "é".repeat(64));
-    }
+    void rejectionRewindsOutstandingWindowAndDropsIncomingBatch() {
+        FakeSender initial = new FakeSender();
+        FakeSender quarantine = new FakeSender();
+        TestTask task = startTask(List.of(initial, quarantine), 1, Collections.emptyMap(), true);
+        task.put(Collections.singletonList(record(0, 10)));
+        initial.awaitFailure = schemaMismatch(0);
 
-    @ParameterizedTest(name = "{0}")
-    @MethodSource("logicalTypes")
-    void invalidLogicalTypeColumnNameIsDlqdWithoutStoppingTheBatch(
-            String logicalType, Schema fieldSchema, Object value) {
-        assertInvalidLogicalTypeColumnNameIsDlqd("a*b", fieldSchema, value);
-        assertInvalidLogicalTypeColumnNameIsDlqd("é".repeat(64), fieldSchema, value);
-    }
+        task.put(Collections.singletonList(record(1, 11)));
 
-    @Test
-    void overlongTopicDerivedTableNameIsDlqd() {
-        FakeSender fakeSender = new FakeSender();
-        Map<String, String> extra = Collections.singletonMap(
-                QuestDBSinkConnectorConfig.TABLE_CONFIG, "${topic}");
-        TestTask task = startTask(new TestTask(fakeSender), 1, extra);
-
-        SinkRecord bad = recordOnTopic("t".repeat(128), 0L, 10L);
-        assertDoesNotThrow(() -> task.put(Collections.singletonList(bad)));
-
-        assertEquals(Collections.singletonList(10L), task.fakeContext.reportedValues);
-        assertEquals(0, fakeSender.rows);
-        assertEquals(0, fakeSender.cancelRows, "table validation runs before a row is started");
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
-        assertEquals(1L, task.preCommit(current).get(SOURCE).offset());
+        assertEquals(0L, task.fakeContext.rewinds.get(0).get(SOURCE));
+        assertEquals(Collections.singletonList(10L), initial.writtenValues);
+        assertEquals(0, quarantine.rows);
+        assertEquals("QUARANTINE", field(task, "mode").toString());
     }
 
     @Test
-    void preCommitDefersTerminalFailureToPut() {
-        FakeSender fakeSender = new FakeSender();
-        TestTask task = startTask(fakeSender, 1);
-        task.put(Collections.singletonList(record(0L, 10L)));
-        fakeSender.terminal = new LineSenderServerException(new SenderError(
-                SenderError.Category.SECURITY_ERROR,
-                SenderError.Policy.TERMINAL,
-                8,
-                "denied",
-                1L,
-                0L,
-                0L,
-                null,
-                System.nanoTime()));
+    void rejectionWithoutUsableDlqIsTerminalAndDiagnostic() {
+        FakeSender sender = new FakeSender();
+        Map<String, String> props = Collections.singletonMap("errors.tolerance", "none");
+        TestTask task = startTask(List.of(sender), 1, props, true);
+        task.put(Collections.singletonList(record(0, 10)));
+        sender.awaitFailure = schemaMismatch(0);
 
-        task.fakeContext.timeouts.clear();
-        assertTrue(task.preCommit(Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L))).isEmpty());
-        assertEquals(Collections.singletonList(1L), task.fakeContext.timeouts,
-                "a deferred terminal failure must wake Connect's next poll promptly");
-        ConnectException failure = assertThrows(ConnectException.class, () -> task.put(Collections.emptyList()));
+        ConnectException failure = assertThrows(ConnectException.class,
+                () -> task.put(Collections.emptyList()));
+        assertTrue(failure.getMessage().contains("SCHEMA_MISMATCH"));
+        assertTrue(task.fakeContext.reportedValues.isEmpty());
+        assertTrue(task.fakeContext.rewinds.isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void revokedOnlyLateRejectionDoesNotRequireUsableDlqAndRewindsOwnedBatch(boolean hasReporter) {
+        FakeSender sender = new FakeSender();
+        Map<String, String> props = hasReporter
+                ? Collections.singletonMap("errors.tolerance", "none")
+                : Collections.emptyMap();
+        TestTask task = startTask(List.of(sender), 1, props, hasReporter);
+        task.open(Collections.singleton(OTHER));
+        task.fakeContext.assignment.add(OTHER);
+        task.put(Collections.singletonList(record(SOURCE, 0, 10)));
+        task.close(Collections.singleton(SOURCE));
+        sender.awaitFailure = serverFailure(SenderError.Category.SECURITY_ERROR, 0);
+
+        assertDoesNotThrow(() -> task.put(Collections.singletonList(record(OTHER, 0, 20))));
+
+        assertEquals(Collections.singletonMap(OTHER, 0L), task.fakeContext.rewinds.get(0));
+        assertEquals(1, sender.closeCalls);
+        assertNull(field(task, "sender"));
+        assertEquals("PIPELINED", field(task, "mode").toString());
+        assertTrue(task.fakeContext.reportedValues.isEmpty());
+    }
+
+    @Test
+    void partialRevocationRetiresSenderBeforeItsLateRejectionCanBlameSurvivors() {
+        FakeSender initial = new FakeSender();
+        FakeSender fresh = new FakeSender();
+        TestTask task = startTask(List.of(initial, fresh), 2, Collections.emptyMap(), true);
+        task.open(Collections.singleton(OTHER));
+        task.fakeContext.assignment.add(OTHER);
+        // one unacknowledged checkpoint holding rows of both partitions
+        task.put(List.of(record(SOURCE, 0, 10), record(OTHER, 0, 20)));
+
+        task.close(Collections.singleton(SOURCE));
+        assertEquals(0, initial.closeCalls, "close() itself must not touch the sender");
+        // a late, non-eligible rejection for the shared frame lands on the stale sender
+        initial.awaitFailure = serverFailure(SenderError.Category.SECURITY_ERROR, 0);
+
+        assertEquals(0, task.preCommit(offsets(OTHER, 1)).get(OTHER).offset(), "a stale sender is not queried");
+        assertDoesNotThrow(() -> task.put(Collections.singletonList(record(OTHER, 1, 21))));
+
+        assertEquals(Collections.singletonMap(OTHER, 0L), task.fakeContext.rewinds.get(0));
+        assertEquals(1, initial.closeCalls);
+        assertEquals("PIPELINED", field(task, "mode").toString());
+        assertTrue(task.fakeContext.reportedValues.isEmpty());
+
+        task.put(List.of(record(OTHER, 0, 20), record(OTHER, 1, 21)));
+        assertEquals(List.of(20L, 21L), fresh.writtenValues);
+        assertEquals(2, task.preCommit(offsets(OTHER, 2)).get(OTHER).offset());
+    }
+
+    @Test
+    void partialRevocationDuringQuarantineRetiresSenderAndKeepsBatch() {
+        FakeSender initial = new FakeSender();
+        FakeSender timedOut = new FakeSender();
+        timedOut.drainSucceeds = false;
+        FakeSender fresh = new FakeSender();
+        TestTask task = startTask(List.of(initial, timedOut, fresh), 2, Collections.emptyMap(), true);
+        task.open(Collections.singleton(OTHER));
+        task.fakeContext.assignment.add(OTHER);
+        List<SinkRecord> batch = List.of(record(SOURCE, 0, 10), record(OTHER, 0, 20));
+        task.put(batch);
+        initial.awaitFailure = schemaMismatch(0);
+        task.put(Collections.emptyList());
+        assertThrows(RetriableException.class, () -> task.put(batch));
+
+        task.close(Collections.singleton(SOURCE));
+        RetriableException retired = assertThrows(RetriableException.class,
+                () -> task.put(Collections.singletonList(record(OTHER, 0, 20))));
+        assertTrue(retired.getMessage().contains("partition revocation"));
+        assertEquals(1, timedOut.closeCalls);
+
+        task.put(Collections.singletonList(record(OTHER, 0, 20)));
+        assertEquals(List.of(20L), fresh.writtenValues);
+        assertEquals("PIPELINED", field(task, "mode").toString());
+    }
+
+    @Test
+    void nonEligibleRejectionIsTerminal() {
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(sender, 1);
+        task.put(Collections.singletonList(record(0, 10)));
+        sender.awaitFailure = serverFailure(SenderError.Category.SECURITY_ERROR, 0);
+
+        ConnectException failure = assertThrows(ConnectException.class,
+                () -> task.put(Collections.emptyList()));
         assertTrue(failure.getMessage().contains("SECURITY_ERROR"));
     }
 
     @Test
-    void unresolvedPublishedRowsAskConnectToPollBeforeTheCommitDeadline() {
+    void rejectionDeferredByPreCommitIsRecoveredByPut() {
+        FakeSender initial = new FakeSender();
+        FakeSender replacement = new FakeSender();
+        TestTask task = startTask(List.of(initial, replacement), 1, Collections.emptyMap(), true);
+        task.put(Collections.singletonList(record(0, 10)));
+        initial.awaitFailure = schemaMismatch(0);
+
+        assertOffset(0, task.preCommit(offsets(SOURCE, 1)));
+        assertEquals(Collections.singletonList(1L), task.fakeContext.timeouts.subList(
+                task.fakeContext.timeouts.size() - 1, task.fakeContext.timeouts.size()));
+        task.put(Collections.emptyList());
+
+        assertEquals(0L, task.fakeContext.rewinds.get(0).get(SOURCE));
+    }
+
+    @Test
+    void transportFailureRewindsRetiresAndDropsBatch() {
         FakeSender sender = new FakeSender();
-        sender.drainSucceeds = false;
-        TestTask task = startTask(new TestTask(sender), 1, Collections.singletonMap(
-                QuestDBSinkConnectorConfig.ALLOWED_LAG_CONFIG, "25"));
-
-        task.put(Collections.singletonList(record(0L, 10L)));
-
-        assertEquals(Collections.singletonList(25L), task.fakeContext.timeouts);
-    }
-
-    @Test
-    void isolatesRejectedEntryAndDlqsOnlyRejectedRecord() {
-        FakeSender initial = new FakeSender();
-        FakeSender recoveryOne = new FakeSender();
-        recoveryOne.rejectedValue = 11L;
-        FakeSender recoveryTwo = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, recoveryOne, recoveryTwo), 3);
-        task.put(java.util.List.of(record(0L, 10L), record(1L, 11L), record(2L, 12L)));
-
-        initial.terminal = schemaMismatch(0L);
-        task.put(Collections.emptyList());
-
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(3L));
-        assertEquals(3L, task.preCommit(current).get(SOURCE).offset());
-        assertEquals(Collections.singletonList(11L), task.fakeContext.reportedValues);
-        assertEquals(2, recoveryOne.rows);
-        assertEquals(1, recoveryTwo.rows);
-    }
-
-    @Test
-    void terminalBeforeAdmissionRedeliversNonEmptyBatch() {
-        FakeSender initial = new FakeSender();
-        FakeSender recovery = new FakeSender();
-        recovery.rejectedValue = 10L;
-        FakeSender afterRejected = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, recovery, afterRejected), 1);
-        task.put(Collections.singletonList(record(0L, 10L)));
-        initial.terminal = schemaMismatch(0L);
-
-        assertThrows(RetriableException.class, () -> task.put(Collections.singletonList(record(1L, 20L))));
-        assertEquals(1, task.fakeContext.reportedValues.size());
-        assertEquals(10L, task.fakeContext.reportedValues.get(0));
-    }
-
-    /**
-     * A typed server terminal can surface while a row is being built, because the client
-     * latches an asynchronous rejection and rethrows it from the next call. The error then
-     * belongs to an already published frame, not to the record in hand, so that record must
-     * never be blamed on the strength of the timing alone - replay decides. Here the replay
-     * succeeds, so nothing is reported.
-     */
-    @Test
-    void typedTerminalDuringRowBuildingIsolatesRatherThanBlamingTheRecord() {
-        FakeSender initial = new FakeSender();
-        FakeSender recovery = new FakeSender();
-        initial.rowFailure = schemaMismatch(0L);
-        TestTask task = startTask(new TestTask(initial, recovery), 1, Collections.singletonMap(
-                QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "1"));
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(2);
-
-        assertDoesNotThrow(() -> task.put(Collections.singletonList(record(0L, 10L))));
-
-        assertTrue(task.fakeContext.reportedValues.isEmpty(), "the record must not be blamed without evidence");
-        assertEquals(1, recovery.rows, "it must be replayed to find out whether it is the offender");
-    }
-
-    @Test
-    void drainTimeoutDuringProbeDoesNotDlqRecord() {
-        FakeSender initial = new FakeSender();
-        FakeSender recovery = new FakeSender();
-        recovery.drainSucceeds = false;
-        TestTask task = startTask(new TestTask(initial, recovery), 1);
-        task.put(Collections.singletonList(record(0L, 10L)));
-        initial.terminal = schemaMismatch(0L);
-
-        task.put(Collections.emptyList());
-
-        assertTrue(task.fakeContext.reportedValues.isEmpty());
-    }
-
-    /**
-     * The client publishes on its own cadence, so a rejected frame routinely belongs to no
-     * flush entry the connector recorded - the ledger is empty between checkpoints. That
-     * must still isolate the offending record rather than kill the task with an empty DLQ.
-     */
-    @Test
-    void rejectionOfAFrameTheLedgerDoesNotCoverIsStillIsolated() {
-        FakeSender initial = new FakeSender();
-        FakeSender recovery = new FakeSender();
-        // Flush threshold far above the batch, so the connector never checkpoints and holds
-        // no flush entry at all - the state the client's own auto-flush leaves behind.
-        TestTask task = startTask(new TestTask(initial, recovery), 1_000);
-        task.put(java.util.List.of(record(0L, 10L), record(1L, 11L), record(2L, 12L)));
-
-        initial.terminal = schemaMismatch(7L); // an FSN no recorded entry covers
-        task.put(Collections.emptyList());
-
-        assertEquals(3, recovery.rows, "every unacked record must be replayed");
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(3L));
-        assertEquals(3L, task.preCommit(current).get(SOURCE).offset());
-    }
-
-    @Test
-    void unattributableRejectionWithNothingLeftToReplayStillFailsTheTask() {
-        FakeSender initial = new FakeSender();
-        TestTask task = startTask(new TestTask(initial), 1);
-        task.put(Collections.singletonList(record(0L, 10L)));
-        task.preCommit(Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L)));
-
-        initial.terminal = schemaMismatch(7L);
-        ConnectException failure = assertThrows(ConnectException.class, () -> task.put(Collections.emptyList()));
-        assertTrue(failure.getMessage().contains("QuestDB rejected QWP frames"), failure.getMessage());
-    }
-
-    /**
-     * Kafka's errant-record reporter completes its future on broker ack, so a DLQ'd record
-     * stays pending for a while and the completed prefix cannot move past it. A record
-     * replayed successfully behind that gap must keep its result when the sender is recreated
-     * for a later rejection - otherwise nothing republishes it and the partition's offset is
-     * pinned for good, with the task still reporting itself healthy.
-     */
-    @Test
-    void replayedRecordsSurviveASenderResetTriggeredByALaterRejection() {
-        FakeSender initial = new FakeSender();
-        FakeSender first = new FakeSender();
-        FakeSender second = new FakeSender();
-        FakeSender third = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, first, second, third), 3);
-        task.fakeContext.dlqFuturesPending = true;
-        task.put(java.util.List.of(record(0L, 10L), record(1L, 11L), record(2L, 12L)));
-
-        first.rejectedValue = 10L;   // first isolated replay is rejected
-        second.rejectedValue = 12L;  // 11 replays cleanly, then 12 is rejected
-        initial.terminal = schemaMismatch(0L);
-        task.put(Collections.emptyList());
-
-        assertEquals(java.util.List.of(10L, 12L), task.fakeContext.reportedValues);
-        assertEquals(1, task.fakeContext.requestCommitCalls,
-                "the replayed record should request a commit check without waiting for the retained head");
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(3L));
-        assertEquals(0L, task.preCommit(current).get(SOURCE).offset(),
-                "offsets stay withheld while the DLQ writes are still in flight");
-
-        task.fakeContext.completeDlqFutures();
-        task.put(Collections.emptyList());
-
-        assertEquals(3L, task.preCommit(current).get(SOURCE).offset(),
-                "every record is resolved, so the offset must advance");
-    }
-
-    @Test
-    void acknowledgedRecordBehindPendingDlqIsNotReplayedAfterLedgerEntryIsPruned() {
-        FakeSender initial = new FakeSender();
-        initial.drainSucceeds = false;
-        FakeSender rejectsTwelve = new FakeSender();
-        rejectsTwelve.rejectedValue = 12L;
-        FakeSender afterRejected = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, rejectsTwelve, afterRejected), 1);
-        task.fakeContext.dlqFuturesPending = true;
-
-        task.put(Collections.singletonList(recordWithValue(0L, new Object())));
-        task.put(Collections.singletonList(record(1L, 11L)));
-        initial.ackedFsn = 0L;
-        task.put(Collections.emptyList());
-
-        task.put(Collections.singletonList(record(2L, 12L)));
-        initial.terminal = schemaMismatch(1L);
-        task.put(Collections.emptyList());
-
-        assertEquals(java.util.List.of(-1L, 12L), task.fakeContext.reportedValues);
-        assertEquals(1, rejectsTwelve.rows, "only the unresolved record should enter recovery");
-        assertEquals(0, afterRejected.rows, "the acknowledged record must remain settled after sender reset");
-
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(3L));
-        assertEquals(0L, task.preCommit(current).get(SOURCE).offset());
-        task.fakeContext.completeDlqFutures();
-        task.put(Collections.emptyList());
-        assertEquals(3L, task.preCommit(current).get(SOURCE).offset());
-    }
-
-    @Test
-    void appliesAckWatermarkBeforeBuildingRecoveryPlan() {
-        FakeSender initial = new FakeSender();
-        initial.drainSucceeds = false;
-        FakeSender recovery = new FakeSender();
-        recovery.rejectedValue = 12L;
-        FakeSender afterRejected = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, recovery, afterRejected), 1);
-
-        task.put(Collections.singletonList(record(0L, 11L)));
-        task.put(Collections.singletonList(record(1L, 12L)));
-        initial.ackedFsn = 0L;
-        initial.terminal = schemaMismatch(1L);
-        task.put(Collections.emptyList());
-
-        assertEquals(Collections.singletonList(12L), task.fakeContext.reportedValues);
-        assertEquals(1, recovery.rows, "the sampled ACK must exclude the first record from recovery");
-        assertEquals(0, afterRejected.rows);
-    }
-
-    @Test
-    void successfulNoFsnDrainSettlesRecordBehindPendingDlq() {
-        FakeSender initial = new FakeSender();
-        initial.drainSucceeds = false;
-        initial.returnNoFsn = true;
-        FakeSender recovery = new FakeSender();
-        recovery.rejectedValue = 12L;
-        FakeSender afterRejected = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, recovery, afterRejected), 1);
-        task.fakeContext.dlqFuturesPending = true;
-
-        task.put(Collections.singletonList(recordWithValue(0L, new Object())));
-        task.put(Collections.singletonList(record(1L, 11L)));
-        initial.drainSucceeds = true;
-        task.put(Collections.emptyList());
-
-        initial.returnNoFsn = false;
-        initial.drainSucceeds = false;
-        task.put(Collections.singletonList(record(2L, 12L)));
-        initial.terminal = schemaMismatch(2L);
-        task.put(Collections.emptyList());
-
-        assertEquals(java.util.List.of(-1L, 12L), task.fakeContext.reportedValues);
-        assertEquals(1, recovery.rows);
-        assertEquals(0, afterRejected.rows, "the no-FSN drain must make acknowledgement final");
-    }
-
-    @Test
-    void recoveryReplaysEntriesAfterRejectedEntryAndUnflushedTail() {
-        FakeSender initial = new FakeSender();
-        FakeSender recovery = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, recovery), 2);
-        task.put(java.util.List.of(record(0L, 10L), record(1L, 11L)));
-        task.put(java.util.List.of(record(2L, 12L), record(3L, 13L)));
-        task.put(Collections.singletonList(record(4L, 14L)));
-
-        initial.terminal = schemaMismatch(0L);
-        task.put(Collections.emptyList());
-
-        assertEquals(5, recovery.rows);
-        assertTrue(task.fakeContext.reportedValues.isEmpty());
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(5L));
-        assertEquals(5L, task.preCommit(current).get(SOURCE).offset());
-    }
-
-    @Test
-    void largeIsolationWindowAdvancesAcrossBoundedPutSlices() {
-        FakeSender initial = new FakeSender();
-        FakeSender recovery = new FakeSender();
-        TestTask task = new TestTask(initial, recovery);
-        Map<String, String> extra = new HashMap<>();
-        extra.put(QuestDBSinkConnectorConfig.QWP_ISOLATION_SLICE_MS_CONFIG, "1");
-        startTask(task, 1_000, extra);
-        java.util.List<SinkRecord> records = new ArrayList<>(1_000);
-        for (int i = 0; i < 1_000; i++) {
-            records.add(record(i, i));
-        }
-        task.put(records);
-
-        task.nanoTimeStep = TimeUnit.MICROSECONDS.toNanos(600);
-        initial.terminal = schemaMismatch(0L);
-        task.put(Collections.emptyList());
-        assertEquals(1, task.fakeContext.pauseCalls);
-        assertEquals(0, task.fakeContext.resumeCalls);
-
-        for (int i = 0; i < 2_000 && task.fakeContext.resumeCalls == 0; i++) {
-            task.put(Collections.emptyList());
-        }
-        assertEquals(1, task.fakeContext.resumeCalls);
-        assertEquals(1_000, recovery.rows);
-    }
-
-    @Test
-    void recoveryRecreatesSenderAfterEveryRejectedRecord() {
-        FakeSender initial = new FakeSender();
-        FakeSender rejectsTen = new FakeSender();
-        rejectsTen.rejectedValue = 10L;
-        FakeSender rejectsEleven = new FakeSender();
-        rejectsEleven.rejectedValue = 11L;
-        FakeSender acceptsTwelve = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, rejectsTen, rejectsEleven, acceptsTwelve), 3);
-        task.put(java.util.List.of(record(0L, 10L), record(1L, 11L), record(2L, 12L)));
-
-        initial.terminal = schemaMismatch(0L);
-        task.put(Collections.emptyList());
-
-        assertEquals(java.util.List.of(10L, 11L), task.fakeContext.reportedValues);
-        assertEquals(1, rejectsTen.rows);
-        assertEquals(1, rejectsEleven.rows);
-        assertEquals(1, acceptsTwelve.rows);
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(3L));
-        assertEquals(3L, task.preCommit(current).get(SOURCE).offset());
-    }
-
-    @Test
-    void batchDlqModeReportsEntireRetainedWindowForEligibleTerminal() {
-        FakeSender initial = new FakeSender();
-        TestTask task = new TestTask(initial, new FakeSender());
-        startTask(task, 3, Collections.singletonMap(
-                QuestDBSinkConnectorConfig.DLQ_SEND_BATCH_ON_ERROR_CONFIG, "true"));
-        task.put(java.util.List.of(record(0L, 10L), record(1L, 11L), record(2L, 12L)));
-
-        initial.terminal = schemaMismatch(0L);
-        task.put(Collections.emptyList());
-
-        assertEquals(java.util.List.of(10L, 11L, 12L), task.fakeContext.reportedValues);
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(3L));
-        assertEquals(3L, task.preCommit(current).get(SOURCE).offset());
-    }
-
-    @Test
-    void batchDlqModeExcludesAcknowledgedAndAlreadyReportedRecords() {
-        FakeSender initial = new FakeSender();
-        initial.drainSucceeds = false;
-        TestTask task = new TestTask(initial, new FakeSender());
-        startTask(task, 1, Collections.singletonMap(
-                QuestDBSinkConnectorConfig.DLQ_SEND_BATCH_ON_ERROR_CONFIG, "true"));
-        task.fakeContext.dlqFuturesPending = true;
-
-        task.put(Collections.singletonList(recordWithValue(0L, new Object())));
-        task.put(Collections.singletonList(record(1L, 11L)));
-        initial.ackedFsn = 0L;
-        task.put(Collections.emptyList());
-        task.put(Collections.singletonList(record(2L, 12L)));
-
-        initial.terminal = schemaMismatch(1L);
-        task.put(Collections.emptyList());
-
-        assertEquals(java.util.List.of(-1L, 12L), task.fakeContext.reportedValues,
-                "batch mode should report only unresolved QuestDB-bound records");
-    }
-
-    @Test
-    void partialRevokeRemovesOnlyRevokedRecordsFromRecovery() {
-        TopicPartition retainedPartition = new TopicPartition("source", 4);
-        FakeSender initial = new FakeSender();
-        initial.drainSucceeds = false;
-        FakeSender recovery = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, recovery), 2);
-        task.open(Collections.singleton(retainedPartition));
-        task.put(java.util.List.of(record(SOURCE, 0L, 10L), record(retainedPartition, 0L, 20L)));
-
-        task.close(Collections.singleton(SOURCE));
-        initial.terminal = schemaMismatch(0L);
-        assertEquals(0L, task.preCommit(Collections.singletonMap(
-                retainedPartition, new OffsetAndMetadata(1L))).get(retainedPartition).offset());
-        task.put(Collections.emptyList());
-
-        assertEquals(1, recovery.rows);
-        assertTrue(task.fakeContext.reportedValues.isEmpty());
-        assertEquals(1L, task.preCommit(Collections.singletonMap(retainedPartition, new OffsetAndMetadata(1L))).get(retainedPartition).offset());
-    }
-
-    @Test
-    void partialRevokeKeepsHeadAlignedWithSurvivingUnsettledRecord() {
-        TopicPartition retainedPartition = new TopicPartition("source", 4);
-        FakeSender sender = new FakeSender();
-        sender.drainSucceeds = false;
+        sender.flushFailure = new LineSenderException("append deadline");
         TestTask task = startTask(sender, 1);
-        task.open(Collections.singleton(retainedPartition));
-        task.put(Collections.singletonList(record(SOURCE, 0L, 10L)));
-        task.put(Collections.singletonList(record(retainedPartition, 0L, 20L)));
 
-        // Settle only the revoked record and advance the retained-list head past it. The
-        // surviving record remains at the head boundary, waiting for QuestDB acknowledgement.
-        sender.ackedFsn = 0L;
-        task.put(Collections.emptyList());
-
-        task.close(Collections.singleton(SOURCE));
-
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(
-                retainedPartition, new OffsetAndMetadata(1L));
-        assertEquals(0L, task.preCommit(current).get(retainedPartition).offset(),
-                "revoking a settled prefix must not skip the surviving unsettled record");
+        assertDoesNotThrow(() -> task.put(Collections.singletonList(record(0, 10))));
+        assertEquals(0L, task.fakeContext.rewinds.get(0).get(SOURCE));
+        assertEquals(1, sender.closeCalls);
+        assertNull(field(task, "sender"));
     }
 
     @Test
-    void partialRevokeDuringPublishedNoFsnRecoveryDoesNotCreatePendingRows() {
-        TopicPartition retainedPartition = new TopicPartition("source", 4);
-        FakeSender initial = new FakeSender();
-        FakeSender recovery = new FakeSender();
-        recovery.returnNoFsn = true;
-        recovery.drainSucceeds = false;
-        FakeSender fresh = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, recovery, fresh), 1_000);
-        task.open(Collections.singleton(retainedPartition));
-        task.put(java.util.List.of(record(SOURCE, 0L, 10L), record(retainedPartition, 0L, 20L)));
-
-        // No connector flush entry covers this rejection, so both records are replayed in one
-        // step. The client publishes that step itself and leaves it draining without an FSN.
-        initial.terminal = schemaMismatch(7L);
-        task.put(Collections.emptyList());
-        assertEquals(2, recovery.rows);
-
-        task.close(Collections.singleton(SOURCE));
-        assertDoesNotThrow(() -> task.put(Collections.emptyList()),
-                "settling replay must not leave a normal-path flush count behind");
-        assertEquals(1, fresh.rows, "the surviving replay row must move to a fresh sender");
-
-        Map<TopicPartition, OffsetAndMetadata> current =
-                Collections.singletonMap(retainedPartition, new OffsetAndMetadata(1L));
-        assertEquals(1L, task.preCommit(current).get(retainedPartition).offset());
-    }
-
-    @Test
-    void partialRevokeReplaysSurvivingNormalPathRows() {
-        TopicPartition retainedPartition = new TopicPartition("source", 4);
+    void senderDeathHandsBackBackpressurePauseSoRewindCanRun() {
         FakeSender sender = new FakeSender();
-        sender.drainSucceeds = false;
-        FakeSender fresh = new FakeSender();
-        TestTask task = startTask(new TestTask(sender, fresh), 1_000);
-        task.open(Collections.singleton(retainedPartition));
-        task.put(java.util.List.of(record(SOURCE, 0L, 10L), record(retainedPartition, 0L, 20L)));
+        Map<String, String> props = Collections.singletonMap(
+                QuestDBSinkConnectorConfig.QWP_MAX_INFLIGHT_ROWS_CONFIG, "1");
+        TestTask task = startTask(sender, 2, props, true);
+        task.put(List.of(record(0, 10), record(1, 11)));
+        assertEquals(1, task.fakeContext.pauseCalls);
+        sender.awaitFailure = new LineSenderException("connection lost");
 
-        task.close(Collections.singleton(SOURCE));
         task.put(Collections.emptyList());
 
-        assertEquals(Collections.singletonList(20L), fresh.flushedValues,
-                "the surviving normal-path row must be replayed on the fresh sender");
-        Map<TopicPartition, OffsetAndMetadata> current =
-                Collections.singletonMap(retainedPartition, new OffsetAndMetadata(1L));
-        assertEquals(1L, task.preCommit(current).get(retainedPartition).offset());
+        assertEquals(1, task.fakeContext.resumeCalls);
+        assertEquals(0L, task.fakeContext.rewinds.get(0).get(SOURCE));
     }
 
     @Test
-    void partialRevokeReplayRejectionIsIsolatedAndReportedToDlq() {
-        TopicPartition retainedPartition = new TopicPartition("source", 4);
-        FakeSender initial = new FakeSender();
-        initial.drainSucceeds = false;
-        FakeSender rejectsReplay = new FakeSender();
-        rejectsReplay.rejectedValue = 20L;
-        FakeSender rejectsIsolatedRecord = new FakeSender();
-        rejectsIsolatedRecord.rejectedValue = 20L;
-        FakeSender afterDlq = new FakeSender();
-        TestTask task = startTask(new TestTask(
-                initial, rejectsReplay, rejectsIsolatedRecord, afterDlq), 1_000);
-        task.open(Collections.singleton(retainedPartition));
-        task.put(java.util.List.of(
-                record(SOURCE, 0L, 10L),
-                record(retainedPartition, 0L, 20L)
-        ));
-
+    void transportFailureNeverRewindsRevokedOriginalPartition() {
+        FakeSender sender = new FakeSender();
+        sender.flushFailure = new LineSenderException("append deadline");
+        TestTask task = startTask(sender, 1);
         task.close(Collections.singleton(SOURCE));
 
-        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
-        assertEquals(Collections.singletonList(20L), task.fakeContext.reportedValues);
-        Map<TopicPartition, OffsetAndMetadata> current =
-                Collections.singletonMap(retainedPartition, new OffsetAndMetadata(1L));
-        assertEquals(1L, task.preCommit(current).get(retainedPartition).offset());
+        task.put(Collections.singletonList(record(0, 10)));
+
+        assertTrue(task.fakeContext.rewinds.isEmpty());
+        assertEquals(0, sender.rows);
     }
 
     @Test
-    void lateRejectionAfterFullRevokeUsesFreshSender() {
-        FakeSender initial = new FakeSender();
-        initial.drainSucceeds = false;
-        FakeSender fresh = new FakeSender();
-        FakeSender isolation = new FakeSender();
-        isolation.rejectedValue = 10L;
-        FakeSender afterRejected = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, fresh, isolation, afterRejected), 1);
+    void healthySetterFailureIsRecordLocal() {
+        FakeSender sender = new FakeSender();
+        sender.setterFailure = new LineSenderException("bad type");
+        TestTask task = startTask(sender, 1);
 
-        task.put(Collections.singletonList(record(0L, 10L)));
-        Map<TopicPartition, OffsetAndMetadata> current =
-                Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
-        assertEquals(0L, task.preCommit(current).get(SOURCE).offset());
-        task.close(Collections.singleton(SOURCE));
-        assertEquals(1, task.senderIndex, "close must not construct a sender");
+        task.put(Collections.singletonList(record(0, 10)));
 
-        initial.terminal = schemaMismatch(0L);
-        initial.closeFailure = initial.terminal;
-        task.open(Collections.singleton(SOURCE));
-        assertDoesNotThrow(() -> task.put(Collections.singletonList(record(0L, 10L))));
-        assertEquals(1, fresh.rows, "the redelivered record must use a fresh sender");
-
-        fresh.terminal = schemaMismatch(0L);
-        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
         assertEquals(Collections.singletonList(10L), task.fakeContext.reportedValues);
-        assertEquals(1L, task.preCommit(current).get(SOURCE).offset());
+        assertEquals(0, sender.closeCalls);
+        assertTrue(task.fakeContext.rewinds.isEmpty());
     }
 
     @Test
-    void closeDoesNotCreateReplacementSender() {
-        FakeSender initial = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, new FakeSender()), 1);
-        task.put(Collections.singletonList(record(0L, 10L)));
+    void healthySetterFailureWithoutDlqPreservesClientCause() {
+        FakeSender sender = new FakeSender();
+        sender.setterFailure = new LineSenderException("bad type");
+        TestTask task = startTask(List.of(sender), 1, Collections.emptyMap(), false);
 
-        task.fakeContext.timeouts.clear();
-        task.close(Collections.singleton(SOURCE));
-
-        assertEquals(1, task.senderIndex);
-        assertEquals(Collections.singletonList(1L), task.fakeContext.timeouts);
-        assertEquals(0, task.fakeContext.pauseCalls);
-        task.stop();
-        assertEquals(1, task.senderIndex, "shutdown must not construct a replacement sender");
-        assertEquals(1, initial.closeCalls);
+        InvalidDataException failure = assertThrows(InvalidDataException.class,
+                () -> task.put(Collections.singletonList(record(0, 10))));
+        assertEquals("bad type", failure.getCause().getMessage());
     }
 
     @Test
-    void failedReplacementKeepsSenderStaleForRetry() {
-        FakeSender initial = new FakeSender();
-        FakeSender fresh = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, fresh), 1);
-        task.put(Collections.singletonList(record(0L, 10L)));
-        task.close(Collections.singleton(SOURCE));
-        task.senderBuildFailure = new LineSenderException("replacement failed");
+    void setterFailureWithLatchedRejectionUsesRecovery() {
+        FakeSender sender = new FakeSender();
+        sender.setterFailure = new LineSenderException("setter");
+        sender.awaitFailure = schemaMismatch(0);
+        TestTask task = startTask(sender, 1);
 
-        assertThrows(LineSenderException.class, () -> task.put(Collections.emptyList()));
-        assertEquals(1, task.senderIndex);
-        assertEquals(1, initial.closeCalls);
+        task.put(Collections.singletonList(record(0, 10)));
 
-        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
-        assertEquals(2, task.senderIndex, "the next put must retry the deferred replacement");
-        assertEquals(1, initial.closeCalls, "the already retired sender must not be closed twice");
+        assertEquals(0L, task.fakeContext.rewinds.get(0).get(SOURCE));
+        assertEquals(1, sender.closeCalls);
     }
 
     @Test
-    void staleSenderPreCommitStillWaitsForDlq() {
-        TopicPartition retainedPartition = new TopicPartition("source", 4);
-        FakeSender initial = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, new FakeSender()), 1);
-        task.open(Collections.singleton(retainedPartition));
-        task.fakeContext.dlqFuturesPending = true;
-        task.put(java.util.List.of(
-                recordWithValue(retainedPartition, 0L, new Object()),
-                record(SOURCE, 0L, 10L)
-        ));
+    void typedSetterRejectionUsesRecoveryWithoutLatchedFailure() {
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(sender, 1);
+        task.put(Collections.singletonList(record(0, 10)));
+        sender.setterFailure = schemaMismatch(0);
 
-        task.close(Collections.singleton(SOURCE));
-        initial.terminal = schemaMismatch(0L);
-        int awaitCalls = initial.awaitAckCalls;
-        int getAckedCalls = initial.getAckedFsnCalls;
-        int drainCalls = initial.drainTimeouts.size();
-        Map<TopicPartition, OffsetAndMetadata> current =
-                Collections.singletonMap(retainedPartition, new OffsetAndMetadata(1L));
+        task.put(Collections.singletonList(record(1, 11)));
 
-        assertEquals(0L, task.preCommit(current).get(retainedPartition).offset());
-        assertEquals(awaitCalls, initial.awaitAckCalls, "a stale sender must not be queried");
-        assertEquals(getAckedCalls, initial.getAckedFsnCalls, "a stale sender must not sample ACKs");
-        assertEquals(drainCalls, initial.drainTimeouts.size(), "a stale sender must not be drained");
-
-        task.fakeContext.completeDlqFutures();
-        assertEquals(1L, task.preCommit(current).get(retainedPartition).offset());
-        assertEquals(awaitCalls, initial.awaitAckCalls);
-        assertEquals(getAckedCalls, initial.getAckedFsnCalls);
-        assertEquals(drainCalls, initial.drainTimeouts.size());
-    }
-
-    @Test
-    void staleSenderPreCommitDefersFailedDlqWithoutReplacingSender() {
-        TopicPartition retainedPartition = new TopicPartition("source", 4);
-        FakeSender initial = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, new FakeSender()), 1);
-        task.open(Collections.singleton(retainedPartition));
-        task.fakeContext.dlqFuturesPending = true;
-        task.put(java.util.List.of(
-                recordWithValue(retainedPartition, 0L, new Object()),
-                record(SOURCE, 0L, 10L)
-        ));
-        task.close(Collections.singleton(SOURCE));
-        task.fakeContext.failDlqFutures();
-
-        assertTrue(task.preCommit(Collections.singletonMap(
-                retainedPartition, new OffsetAndMetadata(1L))).isEmpty());
-        assertEquals(1, task.senderIndex);
-        ConnectException failure = assertThrows(
-                ConnectException.class,
-                () -> task.put(Collections.emptyList())
-        );
-        assertTrue(failure.getMessage().contains("Failed to deliver a QWP record to the DLQ"));
-        assertEquals(1, task.senderIndex, "the deferred failure must win before sender replacement");
-    }
-
-    @Test
-    void partialRevokeReplaysSurvivingQuestDbWorkOnFreshSender() {
-        TopicPartition retainedPartition = new TopicPartition("source", 4);
-        FakeSender initial = new FakeSender();
-        initial.drainSucceeds = false;
-        FakeSender fresh = new FakeSender();
-        fresh.drainSucceeds = false;
-        TestTask task = startTask(new TestTask(initial, fresh), 2);
-        task.open(Collections.singleton(retainedPartition));
-        task.put(java.util.List.of(
-                record(SOURCE, 0L, 10L),
-                record(retainedPartition, 0L, 20L),
-                record(retainedPartition, 1L, 21L)
-        ));
-
-        task.close(Collections.singleton(SOURCE));
-        initial.terminal = schemaMismatch(0L);
-        int awaitCalls = initial.awaitAckCalls;
-        assertThrows(RetriableException.class, () -> task.put(Collections.singletonList(
-                record(retainedPartition, 2L, 22L))));
-
-        assertEquals(awaitCalls, initial.awaitAckCalls, "the old sender must stay quarantined");
-        assertEquals(java.util.List.of(20L, 21L), fresh.writtenValues,
-                "every surviving unresolved record must be replayed exactly once");
-        fresh.drainSucceeds = true;
-        assertDoesNotThrow(() -> task.put(Collections.singletonList(record(retainedPartition, 2L, 22L))));
-        assertEquals(java.util.List.of(20L, 21L, 22L), fresh.writtenValues,
-                "new input may be admitted after replay settles");
-    }
-
-    @Test
-    void fullRevokeDuringRecoveryRetiresRecoverySender() {
-        FakeSender initial = new FakeSender();
-        FakeSender recovery = new FakeSender();
-        recovery.drainSucceeds = false;
-        FakeSender fresh = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, recovery, fresh), 1);
-        task.put(Collections.singletonList(record(0L, 10L)));
-        initial.terminal = schemaMismatch(0L);
-        task.put(Collections.emptyList());
-
-        task.close(Collections.singleton(SOURCE));
-        recovery.terminal = schemaMismatch(0L);
-        recovery.closeFailure = recovery.terminal;
-        task.open(Collections.singleton(SOURCE));
-
-        assertDoesNotThrow(() -> task.put(Collections.singletonList(record(0L, 10L))));
-        assertEquals(1, fresh.rows);
-        assertEquals(1, recovery.closeCalls);
-    }
-
-    @Test
-    void repeatedRebalancesReplaceSenderOnlyOnce() {
-        FakeSender initial = new FakeSender();
-        FakeSender fresh = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, fresh), 1);
-        task.put(Collections.singletonList(record(0L, 10L)));
-
-        task.close(Collections.singleton(SOURCE));
-        initial.terminal = schemaMismatch(0L);
-        initial.closeFailure = initial.terminal;
-        int awaitCalls = initial.awaitAckCalls;
-        assertEquals(1L, task.preCommit(Collections.singletonMap(
-                SOURCE, new OffsetAndMetadata(1L))).get(SOURCE).offset());
-        task.open(Collections.singleton(SOURCE));
-        task.close(Collections.singleton(SOURCE));
-        task.open(Collections.singleton(SOURCE));
-
-        assertEquals(1, task.senderIndex, "rebalances must only mark the sender stale");
-        task.put(Collections.emptyList());
-        task.put(Collections.emptyList());
-        assertEquals(2, task.senderIndex, "the sticky stale state needs one replacement");
-        assertEquals(1, initial.closeCalls);
-        assertEquals(awaitCalls, initial.awaitAckCalls);
-    }
-
-    @Test
-    void quarantineWindowSurvivesPreCommitAndSecondRebalance() {
-        TopicPartition removedOnSecondRebalance = new TopicPartition("source", 4);
-        TopicPartition survivingPartition = new TopicPartition("source", 5);
-        FakeSender initial = new FakeSender();
-        initial.drainSucceeds = false;
-        FakeSender fresh = new FakeSender();
-        Map<String, String> extra = Collections.singletonMap(
-                QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "1");
-        TestTask task = startTask(new TestTask(initial, fresh), 3, extra);
-        task.open(java.util.List.of(removedOnSecondRebalance, survivingPartition));
-        task.put(java.util.List.of(
-                record(SOURCE, 0L, 10L),
-                record(removedOnSecondRebalance, 0L, 20L),
-                record(survivingPartition, 0L, 30L)
-        ));
-
-        task.close(Collections.singleton(SOURCE));
-        initial.terminal = schemaMismatch(0L);
-        int awaitCalls = initial.awaitAckCalls;
-        int getAckedCalls = initial.getAckedFsnCalls;
-        int drainCalls = initial.drainTimeouts.size();
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(2);
-
-        Map<TopicPartition, OffsetAndMetadata> current = new HashMap<>();
-        current.put(removedOnSecondRebalance, new OffsetAndMetadata(1L));
-        current.put(survivingPartition, new OffsetAndMetadata(1L));
-        Map<TopicPartition, OffsetAndMetadata> committed = task.preCommit(current);
-        assertEquals(0L, committed.get(removedOnSecondRebalance).offset());
-        assertEquals(0L, committed.get(survivingPartition).offset());
-        assertEquals(awaitCalls, initial.awaitAckCalls, "a stale sender must not be awaited");
-        assertEquals(getAckedCalls, initial.getAckedFsnCalls, "a stale sender must not be sampled");
-        assertEquals(drainCalls, initial.drainTimeouts.size(), "a stale sender must not be drained");
-
-        task.open(Collections.singleton(SOURCE));
-        task.close(java.util.List.of(SOURCE, removedOnSecondRebalance));
-        task.open(Collections.singleton(SOURCE));
-        assertEquals(1, task.senderIndex, "neither rebalance may replace the sender");
-
-        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
-        assertEquals(Collections.singletonList(30L), fresh.writtenValues,
-                "replay must use only the survivor set after the second rebalance");
-        assertEquals(2, task.senderIndex);
-        assertEquals(awaitCalls, initial.awaitAckCalls);
-        assertEquals(getAckedCalls, initial.getAckedFsnCalls);
-        assertEquals(drainCalls, initial.drainTimeouts.size());
-    }
-
-    @Test
-    void survivingAckBeforeLateRevokedNackDoesNotEmptyRecovery() {
-        TopicPartition revokedPartition = new TopicPartition("source", 4);
-        FakeSender initial = new FakeSender();
-        initial.drainSucceeds = false;
-        FakeSender fresh = new FakeSender();
-        TestTask task = startTask(new TestTask(initial, fresh), 1);
-        task.open(Collections.singleton(revokedPartition));
-        task.put(Collections.singletonList(record(SOURCE, 0L, 10L)));
-        task.put(Collections.singletonList(record(revokedPartition, 0L, 20L)));
-
-        task.close(Collections.singleton(revokedPartition));
-        initial.ackedFsn = 0L;
-        initial.terminal = schemaMismatch(1L);
-
-        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
-        assertEquals(Collections.singletonList(10L), fresh.flushedValues,
-                "the old ACK must not remove surviving work from the fresh replay plan");
+        assertEquals(0L, task.fakeContext.rewinds.get(0).get(SOURCE));
+        assertEquals(1, sender.closeCalls);
+        assertEquals("QUARANTINE", field(task, "mode").toString());
         assertTrue(task.fakeContext.reportedValues.isEmpty());
     }
 
     @Test
-    void revokingOnlyReadyRecoveryWorkKeepsSender() {
-        TopicPartition revokedPartition = new TopicPartition("source", 4);
-        TopicPartition retainedPartition = new TopicPartition("source", 5);
+    void rowTooLargeIsDlqdWithoutRetiringHealthySender() {
+        FakeSender sender = new FakeSender();
+        sender.rowFailure = new LineSenderException("row too large for server batch cap [size=99]");
+        TestTask task = startTask(sender, 1);
+
+        task.put(Collections.singletonList(record(0, 10)));
+
+        assertEquals(Collections.singletonList(10L), task.fakeContext.reportedValues);
+        assertEquals(0, sender.closeCalls);
+    }
+
+    @Test
+    void batchTooLargeEntersQuarantine() {
+        FakeSender sender = new FakeSender();
+        sender.flushFailure = new BatchTooLargeForCapException("too large");
+        TestTask task = startTask(sender, 1);
+
+        task.put(Collections.singletonList(record(0, 10)));
+
+        assertEquals("QUARANTINE", field(task, "mode").toString());
+        assertEquals(0L, task.fakeContext.rewinds.get(0).get(SOURCE));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void firstRecordAutoFlushBatchTooLargeEntersQuarantine(boolean kafkaTimestamp) {
         FakeSender initial = new FakeSender();
-        FakeSender recovery = new FakeSender();
-        Map<String, String> extra = Collections.singletonMap(
-                QuestDBSinkConnectorConfig.QWP_ISOLATION_SLICE_MS_CONFIG, "1");
-        TestTask task = startTask(new TestTask(initial, recovery), 1, extra);
-        task.open(java.util.List.of(revokedPartition, retainedPartition));
-        task.put(Collections.singletonList(record(SOURCE, 0L, 10L)));
-        task.put(Collections.singletonList(record(revokedPartition, 0L, 20L)));
-        task.put(Collections.singletonList(record(retainedPartition, 0L, 30L)));
+        initial.autoFlushFailure = new BatchTooLargeForCapException("too large");
+        FakeSender quarantine = new FakeSender();
+        Map<String, String> props = kafkaTimestamp
+                ? Collections.singletonMap(
+                        QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG, "true")
+                : Collections.emptyMap();
+        TestTask task = startTask(List.of(initial, quarantine), 1, props, true);
+        SinkRecord first = kafkaTimestamp ? recordWithTimestamp(0, 10) : record(0, 10);
 
-        task.nanoTimeStep = TimeUnit.MICROSECONDS.toNanos(600);
-        initial.terminal = schemaMismatch(0L);
-        task.put(Collections.emptyList());
-        assertEquals(Collections.singletonList(10L), recovery.writtenValues,
-                "the slice must leave the later recovery steps unpublished");
+        task.put(Collections.singletonList(first));
 
-        task.close(Collections.singleton(revokedPartition));
-        assertEquals(2, task.senderIndex, "READY_TO_WRITE work does not contaminate the sender");
-        task.nanoTimeStep = 0L;
-        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
+        assertEquals(kafkaTimestamp ? "at" : "atNow", initial.lastCommitMethod);
+        assertEquals("QUARANTINE", field(task, "mode").toString());
+        assertEquals(Collections.singletonMap(SOURCE, 1L), field(task, "quarantineUntil"));
+        assertEquals(0L, task.fakeContext.rewinds.get(0).get(SOURCE));
 
-        assertEquals(java.util.List.of(10L, 30L), recovery.writtenValues,
-                "the surviving ready step must continue on the existing recovery sender");
-        assertEquals(2, task.senderIndex);
-    }
-
-    /**
-     * Kafka's default assignor is eager, so every rebalance revokes the whole assignment.
-     * A backpressure pause must not outlive that: Connect re-applies its own record of the
-     * pause when the partitions come back, while the task's flag is cleared with the
-     * assignment - leaving partitions paused with nothing able to resume them, no error, and
-     * a task that still reports itself healthy.
-     */
-    @Test
-    void backpressurePauseIsHandedBackOnlyForAssignedPartitions() {
-        FakeSender sender = new FakeSender();
-        TestTask task = new TestTask(sender);
-        Map<String, String> extra = new HashMap<>();
-        extra.put(QuestDBSinkConnectorConfig.QWP_MAX_INFLIGHT_ROWS_CONFIG, "1");
-        startTask(task, 2, extra);
-
-        task.put(java.util.List.of(record(0L, 10L), record(1L, 11L)));
-        assertTrue(task.fakeContext.frameworkPaused.contains(SOURCE), "backpressure should pause the partition");
-
-        TopicPartition previouslyRevoked = new TopicPartition("source", 4);
-        assertDoesNotThrow(() -> task.close(java.util.List.of(SOURCE, previouslyRevoked)),
-                "shutdown may pass stale offsets, but resume accepts only assigned partitions");
-
-        assertTrue(task.fakeContext.frameworkPaused.isEmpty(),
-                "a re-assignment must not inherit a pause that nothing can lift");
+        task.put(Collections.singletonList(first));
+        assertEquals("PIPELINED", field(task, "mode").toString());
+        assertOffset(1, task.preCommit(offsets(SOURCE, 1)));
     }
 
     @Test
-    void partialReassignmentReappliesBackpressurePause() {
-        TopicPartition retainedPartition = new TopicPartition("source", 4);
-        FakeSender sender = new FakeSender();
-        TestTask task = new TestTask(sender);
-        Map<String, String> extra = new HashMap<>();
-        extra.put(QuestDBSinkConnectorConfig.QWP_MAX_INFLIGHT_ROWS_CONFIG, "1");
-        startTask(task, 10, extra);
-        task.open(Collections.singleton(retainedPartition));
+    void repeatedBuildFailuresTripProgressTimeout() {
+        Map<String, String> props = Collections.singletonMap(
+                QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "10");
+        TestTask task = startTask(Collections.emptyList(), 1, props, true);
+        task.buildFailure = new LineSenderException(new HttpClientException("offline"));
 
-        task.put(java.util.List.of(
-                record(SOURCE, 0L, 10L),
-                record(retainedPartition, 0L, 20L)
-        ));
-        assertEquals(Set.of(SOURCE, retainedPartition), task.fakeContext.frameworkPaused);
-
-        task.close(Collections.singleton(SOURCE));
-        assertEquals(Collections.singleton(retainedPartition), task.fakeContext.frameworkPaused,
-                "the partition still owned by the task must remain paused");
-
-        task.open(Collections.singleton(SOURCE));
-        assertEquals(Set.of(SOURCE, retainedPartition), task.fakeContext.frameworkPaused,
-                "a reassigned partition must join the existing backpressure pause");
+        assertThrows(RetriableException.class, () -> task.put(Collections.singletonList(record(0, 10))));
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(9);
+        assertThrows(RetriableException.class, () -> task.put(Collections.singletonList(record(0, 10))));
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(10);
+        assertThrows(ConnectException.class, () -> task.put(Collections.singletonList(record(0, 10))));
     }
 
     @Test
-    void pausesAboveSoftInflightLimitAndResumesAfterAck() {
+    void probeSettlesAckThatLandedAtProgressTimeout() {
         FakeSender sender = new FakeSender();
-        TestTask task = new TestTask(sender);
-        Map<String, String> extra = new HashMap<>();
-        extra.put(QuestDBSinkConnectorConfig.QWP_MAX_INFLIGHT_ROWS_CONFIG, "1");
-        startTask(task, 2, extra);
-
-        task.put(java.util.List.of(record(0L, 10L), record(1L, 11L)));
-        assertEquals(1, task.fakeContext.pauseCalls);
+        Map<String, String> props = Collections.singletonMap(
+                QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "10");
+        TestTask task = startTask(sender, 1, props, true);
+        task.put(Collections.singletonList(record(0, 10)));
 
         sender.ackedFsn = 0L;
-        task.preCommit(Collections.singletonMap(SOURCE, new OffsetAndMetadata(2L)));
-        assertEquals(1, task.fakeContext.resumeCalls);
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(10);
+
+        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
+        assertOffset(1, task.preCommit(offsets(SOURCE, 1)));
     }
 
     @Test
-    void stalledPausedTaskFailsFromEmptyPut() {
-        TestTask task = new TestTask(new FakeSender());
-        Map<String, String> extra = new HashMap<>();
-        extra.put(QuestDBSinkConnectorConfig.QWP_MAX_INFLIGHT_ROWS_CONFIG, "1");
-        extra.put(QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "1");
-        startTask(task, 10, extra);
-        task.put(java.util.List.of(record(0L, 10L), record(1L, 11L)));
-        assertEquals(1, task.fakeContext.pauseCalls);
+    void idleTaskStartsNewStallEpochWhenWorkArrives() {
+        FakeSender sender = new FakeSender();
+        sender.flushFailure = new LineSenderException("ring full");
+        Map<String, String> props = Collections.singletonMap(
+                QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "10");
+        TestTask task = startTask(sender, 1, props, true);
+        task.put(Collections.emptyList());
+        task.nowNanos = TimeUnit.SECONDS.toNanos(1);
 
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(2);
-        ConnectException failure = assertThrows(ConnectException.class, () -> task.put(Collections.emptyList()));
+        assertDoesNotThrow(() -> task.put(Collections.singletonList(record(0, 10))));
+    }
+
+    @Test
+    void quarantineDeliversSynchronouslyAndTerminates() {
+        FakeSender initial = new FakeSender();
+        FakeSender quarantine = new FakeSender();
+        TestTask task = enterQuarantine(initial, quarantine,
+                List.of(record(0, 10), record(1, 11)));
+
+        task.put(List.of(record(0, 10), record(1, 11)));
+
+        assertEquals(List.of(10L, 11L), quarantine.writtenValues);
+        assertEquals(List.of(1_000L), quarantine.drainTimeouts);
+        assertEquals("PIPELINED", field(task, "mode").toString());
+        assertOffset(2, task.preCommit(offsets(SOURCE, 2)));
+    }
+
+    @Test
+    void quarantineBisectsAndReportsOnlyBadRecord() {
+        FakeSender initial = new FakeSender();
+        List<FakeSender> senders = new ArrayList<>();
+        senders.add(initial);
+        for (int i = 0; i < 6; i++) {
+            FakeSender sender = new FakeSender();
+            sender.rejectedValues.add(11L);
+            senders.add(sender);
+        }
+        TestTask task = startTask(senders, 3, Collections.emptyMap(), true);
+        List<SinkRecord> batch = List.of(record(0, 10), record(1, 11), record(2, 12));
+        task.put(batch);
+        initial.awaitFailure = schemaMismatch(0);
+        task.put(Collections.emptyList());
+
+        task.put(batch);
+
+        assertEquals(Collections.singletonList(11L), task.fakeContext.reportedValues);
+        assertEquals("PIPELINED", field(task, "mode").toString());
+    }
+
+    @Test
+    void batchDlqReportsRejectedChunk() {
+        FakeSender initial = new FakeSender();
+        FakeSender quarantine = new FakeSender();
+        quarantine.rejectedValues.add(11L);
+        Map<String, String> props = Collections.singletonMap(
+                QuestDBSinkConnectorConfig.DLQ_SEND_BATCH_ON_ERROR_CONFIG, "true");
+        TestTask task = startTask(List.of(initial, quarantine), 3, props, true);
+        List<SinkRecord> batch = List.of(record(0, 10), record(1, 11), record(2, 12));
+        task.put(batch);
+        initial.awaitFailure = schemaMismatch(0);
+        task.put(Collections.emptyList());
+
+        task.put(batch);
+
+        assertEquals(List.of(10L, 11L, 12L), task.fakeContext.reportedValues);
+    }
+
+    @Test
+    void quarantineTimeoutRedeliveryDrainsWithoutRewriting() {
+        FakeSender initial = new FakeSender();
+        FakeSender quarantine = new FakeSender();
+        quarantine.drainSucceeds = false;
+        TestTask task = enterQuarantine(initial, quarantine, Collections.singletonList(record(0, 10)));
+
+        RetriableException failure = assertThrows(RetriableException.class,
+                () -> task.put(Collections.singletonList(record(0, 10))));
+        assertTrue(failure.getMessage().contains("not yet acknowledged"));
+        assertEquals(1L, task.fakeContext.timeouts.get(task.fakeContext.timeouts.size() - 1));
+        quarantine.drainSucceeds = true;
+        task.put(Collections.singletonList(record(0, 10)));
+
+        assertEquals(1, quarantine.rows);
+    }
+
+    @Test
+    void silentServerDuringQuarantineTripsProgressTimeout() {
+        FakeSender initial = new FakeSender();
+        FakeSender quarantine = new FakeSender();
+        quarantine.drainSucceeds = false;
+        Map<String, String> props = Collections.singletonMap(
+                QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "10");
+        TestTask task = startTask(List.of(initial, quarantine), 1, props, true);
+        List<SinkRecord> batch = Collections.singletonList(record(0, 10));
+        task.put(batch);
+        initial.awaitFailure = schemaMismatch(0);
+        task.put(Collections.emptyList());
+
+        assertThrows(RetriableException.class, () -> task.put(batch));
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(9);
+        assertThrows(RetriableException.class, () -> task.put(batch));
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(10);
+
+        ConnectException failure = assertThrows(ConnectException.class, () -> task.put(batch));
+        assertFalse(failure instanceof RetriableException);
         assertTrue(failure.getMessage().contains("did not advance"));
     }
 
     @Test
-    void pendingDlqDoesNotLookLikeAQuestDbAcknowledgementStall() {
+    void typedRejectionDuringResumeDoesNotDisposeOldSpan() {
+        FakeSender initial = new FakeSender();
+        FakeSender timedOut = new FakeSender();
+        timedOut.drainSucceeds = false;
+        FakeSender accepted = new FakeSender();
+        TestTask task = startTask(List.of(initial, timedOut, accepted), 1, Collections.emptyMap(), true);
+        List<SinkRecord> batch = Collections.singletonList(record(0, 10));
+        task.put(batch);
+        initial.awaitFailure = schemaMismatch(0);
+        task.put(Collections.emptyList());
+        assertThrows(RetriableException.class, () -> task.put(batch));
+        timedOut.drainFailure = schemaMismatch(0);
+
+        task.put(batch);
+
+        assertEquals(Collections.singletonList(10L), task.fakeContext.reportedValues);
+        assertEquals(0, accepted.drainTimeouts.size(), "the old span must not be drained on a fresh sender");
+    }
+
+    @Test
+    void tombstoneInTimedOutChunkDoesNotAdvanceDispositionEarly() {
+        FakeSender initial = new FakeSender();
+        FakeSender quarantine = new FakeSender();
+        quarantine.drainSucceeds = false;
+        List<SinkRecord> batch = List.of(record(0, 10), tombstone(1), record(2, 12));
+        TestTask task = enterQuarantine(initial, quarantine, batch);
+
+        assertThrows(RetriableException.class, () -> task.put(batch));
+        quarantine.drainSucceeds = true;
+        task.put(batch);
+
+        assertEquals(List.of(10L, 12L), quarantine.writtenValues);
+        assertEquals(2, quarantine.rows);
+    }
+
+    @Test
+    void pendingRewindPreventsPrematureQuarantineExit() {
+        FakeSender initial = new FakeSender();
+        FakeSender quarantine = new FakeSender();
+        TestTask task = enterQuarantine(initial, quarantine, Collections.singletonList(record(0, 10)));
+
+        task.preCommit(offsets(SOURCE, 1));
+        assertEquals("QUARANTINE", field(task, "mode").toString());
+        task.put(Collections.singletonList(record(0, 10)));
+        assertEquals("PIPELINED", field(task, "mode").toString());
+    }
+
+    @Test
+    void revokingAwaitedPartitionRetiresSenderAndRedeliveryWritesAgain() {
+        FakeSender initial = new FakeSender();
+        FakeSender timedOut = new FakeSender();
+        timedOut.drainSucceeds = false;
+        FakeSender fresh = new FakeSender();
+        TestTask task = startTask(List.of(initial, timedOut, fresh), 1, Collections.emptyMap(), true);
+        List<SinkRecord> batch = Collections.singletonList(record(0, 10));
+        task.put(batch);
+        initial.awaitFailure = schemaMismatch(0);
+        task.put(Collections.emptyList());
+        assertThrows(RetriableException.class, () -> task.put(batch));
+
+        task.close(Collections.singleton(SOURCE));
+        task.open(Collections.singleton(SOURCE));
+        task.fakeContext.assignment.add(SOURCE);
+        // the sender that flushed the revoked chunk is stale: it is retired before it is asked anything
+        RetriableException retired = assertThrows(RetriableException.class, () -> task.put(batch));
+        assertTrue(retired.getMessage().contains("partition revocation"));
+        assertEquals(1, timedOut.closeCalls);
+        assertEquals(1, timedOut.rows);
+
+        task.put(batch);
+
+        assertEquals(1, fresh.rows, "the redelivered chunk is written on a fresh sender");
+        assertEquals("PIPELINED", field(task, "mode").toString());
+    }
+
+    @Test
+    void closeDoesNotTouchSenderAndRemovesOnlyRevokedState() {
         FakeSender sender = new FakeSender();
         sender.drainSucceeds = false;
-        Map<String, String> extra = new HashMap<>();
-        extra.put(QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "1");
-        TestTask task = startTask(new TestTask(sender), 1, extra);
-        task.fakeContext.dlqFuturesPending = true;
+        TestTask task = startTask(sender, 10);
+        task.open(Collections.singleton(OTHER));
+        task.fakeContext.assignment.add(OTHER);
+        task.put(List.of(record(SOURCE, 0, 10), record(OTHER, 0, 20)));
 
-        task.put(Collections.singletonList(recordWithValue(0L, new Object())));
-        task.put(Collections.singletonList(record(1L, 11L)));
-        sender.ackedFsn = 0L;
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(2);
+        task.close(Collections.singleton(SOURCE));
 
-        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(4);
-        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
+        assertEquals(0, sender.closeCalls);
+        Map<TopicPartition, OffsetAndMetadata> current = new HashMap<>();
+        current.put(SOURCE, new OffsetAndMetadata(1));
+        current.put(OTHER, new OffsetAndMetadata(1));
+        Map<TopicPartition, OffsetAndMetadata> clamped = task.preCommit(current);
+        assertEquals(1, clamped.get(SOURCE).offset());
+        assertEquals(0, clamped.get(OTHER).offset());
     }
 
     @Test
-    void failedDlqFutureFailsTaskWithoutCommittingOffset() {
+    void stopAndRetirementBoundBlockingClose() {
+        FakeSender sender = new FakeSender();
+        sender.blockClose = true;
+        TestTask task = startTask(sender, 10);
+        task.put(Collections.emptyList());
+
+        long started = System.nanoTime();
+        task.stop();
+        long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+
+        assertTrue(elapsedMillis >= 900 && elapsedMillis < 2_500, "elapsed=" + elapsedMillis);
+    }
+
+    @Test
+    void taskRetainsNoSinkRecordAfterPutReturns() throws IllegalAccessException {
         TestTask task = startTask(new FakeSender(), 1);
-        task.fakeContext.dlqFuturesPending = true;
-        task.put(Collections.singletonList(recordWithValue(0L, new Object())));
-        task.fakeContext.failDlqFutures();
+        task.put(Collections.singletonList(record(0, 10)));
 
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
-        assertTrue(task.preCommit(current).isEmpty());
-        ConnectException failure = assertThrows(ConnectException.class, () -> task.put(Collections.emptyList()));
-        assertTrue(failure.getMessage().contains("Failed to deliver a QWP record to the DLQ"));
-    }
-
-    @Test
-    void putPreservesServerFailureWhenDlqCompletionAlsoFails() {
-        FakeSender sender = new FakeSender();
-        TestTask task = startTask(sender, 1);
-        task.fakeContext.dlqFuturesPending = true;
-        task.put(Collections.singletonList(recordWithValue(0L, new Object())));
-
-        LineSenderServerException serverFailure = schemaMismatch(0L);
-        sender.terminal = serverFailure;
-        sender.beforeTerminal = task.fakeContext::failDlqFutures;
-
-        ConnectException failure = assertThrows(ConnectException.class, () -> task.put(Collections.emptyList()));
-        assertTrue(failure.getMessage().contains("Failed to deliver a QWP record to the DLQ"));
-        assertEquals(1, failure.getSuppressed().length);
-        assertSame(serverFailure, failure.getSuppressed()[0]);
-    }
-
-    @Test
-    void preCommitDefersServerFailureWhenDlqCompletionAlsoFails() {
-        FakeSender sender = new FakeSender();
-        TestTask task = startTask(sender, 1);
-        task.fakeContext.dlqFuturesPending = true;
-        task.put(java.util.List.of(recordWithValue(0L, new Object()), record(1L, 11L)));
-
-        sender.rejectedValue = 11L;
-        sender.beforeTerminal = task.fakeContext::failDlqFutures;
-
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(2L));
-        assertTrue(task.preCommit(current).isEmpty());
-        ConnectException failure = assertThrows(ConnectException.class, () -> task.put(Collections.emptyList()));
-        assertTrue(failure.getMessage().contains("Failed to deliver a QWP record to the DLQ"));
-        assertEquals(1, failure.getSuppressed().length);
-        assertSame(sender.terminal, failure.getSuppressed()[0]);
-    }
-
-    @Test
-    void preCommitDoesNotRepeatDlqReportWhenReporterThrows() {
-        FakeSender sender = new FakeSender();
-        TestTask task = startTask(new TestTask(sender), 1, Collections.singletonMap(
-                QuestDBSinkConnectorConfig.DLQ_SEND_BATCH_ON_ERROR_CONFIG, "true"));
-        task.put(Collections.singletonList(record(0L, 10L)));
-
-        sender.terminal = schemaMismatch(0L);
-        task.fakeContext.failReports = true;
-        task.fakeContext.timeouts.clear();
-
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
-        assertTrue(task.preCommit(current).isEmpty());
-        assertEquals(Collections.singletonList(10L), task.fakeContext.reportedValues);
-        assertEquals(Collections.singletonList(1L), task.fakeContext.timeouts,
-                "a deferred reporter failure must wake Connect's next poll promptly");
-
-        ConnectException failure = assertThrows(
-                ConnectException.class,
-                () -> task.put(Collections.singletonList(record(0L, 10L)))
-        );
-        assertTrue(failure.getMessage().contains("Tolerance exceeded in error handler"));
-        assertSame(sender.terminal, failure.getCause());
-        assertEquals(Collections.singletonList(10L), task.fakeContext.reportedValues,
-                "the deferred failure must stop the redelivered batch before a second DLQ report");
-        assertEquals(1, sender.rows, "the redelivered record must not be appended again");
-    }
-
-    @Test
-    void stalledRecoveryFailsFromEmptyPut() {
-        FakeSender initial = new FakeSender();
-        FakeSender recovery = new FakeSender();
-        recovery.drainSucceeds = false;
-        TestTask task = startTask(new TestTask(initial, recovery), 1, Collections.singletonMap(
-                QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "1"));
-        task.put(Collections.singletonList(record(0L, 10L)));
-        initial.terminal = schemaMismatch(0L);
-        task.put(Collections.emptyList());
-
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(2);
-        ConnectException failure = assertThrows(ConnectException.class, () -> task.put(Collections.emptyList()));
-        assertTrue(failure.getMessage().contains("replay isolation made no progress"));
-    }
-
-    /**
-     * Isolation runs one slice per put() with the partitions paused, so Connect's next poll is
-     * the only thing that resumes it - and that poll lasts until the offset-commit deadline
-     * (offset.flush.interval.ms, 60s by default) unless the task asks for an earlier callback.
-     * Without the request, a replay that outlives its first slice advances once a minute.
-     */
-    @Test
-    void unfinishedIsolationAsksConnectToPollBeforeTheCommitDeadline() {
-        FakeSender initial = new FakeSender();
-        FakeSender replay = new FakeSender();
-        replay.drainSucceeds = false; // no slice can finish the replay
-        TestTask task = startTask(new TestTask(initial, replay), 1, Collections.singletonMap(
-                QuestDBSinkConnectorConfig.QWP_ISOLATION_SLICE_MS_CONFIG, "25"));
-        task.put(Collections.singletonList(record(0L, 10L)));
-        task.fakeContext.timeouts.clear();
-        initial.terminal = schemaMismatch(0L);
-        assertTrue(task.fakeContext.timeouts.isEmpty());
-
-        task.put(Collections.emptyList());
-        assertEquals(Collections.singletonList(25L), task.fakeContext.timeouts);
-
-        // Connect consumes the request on every poll, so each slice has to re-arm it.
-        task.put(Collections.emptyList());
-        assertEquals(java.util.List.of(25L, 25L), task.fakeContext.timeouts);
-    }
-
-    /**
-     * A commit cycle runs between isolation slices and must leave a running replay alone. The
-     * replay owns the sender, so probing it here surfaces the rejection the next slice is about
-     * to handle - and answering it by rebuilding the plan discards the bisection and re-publishes
-     * rows that already settled. Only two senders are available here, so a restart shows up as
-     * an unexpected sender recreation.
-     */
-    @Test
-    void aCommitDoesNotRestartIsolationThatIsAlreadyRunning() {
-        FakeSender initial = new FakeSender();
-        FakeSender replay = new FakeSender();
-        replay.drainSucceeds = false;
-        TestTask task = startTask(new TestTask(initial, replay), 1);
-        task.put(Collections.singletonList(record(0L, 10L)));
-        initial.terminal = schemaMismatch(0L);
-        task.put(Collections.emptyList());
-
-        replay.terminal = schemaMismatch(0L); // the replay's own rejection, not yet drained
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
-        assertEquals(0L, task.preCommit(current).get(SOURCE).offset());
-        assertEquals(1, task.fakeContext.pauseCalls, "the running isolation must not be restarted");
-    }
-
-    /**
-     * Connect holds a batch that put() refused and keeps every partition paused until some
-     * put() returns normally. Isolation lifts that pause itself when it ends, so the batch in
-     * hand has to be accepted in the very same call - refusing it leaves Connect owning an
-     * undelivered batch while the consumer fetches again, which breaks its
-     * `messageBatch.isEmpty() || msgs.isEmpty()` invariant and kills the task.
-     */
-    @Test
-    void theBatchInHandIsAcceptedAsSoonAsIsolationEnds() {
-        FakeSender initial = new FakeSender();
-        FakeSender replay = new FakeSender();
-        replay.drainSucceeds = false;
-        TestTask task = startTask(new TestTask(initial, replay), 1);
-        task.put(Collections.singletonList(record(0L, 10L)));
-        initial.terminal = schemaMismatch(0L);
-
-        task.put(Collections.emptyList());
-        assertEquals(1, task.fakeContext.pauseCalls);
-        assertThrows(RetriableException.class, () -> task.put(Collections.singletonList(record(1L, 11L))),
-                "while isolation owns the sender the batch has to go back to Connect");
-
-        replay.drainSucceeds = true; // the replayed row is acked, so the next slice finishes
-        assertDoesNotThrow(() -> task.put(Collections.singletonList(record(1L, 11L))));
-        assertTrue(replay.flushedValues.contains(11L), "the batch must be written, not refused again");
-        assertEquals(1, task.fakeContext.resumeCalls);
-    }
-
-    /**
-     * Bisecting a rejected batch is forward progress: the server answered and the search space
-     * halved. Counting only settlements would let progress.timeout.ms kill a task that is doing
-     * exactly what isolation asks of it.
-     */
-    @Test
-    void bisectingARejectedBatchCountsAsProgress() {
-        FakeSender initial = new FakeSender();
-        FakeSender rejectsBatch = new FakeSender();
-        rejectsBatch.rejectedValue = 11L;
-        FakeSender bisected = new FakeSender();
-        bisected.drainSucceeds = false; // the halves are still in flight when the slice ends
-        Map<String, String> extra = new HashMap<>();
-        extra.put(QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "10");
-        TestTask task = startTask(new TestTask(initial, rejectsBatch, bisected), 2, extra);
-        task.put(java.util.List.of(record(0L, 10L), record(1L, 11L)));
-
-        // The rejected frame belongs to no entry the task recorded, so the whole window is
-        // replayed as one batch - and that batch is rejected again, which forces a bisection.
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(8);
-        initial.terminal = schemaMismatch(5L);
-        task.put(Collections.emptyList());
-
-        // 7ms after the split, well inside the 10ms budget - but 15ms after the last settlement.
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(15);
-        assertDoesNotThrow(() -> task.put(Collections.emptyList()));
-        assertThrows(RetriableException.class, () -> task.put(Collections.singletonList(record(2L, 12L))),
-                "the bisection is still unfinished, so the split was the only progress on record");
-        assertTrue(task.fakeContext.reportedValues.isEmpty(), "nothing is blamed until a half is isolated");
-    }
-
-    @Test
-    void validatesExplicitPollIntervalAgainstAppendDeadline() {
-        TestTask task = new TestTask(new FakeSender());
-        Map<String, String> extra = new HashMap<>();
-        extra.put("consumer.override.max.poll.interval.ms", "1000");
-        assertThrows(ConfigException.class, () -> startTask(task, 1, extra));
-    }
-
-    @Test
-    void capacityFailureIsFatalAndNeverDlqEligible() {
-        FakeSender fakeSender = new FakeSender();
-        fakeSender.rowFailure = new LineSenderException("store-and-forward append deadline exceeded");
-        TestTask task = startTask(fakeSender, 1);
-
-        assertThrows(ConnectException.class, () -> task.put(Collections.singletonList(record(0L, 10L))));
-        assertTrue(task.fakeContext.reportedValues.isEmpty());
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(1L));
-        assertEquals(0L, task.preCommit(current).get(SOURCE).offset());
-    }
-
-    @Test
-    void acceptsAppendDeadlineBelowExplicitPollInterval() {
-        TestTask task = new TestTask(new FakeSender());
-        Map<String, String> extra = new HashMap<>();
-        extra.put("consumer.override.max.poll.interval.ms", "1000");
-        extra.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG,
-                "ws::addr=localhost:9000;auto_flush_rows=1;sf_append_deadline_millis=999;");
-        assertDoesNotThrow(() -> startTask(task, 1, extra));
-    }
-
-    @Test
-    void rejectsUnknownDlqTerminalCategory() {
-        TestTask task = new TestTask(new FakeSender());
-        Map<String, String> extra = new HashMap<>();
-        extra.put(QuestDBSinkConnectorConfig.QWP_DLQ_TERMINAL_CATEGORIES_CONFIG, "NOT_A_CATEGORY");
-        assertThrows(ConfigException.class, () -> startTask(task, 1, extra));
-    }
-
-    private static TestTask startTask(FakeSender sender, int flushRows) {
-        return startTask(new TestTask(sender), flushRows);
-    }
-
-    private static int publishBufferSize(QwpSinkTask task) {
-        try {
-            Field field = QwpSinkTask.class.getDeclaredField("publishBuffer");
+        for (Field field : QwpSinkTask.class.getDeclaredFields()) {
             field.setAccessible(true);
-            return ((java.util.List<?>) field.get(task)).size();
+            Object value = field.get(task);
+            assertFalse(value instanceof SinkRecord, field.getName());
+            if (value instanceof Collection<?>) {
+                assertFalse(((Collection<?>) value).stream().anyMatch(SinkRecord.class::isInstance), field.getName());
+            }
+        }
+    }
+
+    @Test
+    void invalidCategoryFailsAtStart() {
+        Map<String, String> props = Collections.singletonMap(
+                QuestDBSinkConnectorConfig.QWP_DLQ_TERMINAL_CATEGORIES_CONFIG, "NOT_A_CATEGORY");
+        assertThrows(ConfigException.class,
+                () -> startTask(Collections.emptyList(), 1, props, true));
+    }
+
+    private static TestTask enterQuarantine(FakeSender initial, FakeSender quarantine, List<SinkRecord> batch) {
+        TestTask task = startTask(List.of(initial, quarantine), batch.size(), Collections.emptyMap(), true);
+        task.put(batch);
+        initial.awaitFailure = schemaMismatch(0);
+        task.put(Collections.emptyList());
+        return task;
+    }
+
+    private static void assertOffset(long expected, Map<TopicPartition, OffsetAndMetadata> offsets) {
+        assertEquals(expected, offsets.get(SOURCE).offset());
+    }
+
+    private static Object field(Object target, String name) {
+        try {
+            Field field = QwpSinkTask.class.getDeclaredField(name);
+            field.setAccessible(true);
+            return field.get(target);
         } catch (ReflectiveOperationException e) {
             throw new AssertionError(e);
         }
     }
 
-    private static void assertOverlongColumnNameIsDlqd(String acceptedName, String rejectedName) {
-        FakeSender fakeSender = new FakeSender();
-        TestTask task = startTask(fakeSender, 2);
-
-        assertDoesNotThrow(() -> task.put(java.util.List.of(
-                recordWithValue(0L, Collections.singletonMap(acceptedName, 10L)),
-                recordWithValue(1L, Collections.singletonMap(rejectedName, 11L)),
-                record(2L, 12L)
-        )));
-
-        assertEquals(Collections.singletonList(-1L), task.fakeContext.reportedValues);
-        assertEquals(2, fakeSender.rows, "records around the invalid one must still be written");
-        assertEquals(1, fakeSender.cancelRows, "the partially constructed invalid row must be cancelled");
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(3L));
-        assertEquals(3L, task.preCommit(current).get(SOURCE).offset());
-    }
-
-    private static void assertInvalidLogicalTypeColumnNameIsDlqd(
-            String invalidName, Schema fieldSchema, Object fieldValue) {
-        FakeSender fakeSender = new FakeSender();
-        TestTask task = startTask(fakeSender, 2);
-
-        assertDoesNotThrow(() -> task.put(java.util.List.of(
-                record(0L, 10L),
-                recordWithField(1L, invalidName, fieldSchema, fieldValue),
-                record(2L, 12L)
-        )));
-
-        assertEquals(Collections.singletonList(-1L), task.fakeContext.reportedValues);
-        assertEquals(2, fakeSender.rows, "records around the invalid one must still be written");
-        assertEquals(1, fakeSender.cancelRows, "the partially constructed invalid row must be cancelled");
-        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(3L));
-        assertEquals(3L, task.preCommit(current).get(SOURCE).offset());
-    }
-
-    private static Stream<Arguments> logicalTypes() {
-        return Stream.of(
-                Arguments.of("Debezium MicroTimestamp",
-                        SchemaBuilder.int64().name("io.debezium.time.MicroTimestamp").build(), 0L),
-                Arguments.of("Debezium Date",
-                        SchemaBuilder.int32().name("io.debezium.time.Date").build(), 0),
-                Arguments.of("Kafka Timestamp", Timestamp.SCHEMA, new java.util.Date(0)),
-                Arguments.of("Kafka Date", org.apache.kafka.connect.data.Date.SCHEMA, new java.util.Date(0)),
-                Arguments.of("Kafka Time", Time.SCHEMA, new java.util.Date(0))
-        );
-    }
-
-    private static TestTask startTask(TestTask task, int flushRows) {
-        return startTask(task, flushRows, Collections.emptyMap());
-    }
-
-    private static TestTask startTask(TestTask task, int flushRows, Map<String, String> extra) {
-        task.fakeContext = new FakeContext();
-        task.initialize(task.fakeContext);
-        Map<String, String> props = new HashMap<>();
-        props.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG,
-                "ws::addr=localhost:9000;auto_flush_rows=" + flushRows + ";auto_flush_interval=60000;");
-        props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, "table");
-        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
-        props.putAll(extra);
-        task.start(props);
-        task.open(Collections.singleton(SOURCE));
-        return task;
-    }
-
-    private static LineSenderServerException schemaMismatch(long fsn) {
-        return new LineSenderServerException(new SenderError(
-                SenderError.Category.SCHEMA_MISMATCH,
-                SenderError.Policy.TERMINAL,
-                3,
-                "bad column",
-                1L,
-                fsn,
-                fsn,
-                null,
-                System.nanoTime()));
+    private static Map<TopicPartition, OffsetAndMetadata> offsets(TopicPartition partition, long offset) {
+        return Collections.singletonMap(partition, new OffsetAndMetadata(offset));
     }
 
     private static SinkRecord record(long offset, long value) {
@@ -1384,10 +754,10 @@ class QwpSinkTaskTest {
                 source.topic(), source.partition(), offset);
     }
 
-    private static SinkRecord recordOnTopic(String topic, long offset, long value) {
+    private static SinkRecord recordWithTimestamp(long offset, long value) {
         return new SinkRecord(
-                topic, 9, null, null, null, value, offset,
-                null, TimestampType.NO_TIMESTAMP_TYPE, Collections.emptyList(),
+                "renamed", 9, null, null, null, value, offset,
+                123L, TimestampType.CREATE_TIME, Collections.emptyList(),
                 SOURCE.topic(), SOURCE.partition(), offset);
     }
 
@@ -1398,80 +768,128 @@ class QwpSinkTaskTest {
                 SOURCE.topic(), SOURCE.partition(), offset);
     }
 
-    private static SinkRecord recordWithValue(long offset, Object value) {
-        return recordWithValue(SOURCE, offset, value);
+    private static LineSenderServerException schemaMismatch(long fsn) {
+        return serverFailure(SenderError.Category.SCHEMA_MISMATCH, fsn);
     }
 
-    private static SinkRecord recordWithValue(TopicPartition source, long offset, Object value) {
-        return new SinkRecord(
-                "renamed", 9, null, null, null, value, offset,
-                null, TimestampType.NO_TIMESTAMP_TYPE, Collections.emptyList(),
-                source.topic(), source.partition(), offset);
+    private static LineSenderServerException serverFailure(SenderError.Category category, long fsn) {
+        return new LineSenderServerException(new SenderError(
+                category,
+                SenderError.Policy.TERMINAL,
+                3,
+                "rejected",
+                1L,
+                fsn,
+                fsn,
+                null,
+                System.nanoTime()));
     }
 
-    private static SinkRecord recordWithField(
-            long offset, String fieldName, Schema fieldSchema, Object fieldValue) {
-        Schema schema = SchemaBuilder.struct().field(fieldName, fieldSchema).build();
-        Struct value = new Struct(schema).put(fieldName, fieldValue);
-        return new SinkRecord(
-                "renamed", 9, null, null, schema, value, offset,
-                null, TimestampType.NO_TIMESTAMP_TYPE, Collections.emptyList(),
-                SOURCE.topic(), SOURCE.partition(), offset);
+    private static Stream<RuntimeException> terminalBuildFailures() {
+        return Stream.of(
+                new QwpAuthFailedException(401, "localhost", 9000),
+                new QwpVersionMismatchException(2, 1),
+                new LineSenderException(new QwpProtocolVersionException("malformed protocol")),
+                new QwpDurableAckMismatchException("localhost", 9000, null),
+                new WebSocketUpgradeException(426, null, "upgrade rejected"),
+                new LineSenderException("invalid sender configuration")
+        );
+    }
+
+    private static Stream<RuntimeException> transientBuildFailures() {
+        return Stream.of(
+                new HttpClientException("connection refused"),
+                new LineSenderException(new HttpClientException("all endpoints unreachable")),
+                new QwpRoleMismatchException("PRIMARY", null, "no writable primary"),
+                new WebSocketUpgradeException(WebSocketUpgradeException.STATUS_NONE, null, "no response"),
+                new WebSocketUpgradeException(502, null, "bad gateway"),
+                new WebSocketUpgradeException(503, null, "service unavailable"),
+                new WebSocketUpgradeException(421, "REPLICA", "misdirected request")
+        );
+    }
+
+    private static TestTask startTask(FakeSender sender, int flushRows) {
+        return startTask(sender, flushRows, Collections.emptyMap(), true);
+    }
+
+    private static TestTask startTask(FakeSender sender, int flushRows,
+                                      Map<String, String> extra, boolean hasReporter) {
+        return startTask(Collections.singletonList(sender), flushRows, extra, hasReporter);
+    }
+
+    private static TestTask startTask(List<FakeSender> senders, int flushRows,
+                                      Map<String, String> extra, boolean hasReporter) {
+        TestTask task = new TestTask(senders);
+        task.fakeContext = new FakeContext(hasReporter);
+        task.fakeContext.assignment.add(SOURCE);
+        task.initialize(task.fakeContext);
+        Map<String, String> props = new HashMap<>();
+        props.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG,
+                "ws::addr=localhost:9000;auto_flush_rows=" + flushRows + ";auto_flush_interval=60000;");
+        props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, "table");
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        if (hasReporter) {
+            props.put("errors.tolerance", "all");
+        }
+        props.putAll(extra);
+        task.start(props);
+        task.open(Collections.singleton(SOURCE));
+        return task;
     }
 
     private static final class TestTask extends QwpSinkTask {
-        private final FakeSender[] senders;
-        private int senderIndex;
+        private final List<FakeSender> senders;
+        private RuntimeException buildFailure;
+        private int buildCalls;
         private FakeContext fakeContext;
         private long nowNanos;
-        private long nanoTimeStep;
-        private RuntimeException senderBuildFailure;
 
-        private TestTask(FakeSender... senders) {
+        private TestTask(List<FakeSender> senders) {
             this.senders = senders;
         }
 
         @Override
         Sender buildSender(String confString) {
-            if (senderBuildFailure != null) {
-                RuntimeException failure = senderBuildFailure;
-                senderBuildFailure = null;
-                throw failure;
+            buildCalls++;
+            if (buildFailure != null) {
+                throw buildFailure;
             }
-            if (senderIndex >= senders.length) {
-                throw new AssertionError("Unexpected sender recreation");
+            int index = buildCalls - 1;
+            if (index >= senders.size()) {
+                throw new AssertionError("Unexpected sender build " + buildCalls);
             }
-            return senders[senderIndex++].proxy();
+            return senders.get(index).proxy();
         }
 
         @Override
         long nanoTime() {
-            long result = nowNanos;
-            nowNanos += nanoTimeStep;
-            return result;
+            return nowNanos;
         }
     }
 
     private static final class FakeSender {
         private long ackedFsn = -1L;
-        private int flushes;
-        private int rows;
+        private RuntimeException autoFlushFailure;
+        private boolean blockClose;
         private int cancelRows;
-        private int awaitAckCalls;
-        private int getAckedFsnCalls;
         private int closeCalls;
-        private LineSenderServerException terminal;
-        private LineSenderServerException closeFailure;
-        private Long rejectedValue;
-        private Long currentValue;
+        private RuntimeException drainFailure;
         private boolean drainSucceeds = true;
-        private boolean zeroTimeoutDrainSucceeds = true;
-        private boolean returnNoFsn;
+        private final List<Long> drainTimeouts = new ArrayList<>();
+        private int flushes;
+        private RuntimeException flushFailure;
+        private final ArrayDeque<Long> flushResults = new ArrayDeque<>();
+        private RuntimeException awaitFailure;
+        private final List<Long> pendingValues = new ArrayList<>();
+        private final Set<Long> rejectedValues = new HashSet<>();
         private RuntimeException rowFailure;
-        private Runnable beforeTerminal;
-        private final java.util.List<Long> drainTimeouts = new ArrayList<>();
-        private final java.util.List<Long> flushedValues = new ArrayList<>();
-        private final java.util.List<Long> writtenValues = new ArrayList<>();
+        private int rows;
+        private RuntimeException setterFailure;
+        private boolean zeroDrainSucceeds = true;
+        private final List<Long> writtenValues = new ArrayList<>();
+        private List<Long> lastFlushed = Collections.emptyList();
+        private String lastCommitMethod;
+        private Long currentValue;
 
         private Sender proxy() {
             return (Sender) Proxy.newProxyInstance(
@@ -1479,52 +897,61 @@ class QwpSinkTaskTest {
                     new Class<?>[]{Sender.class},
                     (proxy, method, args) -> {
                         switch (method.getName()) {
-                            case "atNow":
                             case "at":
+                            case "atNow":
+                                lastCommitMethod = method.getName();
                                 if (rowFailure != null) {
+                                    currentValue = null;
                                     throw rowFailure;
                                 }
                                 rows++;
                                 if (currentValue != null) {
                                     writtenValues.add(currentValue);
+                                    pendingValues.add(currentValue);
+                                    currentValue = null;
+                                }
+                                if (autoFlushFailure != null) {
+                                    throw autoFlushFailure;
                                 }
                                 return null;
                             case "longColumn":
+                                if (setterFailure != null) {
+                                    throw setterFailure;
+                                }
                                 currentValue = ((Number) args[1]).longValue();
                                 return proxy;
                             case "flushAndGetSequence":
-                                if (currentValue != null) {
-                                    flushedValues.add(currentValue);
-                                    currentValue = null;
+                                if (flushFailure != null) {
+                                    throw flushFailure;
                                 }
-                                long published = flushes++;
-                                return returnNoFsn ? -1L : published;
+                                lastFlushed = new ArrayList<>(pendingValues);
+                                pendingValues.clear();
+                                long fsn = flushResults.isEmpty() ? flushes : flushResults.removeFirst();
+                                flushes++;
+                                return fsn;
                             case "getAckedFsn":
-                                getAckedFsnCalls++;
                                 return ackedFsn;
                             case "awaitAckedFsn":
-                                awaitAckCalls++;
-                                if (terminal != null) {
-                                    if (beforeTerminal != null) {
-                                        beforeTerminal.run();
-                                    }
-                                    throw terminal;
+                                if (awaitFailure != null) {
+                                    throw awaitFailure;
                                 }
                                 return (long) args[0] <= ackedFsn;
                             case "drain":
-                                drainTimeouts.add((Long) args[0]);
-                                if ((Long) args[0] == 0L && !zeroTimeoutDrainSucceeds) {
+                                long timeout = (Long) args[0];
+                                drainTimeouts.add(timeout);
+                                if (drainFailure != null) {
+                                    throw drainFailure;
+                                }
+                                if (timeout == 0L && !zeroDrainSucceeds) {
                                     return false;
                                 }
                                 if (!drainSucceeds) {
                                     return false;
                                 }
-                                if (rejectedValue != null && flushedValues.contains(rejectedValue)) {
-                                    terminal = schemaMismatch(Math.max(0, flushes - 1L));
-                                    if (beforeTerminal != null) {
-                                        beforeTerminal.run();
+                                for (Long value : lastFlushed) {
+                                    if (rejectedValues.contains(value)) {
+                                        throw schemaMismatch(Math.max(0, flushes - 1L));
                                     }
-                                    throw terminal;
                                 }
                                 ackedFsn = Math.max(ackedFsn, flushes - 1L);
                                 return true;
@@ -1534,8 +961,8 @@ class QwpSinkTaskTest {
                                 return null;
                             case "close":
                                 closeCalls++;
-                                if (closeFailure != null) {
-                                    throw closeFailure;
+                                if (blockClose) {
+                                    new CountDownLatch(1).await();
                                 }
                                 return null;
                             case "reset":
@@ -1553,11 +980,17 @@ class QwpSinkTaskTest {
 
     private static final class FakeContext implements SinkTaskContext {
         private final Set<TopicPartition> assignment = new HashSet<>();
-        private final java.util.List<Long> reportedValues = new ArrayList<>();
-        private boolean failReports;
+        private final boolean hasReporter;
         private int pauseCalls;
+        private final List<Long> reportedValues = new ArrayList<>();
         private int requestCommitCalls;
         private int resumeCalls;
+        private final List<Map<TopicPartition, Long>> rewinds = new ArrayList<>();
+        private final List<Long> timeouts = new ArrayList<>();
+
+        private FakeContext(boolean hasReporter) {
+            this.hasReporter = hasReporter;
+        }
 
         @Override
         public Map<String, String> configs() {
@@ -1566,13 +999,13 @@ class QwpSinkTaskTest {
 
         @Override
         public void offset(Map<TopicPartition, Long> offsets) {
+            rewinds.add(new HashMap<>(offsets));
         }
 
         @Override
         public void offset(TopicPartition partition, long offset) {
+            rewinds.add(Collections.singletonMap(partition, offset));
         }
-
-        private final java.util.List<Long> timeouts = new ArrayList<>();
 
         @Override
         public void timeout(long timeoutMs) {
@@ -1584,19 +1017,9 @@ class QwpSinkTaskTest {
             return assignment;
         }
 
-        /**
-         * Kafka Connect keeps its own record of the partitions a task asked to pause, and
-         * re-applies it whenever those partitions are assigned again - the set outlives a
-         * revocation. Model that here, otherwise a pause the task forgets to hand back looks
-         * harmless in tests and strands the partitions in production.
-         */
-        private final Set<TopicPartition> frameworkPaused = new HashSet<>();
-
         @Override
         public void pause(TopicPartition... partitions) {
             pauseCalls++;
-            Collections.addAll(assignment, partitions);
-            Collections.addAll(frameworkPaused, partitions);
         }
 
         @Override
@@ -1606,7 +1029,6 @@ class QwpSinkTaskTest {
                 if (!assignment.contains(partition)) {
                     throw new IllegalStateException("Cannot resume unassigned partition " + partition);
                 }
-                frameworkPaused.remove(partition);
             }
         }
 
@@ -1615,40 +1037,16 @@ class QwpSinkTaskTest {
             requestCommitCalls++;
         }
 
-        /**
-         * Kafka's own reporter hands back the DLQ producer's future, which completes on broker
-         * ack rather than immediately. Set this to model that, and complete the futures when
-         * the test wants the broker to catch up.
-         */
-        private boolean dlqFuturesPending;
-        private final java.util.List<CompletableFuture<Void>> issuedDlqFutures = new ArrayList<>();
-
-        private void completeDlqFutures() {
-            for (CompletableFuture<Void> future : issuedDlqFutures) {
-                future.complete(null);
-            }
-        }
-
-        private void failDlqFutures() {
-            for (CompletableFuture<Void> future : issuedDlqFutures) {
-                future.completeExceptionally(new RuntimeException("broker rejected DLQ write"));
-            }
-        }
-
         @Override
         public ErrantRecordReporter errantRecordReporter() {
+            if (!hasReporter) {
+                return null;
+            }
             return (record, error) -> {
-                reportedValues.add(record.value() instanceof Number ? ((Number) record.value()).longValue() : -1L);
-                if (failReports) {
-                    throw new ConnectException("Tolerance exceeded in error handler", error);
-                }
-                CompletableFuture<Void> future = new CompletableFuture<>();
-                if (dlqFuturesPending) {
-                    issuedDlqFutures.add(future);
-                } else {
-                    future.complete(null);
-                }
-                return future;
+                reportedValues.add(record.value() instanceof Number
+                        ? ((Number) record.value()).longValue()
+                        : -1L);
+                return CompletableFuture.completedFuture(null);
             };
         }
     }

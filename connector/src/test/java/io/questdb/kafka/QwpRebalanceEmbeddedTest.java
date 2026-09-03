@@ -141,7 +141,7 @@ public class QwpRebalanceEmbeddedTest {
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, "rebalance_test");
         props.put(QuestDBSinkConnectorConfig.ALLOWED_LAG_CONFIG, "25");
-        props.put(QuestDBSinkConnectorConfig.QWP_ISOLATION_SLICE_MS_CONFIG, "25");
+        props.put(QuestDBSinkConnectorConfig.QWP_QUARANTINE_ACK_TIMEOUT_MS_CONFIG, "25");
         props.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG,
                 "ws::addr=localhost:" + peer.port()
                         + ";auto_flush_rows=1;auto_flush_interval=25;sf_max_total_bytes=67108864;");

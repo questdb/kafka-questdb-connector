@@ -53,6 +53,7 @@ final class ClientConfUtils {
         boolean hasSfAppendDeadline = false;
         boolean hasAutoFlushBytes = false;
         boolean hasCloseFlushTimeout = false;
+        boolean hasInitialConnectRetry = false;
         while (ConfStringParser.hasNext(confStr, pos)) {
             hasAtLeastOneParam = true;
             pos = ConfStringParser.nextKey(confStr, pos, tmpSink);
@@ -118,6 +119,16 @@ final class ClientConfUtils {
                 }
             } else if (isQwpTransport && (Chars.equals(tmpSink, "sf_dir") || Chars.equals(tmpSink, "sf_durability"))) {
                 throw new ConfigException("QuestDB Kafka connector supports memory-only store-and-forward; " + tmpSink + " is not allowed with QWP");
+            } else if (isQwpTransport && Chars.equals(tmpSink, "initial_connect_retry")) {
+                pos = ConfStringParser.value(confStr, pos, tmpSink);
+                if (pos < 0 || tmpSink.length() == 0) {
+                    throw new ConfigException("QuestDB Kafka connector requires initial_connect_retry=off for QWP");
+                }
+                if (!Chars.equalsIgnoreCase(tmpSink, "off") && !Chars.equalsIgnoreCase(tmpSink, "false")) {
+                    throw new ConfigException("QuestDB Kafka connector requires initial_connect_retry=off for QWP");
+                }
+                hasInitialConnectRetry = true;
+                sink.put("initial_connect_retry=off;");
             } else {
                 // copy other params
                 if (isQwpTransport && Chars.equals(tmpSink, "auto_flush_bytes")) {
@@ -166,6 +177,11 @@ final class ClientConfUtils {
         }
         if (isQwpTransport && !hasCloseFlushTimeout) {
             sink.put("close_flush_timeout_millis=").put(DEFAULT_QWP_CLOSE_FLUSH_TIMEOUT_MILLIS).put(';');
+        }
+        if (isQwpTransport && !hasInitialConnectRetry) {
+            // reconnect_* settings otherwise promote the initial connection to a blocking
+            // retry loop. Connect must own startup retry and retain the current poll batch.
+            sink.put("initial_connect_retry=off;");
         }
         if (!isQwpTransport) {
             sink.put("auto_flush=off;");

@@ -718,10 +718,9 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         props.put("errors.deadletterqueue.topic.name", "dlq");
         props.put("errors.deadletterqueue.topic.replication.factor", "1");
         props.put("errors.tolerance", "all");
-        // A bisection of 2000 records cannot fit in a 5ms slice on any machine, so the replay
-        // has to survive being handed back to Connect between slices. With the default budget
-        // that only happened on hosts slow enough to run out of it mid-search.
-        props.put("qwp.isolation.slice.ms", "5");
+        // A 5 ms quarantine ACK budget forces slower hosts to hand the unresolved span back to
+        // Connect. The awaiting span and its offset disposition must survive that redelivery.
+        props.put("qwp.quarantine.ack.timeout.ms", "5");
 
         QuestDBUtils.assertSql(
                 "{\"ddl\":\"OK\"}",
@@ -753,9 +752,9 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     /**
      * The same rejection, but with the burst still arriving while the connector runs. The
-     * records that isolation never saw are the point: Connect holds the batch it could not
+     * records beyond the rejected checkpoint are the point: Connect holds the batch it could not
      * deliver and keeps every partition paused until a put() returns normally, so the task has
-     * to hand that batch back the moment the replay ends instead of refusing it again.
+     * to hand that batch back the moment quarantine ends instead of refusing it again.
      */
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
@@ -768,7 +767,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         props.put("errors.deadletterqueue.topic.name", "dlq");
         props.put("errors.deadletterqueue.topic.replication.factor", "1");
         props.put("errors.tolerance", "all");
-        props.put("qwp.isolation.slice.ms", "5");
+        props.put("qwp.quarantine.ack.timeout.ms", "5");
 
         QuestDBUtils.assertSql(
                 "{\"ddl\":\"OK\"}",
@@ -974,6 +973,12 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.RETRY_BACKOFF_MS, "1000");
         props.put(QuestDBSinkConnectorConfig.MAX_RETRIES, "40");
+        if (transport == ConnectTestUtils.Transport.QWP) {
+            // Keep QuestDB down past the client's local append deadline. QWP must retire the
+            // sender and rewind rather than fail the task at that deadline.
+            props.compute(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG,
+                    (key, value) -> value + "sf_append_deadline_millis=2000;");
+        }
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
@@ -991,6 +996,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
             connect.kafka().produce(topicName, "key2", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
             Thread.sleep(500);
         }
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         // restart QuestDB
         questDBContainer = newQuestDbContainer();
@@ -1004,6 +1010,37 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 20,
                 httpPort
         );
+    }
+
+    @Test
+    public void testQwpOutageAtStartIsRetriedByPut() {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(
+                questDBContainer,
+                topicName,
+                ConnectTestUtils.Transport.QWP);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.RETRY_BACKOFF_MS, "100");
+
+        boolean restarted = false;
+        try {
+            questDBContainer.stop();
+            connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+            connect.kafka().produce(topicName, "key", "{\"value\":42}");
+            ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+            questDBContainer = newQuestDbContainer();
+            restarted = true;
+            QuestDBUtils.assertSqlEventually("\"value\"\r\n42\r\n",
+                    "select value from " + topicName,
+                    20,
+                    httpPort);
+            ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+        } finally {
+            if (!restarted) {
+                questDBContainer = newQuestDbContainer();
+            }
+        }
     }
 
     @ParameterizedTest

@@ -23,7 +23,8 @@ The connector keeps Kafka as the durable log, so QWP store-and-forward is
 memory-only: `sf_dir` and `sf_durability` are rejected. `max.inflight.rows` is
 a soft pause threshold, and the current poll batch may overshoot it.
 `sf_max_total_bytes` caps the client's encoded store-and-forward segments; it
-does not bound the heap retained by the connector's `SinkRecord` payloads.
+does not include Kafka Connect's current poll batch. The connector itself retains
+only per-flush offset checkpoints, not `SinkRecord` payloads.
 Keep `sf_append_deadline_millis` below the worker consumer's
 `max.poll.interval.ms` (or set `consumer.override.max.poll.interval.ms` so the
 connector can validate the relationship).
@@ -34,10 +35,11 @@ interrupt a task that overruns it. The closing `preCommit` publishes pending
 rows and waits up to `qwp.commit.ack.timeout.ms` (500ms by default) before it
 selects the offsets to commit. A later acknowledgement during `Sender.close()`
 cannot change that selection, so the connector defaults the client's
-`close_flush_timeout_millis` to `0`: close still releases its resources but
-does not wait for acknowledgements again. Unacknowledged offsets are withheld
-and Kafka redelivers those records, so duplicates remain possible. An explicit
-client setting is preserved. Partition revocation does not drain at all:
+`close_flush_timeout_millis` to `0`. Sender close runs on a daemon thread and
+the task waits at most one second for it; a wedged native close finishes in the
+background instead of overrunning Connect's worker-wide shutdown budget.
+Unacknowledged offsets are withheld and Kafka redelivers those records, so
+duplicates remain possible. An explicit client setting is preserved. Partition revocation does not drain at all:
 offsets for the revoked partitions were already decided by the preceding
 `preCommit`, so waiting would only stall the rebalance for the whole consumer
 group.
@@ -49,29 +51,24 @@ pinning the server behaviour the design relies on.
 
 Offsets are committed only after the corresponding QWP frame is acknowledged.
 By default, only deterministic `SCHEMA_MISMATCH` terminal errors are eligible
-for record isolation and the configured Kafka Connect DLQ. Other terminal,
-security, protocol, capacity, and transport failures fail the task. Advanced
+for quarantine and the configured Kafka Connect DLQ. Quarantine re-fetches the
+unacknowledged window from Kafka, then delivers poll batches synchronously and
+bisects rejected batches until it identifies the bad record. Its per-chunk wait
+is bounded by `qwp.quarantine.ack.timeout.ms` (1s by default), so recovery on a
+high-latency link is intentionally slower than normal pipelined delivery. Other
+terminal, security, and protocol failures fail the task. Transport and local
+store-and-forward capacity failures retire the sender and rewind the affected
+partitions; `progress.timeout.ms` is the bound on a persistent outage. Advanced
 users can explicitly extend `qwp.dlq.terminal.categories`; doing so can blame
 valid records for server or client faults and is not recommended.
 
-Client-side row validation has a QWP limitation: the WebSocket sender uses the
-same plain `LineSenderException` for some invalid row arguments and for
-connection, buffer-recycle, and store-and-forward capacity failures observed
-from row calls. The connector therefore cannot safely send a record to the DLQ
-solely because row construction threw that exception; it fails the task
-instead. Mapping errors represented as `InvalidDataException` remain
-record-DLQ eligible, and typed `LineSenderServerException` rejections continue
-through the terminal-category policy above.
-
-The most common way to meet that limitation is schemaless JSON whose field
-types drift between records - `{"v":1}` followed by `{"v":1.5}`. The WebSocket
-sender remembers the type it sent for each column for the lifetime of the
-connection, so it raises the mismatch itself, before the row reaches QuestDB,
-and the task fails. The `http::` transport does not keep that state: the server
-rejects the row instead, which is a typed rejection and can be sent to the DLQ.
-Pin the column type to avoid it - declare the field in `doubles`, or publish
-with a schema - which is worth doing regardless, since a column's type in
-QuestDB is otherwise decided by whichever record happens to arrive first.
+Client-side row validation on a healthy sender is record-local and follows the
+normal Kafka Connect DLQ policy. Before classifying a plain client exception,
+the connector probes the sender's failure latch: a latched server rejection
+goes through quarantine, while a latched connection failure retires and rewinds
+the sender. DLQ handling requires both a reporter and `errors.tolerance=all`.
+As usual, pin drifting schemaless numeric fields with `doubles` or a schema so
+QuestDB does not depend on which type arrives first.
 
 ## Raw JSON fast path (experimental)
 
@@ -146,7 +143,8 @@ Limitations and differences:
 - Top-level values that are not JSON objects (`123`, `"text"`, `[1,2,3]`) are
   rejected. The standard path writes them into a `value` column.
 - A field with an empty name (`{"": 1}`) produces an illegal column name. On
-  QWP this fails the task; the standard path substitutes `value`.
+  QWP it follows the configured record-error/DLQ policy; the standard path
+  substitutes `value`.
 - Naming an object- or array-valued field in `symbols` flattens or writes it as
   an array instead of stringifying it, so the auto-created schema differs from
   the standard path.

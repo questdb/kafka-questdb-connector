@@ -79,6 +79,14 @@ public class ClientConfUtilsTest {
         assertConfStringPatchingThrowsConfigException("ws::addr=localhost:9000;sf_dir=/var/lib/qdb;", "QuestDB Kafka connector supports memory-only store-and-forward; sf_dir is not allowed with QWP");
         assertConfStringPatchingThrowsConfigException("wss::addr=localhost:9000;sf_durability=sync;", "QuestDB Kafka connector supports memory-only store-and-forward; sf_durability is not allowed with QWP");
         assertConfStringPatchingThrowsConfigException("ws::addr=localhost:9000;sf_append_deadline_millis=invalid;", "Invalid sf_append_deadline_millis value [sf_append_deadline_millis=invalid]");
+        assertConfStringIsPatched("ws::addr=localhost:9000;initial_connect_retry=off;", "ws::addr=localhost:9000;initial_connect_retry=off;sf_append_deadline_millis=30000;auto_flush_bytes=16777216;close_flush_timeout_millis=0;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
+        assertConfStringIsPatched("ws::addr=localhost:9000;initial_connect_retry=FALSE;", "ws::addr=localhost:9000;initial_connect_retry=off;sf_append_deadline_millis=30000;auto_flush_bytes=16777216;close_flush_timeout_millis=0;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
+        assertConfStringPatchingThrowsConfigException("ws::addr=localhost:9000;initial_connect_retry=sync;", "QuestDB Kafka connector requires initial_connect_retry=off for QWP");
+        assertConfStringPatchingThrowsConfigException("ws::addr=localhost:9000;initial_connect_retry=on;", "QuestDB Kafka connector requires initial_connect_retry=off for QWP");
+        assertConfStringPatchingThrowsConfigException("ws::addr=localhost:9000;initial_connect_retry=true;", "QuestDB Kafka connector requires initial_connect_retry=off for QWP");
+        assertConfStringPatchingThrowsConfigException("ws::addr=localhost:9000;initial_connect_retry=async;", "QuestDB Kafka connector requires initial_connect_retry=off for QWP");
+        assertConfStringPatchingThrowsConfigException("ws::addr=localhost:9000;initial_connect_retry=garbage;", "QuestDB Kafka connector requires initial_connect_retry=off for QWP");
+        assertConfStringPatchingThrowsConfigException("ws::addr=localhost:9000;initial_connect_retry=;", "QuestDB Kafka connector requires initial_connect_retry=off for QWP");
     }
 
     private static void assertConfStringIsPatched(String confStr, String expectedPatchedConfStr, long expectedMaxPendingRows, long expectedFlushNanos) {
@@ -86,6 +94,10 @@ public class ClientConfUtilsTest {
         FlushConfig flushConfig = new FlushConfig();
         ClientConfUtils.patchConfStr(confStr, sink, flushConfig);
 
+        if ((expectedPatchedConfStr.startsWith("ws::") || expectedPatchedConfStr.startsWith("wss::"))
+                && !expectedPatchedConfStr.contains("initial_connect_retry=")) {
+            expectedPatchedConfStr += "initial_connect_retry=off;";
+        }
         assertEquals(expectedPatchedConfStr, sink.toString());
         assertEquals(expectedMaxPendingRows, flushConfig.autoFlushRows);
         assertEquals(expectedFlushNanos, flushConfig.autoFlushNanos);

@@ -87,8 +87,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public static final String DLQ_SEND_BATCH_ON_ERROR_CONFIG = "dlq.send.batch.on.error";
     private static final String DLQ_SEND_BATCH_ON_ERROR_DOC = "When true and a Dead Letter Queue (DLQ) is configured, " +
-            "legacy transports send the current batch to the DLQ on parsing errors. For QWP terminal errors, send every unresolved " +
-            "QuestDB-bound record in the retained error window, excluding records already acknowledged by QuestDB or submitted to the DLQ. " +
+            "legacy transports send the current batch to the DLQ on parsing errors. For QWP terminal errors, send the rejected poll-batch chunk. " +
             "This can be useful to avoid additional database load when errors are expected to affect multiple records. " +
             "Default is false (try one-by-one).";
 
@@ -99,17 +98,16 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     private static final String QWP_PROGRESS_TIMEOUT_MS_DOC = "Maximum time in milliseconds that QWP data may remain pending without the acknowledged frame sequence advancing before the task fails.";
 
     public static final String QWP_MAX_INFLIGHT_ROWS_CONFIG = "max.inflight.rows";
-    private static final String QWP_MAX_INFLIGHT_ROWS_DOC = "Soft QWP backpressure threshold for retained rows. The current poll batch may overshoot this value. " +
-            "This row limit and the client's sf_max_total_bytes setting do not bound the heap retained by SinkRecord payloads.";
+    private static final String QWP_MAX_INFLIGHT_ROWS_DOC = "Soft QWP backpressure threshold for rows buffered or published but not yet acknowledged. The current poll batch may overshoot this value.";
 
     public static final String QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG = "qwp.commit.ack.timeout.ms";
     private static final String QWP_COMMIT_ACK_TIMEOUT_MS_DOC = "Bounded time preCommit waits for server acks of just-published QWP rows so clean rebalances commit instead of redelivering. A timeout only withholds offsets.";
 
-    public static final String QWP_ISOLATION_SLICE_MS_CONFIG = "qwp.isolation.slice.ms";
-    private static final String QWP_ISOLATION_SLICE_MS_DOC = "Maximum producer-thread time budget for one QWP replay-isolation slice.";
+    public static final String QWP_QUARANTINE_ACK_TIMEOUT_MS_CONFIG = "qwp.quarantine.ack.timeout.ms";
+    private static final String QWP_QUARANTINE_ACK_TIMEOUT_MS_DOC = "Maximum producer-thread wait in milliseconds for each synchronous QWP quarantine chunk.";
 
     public static final String QWP_DLQ_TERMINAL_CATEGORIES_CONFIG = "qwp.dlq.terminal.categories";
-    private static final String QWP_DLQ_TERMINAL_CATEGORIES_DOC = "QWP terminal categories eligible for replay isolation and DLQ handling. SCHEMA_MISMATCH is the safe default.";
+    private static final String QWP_DLQ_TERMINAL_CATEGORIES_DOC = "QWP terminal categories eligible for quarantine and DLQ handling. SCHEMA_MISMATCH is the safe default.";
 
     private static final String DEFAULT_TIMESTAMP_FORMAT = "yyyy-MM-ddTHH:mm:ss.SSSUUUZ";
 
@@ -149,7 +147,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(QWP_PROGRESS_TIMEOUT_MS_CONFIG, Type.LONG, 300_000L, ConfigDef.Range.atLeast(1L), Importance.MEDIUM, QWP_PROGRESS_TIMEOUT_MS_DOC)
                 .define(QWP_MAX_INFLIGHT_ROWS_CONFIG, Type.INT, 150_000, ConfigDef.Range.atLeast(1), Importance.MEDIUM, QWP_MAX_INFLIGHT_ROWS_DOC)
                 .define(QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG, Type.LONG, 500L, ConfigDef.Range.atLeast(0L), Importance.LOW, QWP_COMMIT_ACK_TIMEOUT_MS_DOC)
-                .define(QWP_ISOLATION_SLICE_MS_CONFIG, Type.LONG, 100L, ConfigDef.Range.atLeast(1L), Importance.LOW, QWP_ISOLATION_SLICE_MS_DOC)
+                .define(QWP_QUARANTINE_ACK_TIMEOUT_MS_CONFIG, Type.LONG, 1_000L, ConfigDef.Range.atLeast(1L), Importance.LOW, QWP_QUARANTINE_ACK_TIMEOUT_MS_DOC)
                 .define(QWP_DLQ_TERMINAL_CATEGORIES_CONFIG, Type.LIST, "SCHEMA_MISMATCH", Importance.LOW, QWP_DLQ_TERMINAL_CATEGORIES_DOC);
     }
 
@@ -276,8 +274,8 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
         return getLong(QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG);
     }
 
-    public long getQwpIsolationSliceMs() {
-        return getLong(QWP_ISOLATION_SLICE_MS_CONFIG);
+    public long getQwpQuarantineAckTimeoutMs() {
+        return getLong(QWP_QUARANTINE_ACK_TIMEOUT_MS_CONFIG);
     }
 
     public List<String> getQwpDlqTerminalCategories() {

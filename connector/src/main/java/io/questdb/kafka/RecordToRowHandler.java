@@ -1,5 +1,6 @@
 package io.questdb.kafka;
 
+import io.questdb.client.LineSenderServerException;
 import io.questdb.client.Sender;
 import io.questdb.client.cairo.TableUtils;
 import io.questdb.client.cutlass.line.LineSenderException;
@@ -28,7 +29,7 @@ final class RecordToRowHandler {
 
     private final QuestDBSinkConnectorConfig config;
     private final boolean cancelPartialRow;
-    private final boolean wrapSenderErrors;
+    private final SenderErrorPolicy senderErrorPolicy;
     private final boolean rawJson;
     private final boolean rawJsonEnvelope;
     private final Function<SinkRecord, ? extends CharSequence> recordToTable;
@@ -54,21 +55,32 @@ final class RecordToRowHandler {
     private static final int MAX_JSON_DEPTH = 64;
     private Sender sender;
 
+    /** What a plain {@link LineSenderException} raised while building a row means. */
+    enum SenderErrorPolicy {
+        /** Propagate it: the task fails. */
+        FAIL,
+        /** Wrap it as {@link InvalidDataException}: the record is at fault (legacy transports). */
+        WRAP,
+        /** Ask the sender for a latched failure first; without one the record is at fault (QWP). */
+        PROBE
+    }
+
     RecordToRowHandler(QuestDBSinkConnectorConfig config, Sender sender, boolean cancelPartialRow, boolean wrapSenderErrors) {
-        this(config, sender, cancelPartialRow, wrapSenderErrors, false, NameLimits.UNBOUNDED);
+        this(config, sender, cancelPartialRow, wrapSenderErrors, false);
     }
 
     RecordToRowHandler(QuestDBSinkConnectorConfig config, Sender sender, boolean cancelPartialRow, boolean wrapSenderErrors,
                        boolean routeSymbolsDirectly) {
-        this(config, sender, cancelPartialRow, wrapSenderErrors, routeSymbolsDirectly, NameLimits.UNBOUNDED);
+        this(config, sender, cancelPartialRow, wrapSenderErrors ? SenderErrorPolicy.WRAP : SenderErrorPolicy.FAIL,
+                routeSymbolsDirectly, NameLimits.UNBOUNDED);
     }
 
-    RecordToRowHandler(QuestDBSinkConnectorConfig config, Sender sender, boolean cancelPartialRow, boolean wrapSenderErrors,
+    RecordToRowHandler(QuestDBSinkConnectorConfig config, Sender sender, boolean cancelPartialRow, SenderErrorPolicy senderErrorPolicy,
                        boolean routeSymbolsDirectly, NameLimits nameLimits) {
         this.config = config;
         this.sender = sender;
         this.cancelPartialRow = cancelPartialRow;
-        this.wrapSenderErrors = wrapSenderErrors;
+        this.senderErrorPolicy = senderErrorPolicy;
         this.nameLimits = nameLimits;
         this.rawJson = config.isRawJsonFormat();
         this.rawJsonEnvelope = config.isRawJsonEnvelope();
@@ -184,8 +196,8 @@ final class RecordToRowHandler {
             if (cancelPartialRow && partialRecord) {
                 sender.cancelRow();
             }
-            if (ex instanceof LineSenderException && wrapSenderErrors) {
-                throw new InvalidDataException("object contains invalid data", ex);
+            if (ex instanceof LineSenderException) {
+                throw classifyRowConstructionFailure((LineSenderException) ex);
             }
             throw ex;
         }
@@ -193,15 +205,7 @@ final class RecordToRowHandler {
         if (kafkaTimestampsEnabled) {
             timestampColumnValue = TimeUnit.MILLISECONDS.toMicros(record.timestamp());
         }
-        if (timestampColumnValue == Long.MIN_VALUE) {
-            sender.atNow();
-        } else {
-            try {
-                sender.at(timestampColumnValue, ChronoUnit.MICROS);
-            } finally {
-                timestampColumnValue = Long.MIN_VALUE;
-            }
-        }
+        commitRow();
         return true;
     }
 
@@ -467,8 +471,8 @@ final class RecordToRowHandler {
             if (cancelPartialRow && partialRecord) {
                 sender.cancelRow();
             }
-            if (ex instanceof LineSenderException && wrapSenderErrors) {
-                throw new InvalidDataException("object contains invalid data", ex);
+            if (ex instanceof LineSenderException) {
+                throw classifyRowConstructionFailure((LineSenderException) ex);
             }
             throw ex;
         }
@@ -477,16 +481,49 @@ final class RecordToRowHandler {
             timestampColumnValue = TimeUnit.MILLISECONDS.toMicros(record.timestamp());
         }
 
-        if (timestampColumnValue == Long.MIN_VALUE) {
-            sender.atNow();
-        } else {
-            try {
-                sender.at(timestampColumnValue, ChronoUnit.MICROS);
-            } finally {
-                timestampColumnValue = Long.MIN_VALUE;
-            }
-        }
+        commitRow();
         return true;
+    }
+
+    private RuntimeException classifyRowConstructionFailure(LineSenderException failure) {
+        switch (senderErrorPolicy) {
+            case WRAP:
+                return new InvalidDataException("object contains invalid data", failure);
+            case PROBE:
+                if (failure instanceof LineSenderServerException) {
+                    return failure;
+                }
+                // QWP 1.3.8 latches connection and server failures. A non-latched exception from
+                // table() or a setter is therefore record-local; the probe rethrows any latched cause.
+                sender.awaitAckedFsn(-1L, 0L);
+                return new InvalidDataException("row rejected by the client", failure);
+            default:
+                return failure;
+        }
+    }
+
+    private void commitRow() {
+        try {
+            if (timestampColumnValue == Long.MIN_VALUE) {
+                sender.atNow();
+            } else {
+                sender.at(timestampColumnValue, ChronoUnit.MICROS);
+            }
+        } catch (LineSenderException failure) {
+            if (senderErrorPolicy != SenderErrorPolicy.PROBE) {
+                throw failure;
+            }
+            // Pin this message to questdb-client 1.3.8 until the client exposes a typed
+            // RowTooLargeForCapException. Any latched failure wins over this local exception.
+            sender.awaitAckedFsn(-1L, 0L);
+            if (failure.getMessage() != null
+                    && failure.getMessage().startsWith("row too large for server batch cap")) {
+                throw new InvalidDataException("row exceeds the server batch cap", failure);
+            }
+            throw failure;
+        } finally {
+            timestampColumnValue = Long.MIN_VALUE;
+        }
     }
 
     private void handleStruct(String parentName, Struct value, Schema schema) {
