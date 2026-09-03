@@ -10,10 +10,18 @@ import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.common.config.ConfigException;
+import org.apache.kafka.connect.data.Schema;
+import org.apache.kafka.connect.data.SchemaBuilder;
+import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.data.Time;
+import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.sink.ErrantRecordReporter;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTaskContext;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
@@ -26,6 +34,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -134,6 +143,14 @@ class QwpSinkTaskTest {
     @Test
     void overlongUtf8ColumnNameIsDlqdWithoutStoppingTheBatch() {
         assertOverlongColumnNameIsDlqd("x" + "é".repeat(63), "é".repeat(64));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("logicalTypes")
+    void invalidLogicalTypeColumnNameIsDlqdWithoutStoppingTheBatch(
+            String logicalType, Schema fieldSchema, Object value) {
+        assertInvalidLogicalTypeColumnNameIsDlqd("a*b", fieldSchema, value);
+        assertInvalidLogicalTypeColumnNameIsDlqd("é".repeat(64), fieldSchema, value);
     }
 
     @Test
@@ -1245,6 +1262,36 @@ class QwpSinkTaskTest {
         assertEquals(3L, task.preCommit(current).get(SOURCE).offset());
     }
 
+    private static void assertInvalidLogicalTypeColumnNameIsDlqd(
+            String invalidName, Schema fieldSchema, Object fieldValue) {
+        FakeSender fakeSender = new FakeSender();
+        TestTask task = startTask(fakeSender, 2);
+
+        assertDoesNotThrow(() -> task.put(java.util.List.of(
+                record(0L, 10L),
+                recordWithField(1L, invalidName, fieldSchema, fieldValue),
+                record(2L, 12L)
+        )));
+
+        assertEquals(Collections.singletonList(-1L), task.fakeContext.reportedValues);
+        assertEquals(2, fakeSender.rows, "records around the invalid one must still be written");
+        assertEquals(1, fakeSender.cancelRows, "the partially constructed invalid row must be cancelled");
+        Map<TopicPartition, OffsetAndMetadata> current = Collections.singletonMap(SOURCE, new OffsetAndMetadata(3L));
+        assertEquals(3L, task.preCommit(current).get(SOURCE).offset());
+    }
+
+    private static Stream<Arguments> logicalTypes() {
+        return Stream.of(
+                Arguments.of("Debezium MicroTimestamp",
+                        SchemaBuilder.int64().name("io.debezium.time.MicroTimestamp").build(), 0L),
+                Arguments.of("Debezium Date",
+                        SchemaBuilder.int32().name("io.debezium.time.Date").build(), 0),
+                Arguments.of("Kafka Timestamp", Timestamp.SCHEMA, new java.util.Date(0)),
+                Arguments.of("Kafka Date", org.apache.kafka.connect.data.Date.SCHEMA, new java.util.Date(0)),
+                Arguments.of("Kafka Time", Time.SCHEMA, new java.util.Date(0))
+        );
+    }
+
     private static TestTask startTask(TestTask task, int flushRows) {
         return startTask(task, flushRows, Collections.emptyMap());
     }
@@ -1310,6 +1357,16 @@ class QwpSinkTaskTest {
                 "renamed", 9, null, null, null, value, offset,
                 null, TimestampType.NO_TIMESTAMP_TYPE, Collections.emptyList(),
                 source.topic(), source.partition(), offset);
+    }
+
+    private static SinkRecord recordWithField(
+            long offset, String fieldName, Schema fieldSchema, Object fieldValue) {
+        Schema schema = SchemaBuilder.struct().field(fieldName, fieldSchema).build();
+        Struct value = new Struct(schema).put(fieldName, fieldValue);
+        return new SinkRecord(
+                "renamed", 9, null, null, schema, value, offset,
+                null, TimestampType.NO_TIMESTAMP_TYPE, Collections.emptyList(),
+                SOURCE.topic(), SOURCE.partition(), offset);
     }
 
     private static final class TestTask extends QwpSinkTask {

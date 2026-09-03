@@ -1070,23 +1070,23 @@ final class RecordToRowHandler {
         switch (schema.name()) {
             case "io.debezium.time.MicroTimestamp":
                 long l = (Long) value;
-                sender.timestampColumn(name, l, ChronoUnit.MICROS);
+                sender.timestampColumn(sanitizeName(name), l, ChronoUnit.MICROS);
                 return true;
             case "io.debezium.time.Date":
                 int i = (Integer) value;
                 long micros = Micros.addDays(0, i);
-                sender.timestampColumn(name, micros, ChronoUnit.MICROS);
+                sender.timestampColumn(sanitizeName(name), micros, ChronoUnit.MICROS);
                 return true;
             case Timestamp.LOGICAL_NAME:
             case org.apache.kafka.connect.data.Date.LOGICAL_NAME:
                 java.util.Date d = (java.util.Date) value;
                 long epochMillis = d.getTime();
-                sender.timestampColumn(name, epochMillis, ChronoUnit.MILLIS);
+                sender.timestampColumn(sanitizeName(name), epochMillis, ChronoUnit.MILLIS);
                 return true;
             case Time.LOGICAL_NAME:
                 java.util.Date timeValue = (java.util.Date) value;
                 long dayMillis = timeValue.getTime();
-                sender.longColumn(name, dayMillis);
+                sender.longColumn(sanitizeName(name), dayMillis);
                 return true;
             case Decimal.LOGICAL_NAME:
                 onUnsupportedType(name, schema.name());
