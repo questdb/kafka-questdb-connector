@@ -148,6 +148,21 @@ class QwpSinkTaskTest {
     }
 
     @Test
+    void idlePutCheckpointsBeforeProbeAndSettlesInSameTick() {
+        FakeSender sender = new FakeSender();
+        sender.ackOnFlush = true;
+        TestTask task = startTask(sender, 10);
+        task.put(Collections.singletonList(record(0, 10)));
+
+        task.put(Collections.emptyList());
+
+        assertEquals(1, sender.flushes);
+        assertEquals(0, field(task, "bufferedRows"));
+        assertTrue(((Collection<?>) field(task, "checkpoints")).isEmpty());
+        assertEquals(1, task.fakeContext.requestCommitCalls);
+    }
+
+    @Test
     void tombstoneOnlyPartitionPassesThroughPreCommit() {
         TestTask task = startTask(new FakeSender(), 10);
         task.put(Collections.singletonList(tombstone(0)));
@@ -183,6 +198,40 @@ class QwpSinkTaskTest {
         assertEquals(Collections.singletonList(10L), initial.writtenValues);
         assertEquals(0, quarantine.rows);
         assertEquals("QUARANTINE", field(task, "mode").toString());
+    }
+
+    @Test
+    void rejectionPrunesAcknowledgedCheckpointsBeforeRewind() {
+        FakeSender initial = new FakeSender();
+        FakeSender quarantine = new FakeSender();
+        TestTask task = startTask(List.of(initial, quarantine), 1, Collections.emptyMap(), true);
+        task.put(Collections.singletonList(record(0, 10)));
+        task.put(Collections.singletonList(record(1, 11)));
+        initial.ackedFsn = 0;
+        initial.awaitFailure = schemaMismatch(1);
+
+        task.put(Collections.emptyList());
+
+        assertEquals(1L, task.fakeContext.rewinds.get(0).get(SOURCE));
+        assertEquals(Collections.singletonMap(SOURCE, 2L), field(task, "quarantineUntil"));
+        assertEquals("QUARANTINE", field(task, "mode").toString());
+    }
+
+    @Test
+    void rejectionDuringLargePollKeepsOnlyUnresolvedAndUnprocessedSuffix() {
+        FakeSender sender = new FakeSender();
+        sender.ackedFsn = 0;
+        sender.flushFailure = schemaMismatch(1);
+        sender.flushFailureAt = 1;
+        TestTask task = startTask(sender, 2);
+        List<SinkRecord> batch = List.of(
+                record(0, 10), record(1, 11), record(2, 12), record(3, 13), record(4, 14));
+
+        task.put(batch);
+
+        assertEquals(List.of(10L, 11L, 12L, 13L), sender.writtenValues);
+        assertEquals(2L, task.fakeContext.rewinds.get(0).get(SOURCE));
+        assertEquals(Collections.singletonMap(SOURCE, 4L), field(task, "quarantineUntil"));
     }
 
     @Test
@@ -545,6 +594,30 @@ class QwpSinkTaskTest {
     }
 
     @Test
+    void batchDlqNeverReportsMoreThanOneCheckpointChunk() {
+        FakeSender initial = new FakeSender();
+        FakeSender rejected = new FakeSender();
+        rejected.rejectedValues.add(11L);
+        FakeSender accepted = new FakeSender();
+        Map<String, String> props = Collections.singletonMap(
+                QuestDBSinkConnectorConfig.DLQ_SEND_BATCH_ON_ERROR_CONFIG, "true");
+        TestTask task = startTask(List.of(initial, rejected, accepted), 2, props, true);
+        List<SinkRecord> batch = List.of(
+                record(0, 10), record(1, 11), record(2, 12), record(3, 13), record(4, 14));
+        task.put(batch);
+        initial.awaitFailure = schemaMismatch(0);
+        task.put(Collections.emptyList());
+
+        task.put(batch);
+
+        assertEquals(List.of(10L, 11L), task.fakeContext.reportedValues);
+        assertEquals(List.of(10L, 11L), rejected.writtenValues);
+        assertEquals(List.of(12L, 13L, 14L), accepted.writtenValues);
+        assertEquals(Collections.singletonList(1_000L), rejected.drainTimeouts);
+        assertEquals(List.of(1_000L, 1_000L), accepted.drainTimeouts);
+    }
+
+    @Test
     void quarantineTimeoutRedeliveryDrainsWithoutRewriting() {
         FakeSender initial = new FakeSender();
         FakeSender quarantine = new FakeSender();
@@ -868,6 +941,7 @@ class QwpSinkTaskTest {
     }
 
     private static final class FakeSender {
+        private boolean ackOnFlush;
         private long ackedFsn = -1L;
         private RuntimeException autoFlushFailure;
         private boolean blockClose;
@@ -878,6 +952,7 @@ class QwpSinkTaskTest {
         private final List<Long> drainTimeouts = new ArrayList<>();
         private int flushes;
         private RuntimeException flushFailure;
+        private int flushFailureAt = -1;
         private final ArrayDeque<Long> flushResults = new ArrayDeque<>();
         private RuntimeException awaitFailure;
         private final List<Long> pendingValues = new ArrayList<>();
@@ -921,13 +996,16 @@ class QwpSinkTaskTest {
                                 currentValue = ((Number) args[1]).longValue();
                                 return proxy;
                             case "flushAndGetSequence":
-                                if (flushFailure != null) {
+                                if (flushFailure != null && (flushFailureAt < 0 || flushes == flushFailureAt)) {
                                     throw flushFailure;
                                 }
                                 lastFlushed = new ArrayList<>(pendingValues);
                                 pendingValues.clear();
                                 long fsn = flushResults.isEmpty() ? flushes : flushResults.removeFirst();
                                 flushes++;
+                                if (ackOnFlush) {
+                                    ackedFsn = Math.max(ackedFsn, fsn);
+                                }
                                 return fsn;
                             case "getAckedFsn":
                                 return ackedFsn;

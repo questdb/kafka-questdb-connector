@@ -1,5 +1,6 @@
 package io.questdb.kafka;
 
+import io.questdb.client.Sender;
 import io.questdb.client.std.str.StringSink;
 import org.apache.kafka.common.config.ConfigException;
 import org.junit.jupiter.api.Test;
@@ -30,6 +31,21 @@ public class ClientConfUtilsTest {
     }
 
     @Test
+    public void testPatchedQwpFlushOwnershipIsAcceptedByClientParser() {
+        StringSink sink = new StringSink();
+        FlushConfig flushConfig = new FlushConfig();
+        ClientConfUtils.patchConfStr(
+                "ws::addr=localhost:9000;auto_flush=on;auto_flush_rows=42;auto_flush_interval=100;",
+                sink,
+                flushConfig
+        );
+
+        assertDoesNotThrow(() -> Sender.builder(sink));
+        assertEquals(42, flushConfig.autoFlushRows);
+        assertEquals(TimeUnit.MILLISECONDS.toNanos(100), flushConfig.autoFlushNanos);
+    }
+
+    @Test
     public void testClientConfPatching() {
         assertConfStringIsPatched("http::addr=localhost:9000;", "http::addr=localhost:9000;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
         assertConfStringIsPatched("https::addr=localhost:9000;foo=bar;", "https::addr=localhost:9000;foo=bar;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
@@ -37,7 +53,7 @@ public class ClientConfUtilsTest {
         assertConfStringIsPatched("https::addr=localhost:9000;auto_flush=on;", "https::addr=localhost:9000;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
         assertConfStringIsPatched("https::addr=localhost:9000;foo=bar;auto_flush_interval=100;", "https::addr=localhost:9000;foo=bar;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, TimeUnit.MILLISECONDS.toNanos(100));
         assertConfStringIsPatched("https::addr=localhost:9000;foo=bar;auto_flush_interval=100;auto_flush_rows=42;", "https::addr=localhost:9000;foo=bar;auto_flush=off;",42, TimeUnit.MILLISECONDS.toNanos(100));
-        assertConfStringIsPatched("ws::addr=localhost:9000;auto_flush_interval=100;auto_flush_rows=42;", "ws::addr=localhost:9000;auto_flush_interval=100;auto_flush_rows=42;sf_append_deadline_millis=30000;auto_flush_bytes=16777216;close_flush_timeout_millis=0;", 42, TimeUnit.MILLISECONDS.toNanos(100));
+        assertConfStringIsPatched("ws::addr=localhost:9000;auto_flush_interval=100;auto_flush_rows=42;", "ws::addr=localhost:9000;sf_append_deadline_millis=30000;auto_flush_bytes=16777216;close_flush_timeout_millis=0;", 42, TimeUnit.MILLISECONDS.toNanos(100));
         assertConfStringIsPatched("wss::addr=localhost:9000;sf_max_total_bytes=1048576;sf_append_deadline_millis=1234;auto_flush_bytes=104857600;", "wss::addr=localhost:9000;sf_max_total_bytes=1048576;sf_append_deadline_millis=1234;auto_flush_bytes=104857600;close_flush_timeout_millis=0;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
         assertConfStringIsPatched("ws::addr=localhost:9000;close_flush_timeout_millis=2345;", "ws::addr=localhost:9000;close_flush_timeout_millis=2345;sf_append_deadline_millis=30000;auto_flush_bytes=16777216;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
 
@@ -71,6 +87,8 @@ public class ClientConfUtilsTest {
         assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush=foo;", "Unknown auto_flush value [auto_flush=foo]");
         assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush_interval=foo;", "Invalid auto_flush_interval value [auto_flush_interval=foo]");
         assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush_rows=foo;", "Invalid auto_flush_rows value [auto_flush_rows=foo]");
+        assertConfStringPatchingThrowsConfigException("ws::addr=localhost:9000;auto_flush_interval=0;", "Invalid auto_flush_interval value [auto_flush_interval=0]");
+        assertConfStringPatchingThrowsConfigException("ws::addr=localhost:9000;auto_flush_rows=0;", "Invalid auto_flush_rows value [auto_flush_rows=0]");
         assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush=off;", "QuestDB Kafka connector cannot have auto_flush disabled");
         assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush_interval=off;", "QuestDB Kafka connector cannot have auto_flush_interval disabled");
         assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush_rows=off;", "QuestDB Kafka connector cannot have auto_flush_rows disabled");
@@ -97,6 +115,9 @@ public class ClientConfUtilsTest {
         if ((expectedPatchedConfStr.startsWith("ws::") || expectedPatchedConfStr.startsWith("wss::"))
                 && !expectedPatchedConfStr.contains("initial_connect_retry=")) {
             expectedPatchedConfStr += "initial_connect_retry=off;";
+        }
+        if (expectedPatchedConfStr.startsWith("ws::") || expectedPatchedConfStr.startsWith("wss::")) {
+            expectedPatchedConfStr += "auto_flush_rows=off;auto_flush_interval=off;";
         }
         assertEquals(expectedPatchedConfStr, sink.toString());
         assertEquals(expectedMaxPendingRows, flushConfig.autoFlushRows);

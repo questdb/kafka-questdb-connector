@@ -73,16 +73,16 @@ final class ClientConfUtils {
                 if (Chars.equals(tmpSink, "off")) {
                     throw new ConfigException("QuestDB Kafka connector cannot have auto_flush_interval disabled");
                 }
+                long millis;
                 try {
-                    flushConfig.autoFlushNanos = TimeUnit.MILLISECONDS.toNanos(Numbers.parseLong(tmpSink));
+                    millis = Numbers.parseLong(tmpSink);
                 } catch (NumericException e) {
                     throw new ConfigException("Invalid auto_flush_interval value [auto_flush_interval=" + tmpSink + ']');
                 }
-                if (isQwpTransport) {
-                    // one knob, two layers: the client frames at this cadence and
-                    // the connector checkpoints its ledger at the same cadence
-                    sink.put("auto_flush_interval=").put(tmpSink).put(';');
+                if (millis < 1L || millis > Integer.MAX_VALUE) {
+                    throw new ConfigException("Invalid auto_flush_interval value [auto_flush_interval=" + tmpSink + ']');
                 }
+                flushConfig.autoFlushNanos = TimeUnit.MILLISECONDS.toNanos(millis);
             } else if (Chars.equals(tmpSink, "auto_flush_rows")) {
                 pos = ConfStringParser.value(confStr, pos, tmpSink);
                 if (pos < 0 || tmpSink.length() == 0) {
@@ -93,14 +93,16 @@ final class ClientConfUtils {
                 if (Chars.equals(tmpSink, "off")) {
                     throw new ConfigException("QuestDB Kafka connector cannot have auto_flush_rows disabled");
                 } else {
+                    int rows;
                     try {
-                        flushConfig.autoFlushRows = Numbers.parseInt(tmpSink);
+                        rows = Numbers.parseInt(tmpSink);
                     } catch (NumericException e) {
                         throw new ConfigException("Invalid auto_flush_rows value [auto_flush_rows=" + tmpSink + ']');
                     }
-                }
-                if (isQwpTransport) {
-                    sink.put("auto_flush_rows=").put(tmpSink).put(';');
+                    if (rows < 1) {
+                        throw new ConfigException("Invalid auto_flush_rows value [auto_flush_rows=" + tmpSink + ']');
+                    }
+                    flushConfig.autoFlushRows = rows;
                 }
             } else if (Chars.equals(tmpSink, "auto_flush")) {
                 pos = ConfStringParser.value(confStr, pos, tmpSink);
@@ -183,13 +185,20 @@ final class ClientConfUtils {
             // retry loop. Connect must own startup retry and retain the current poll batch.
             sink.put("initial_connect_retry=off;");
         }
+        if (isQwpTransport) {
+            // The connector owns row/time flush decisions. Letting the client trigger at the
+            // same boundary publishes before the connector can record the returned FSN, which
+            // leaves several frames indistinguishable during rejection recovery. Keep byte
+            // auto-flush: the client clamps it to the server batch cap and needs it for wide rows.
+            sink.put("auto_flush_rows=off;auto_flush_interval=off;");
+        }
         if (!isQwpTransport) {
             sink.put("auto_flush=off;");
         }
-        // QWP keeps the client's own auto-flush: its effective byte trigger is
-        // clamped to the server's advertised batch cap, which is what prevents
-        // BatchTooLargeForCapException for multi-row batches. The connector's
-        // flush cadence is only a ledger/commit checkpoint on top of it.
+        // QWP keeps only the client's byte auto-flush. Its effective trigger is clamped to the
+        // server's advertised batch cap, which prevents BatchTooLargeForCapException for
+        // multi-row batches. Such a byte-triggered publish is the residual case where one
+        // connector checkpoint can still cover more than one wire frame.
 
         return true;
     }

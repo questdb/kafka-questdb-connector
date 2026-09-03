@@ -37,6 +37,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.RandomAccess;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -124,9 +125,11 @@ class QwpSinkTask extends SinkTask {
     public void put(Collection<SinkRecord> records) {
         // A put can only happen after WorkerSinkTask.poll(), which applies offset requests.
         rewindPending.clear();
+        List<SinkRecord> batch = asList(records);
+        int processed = 0;
         try {
             if (senderStale) {
-                retireStaleSender(records);
+                retireStaleSender(batch);
                 if (mode == Mode.PIPELINED) {
                     return;
                 }
@@ -143,15 +146,23 @@ class QwpSinkTask extends SinkTask {
                 // settled or rejected chunk. Without the check here a server that stops
                 // answering mid-quarantine would be retried forever.
                 detectStall();
-                deliverInQuarantine(records);
+                deliverInQuarantine(batch);
                 return;
             }
 
+            if (batch.isEmpty()) {
+                // An idle put is the task tick that can release a backpressure pause. Publish
+                // its trailing buffered rows first, then observe ACKs below, so checkpointing
+                // and settlement do not consume two allowed.lag ticks.
+                checkpoint();
+            }
             probe();
             detectStall();
-            for (SinkRecord record : records) {
+            while (processed < batch.size()) {
+                SinkRecord record = batch.get(processed);
                 TopicPartition partition = partitionFor(record);
                 if (!assignment.contains(partition) || record.value() == null) {
+                    processed++;
                     continue;
                 }
                 boolean hadWork = hasWork();
@@ -168,18 +179,22 @@ class QwpSinkTask extends SinkTask {
                 } catch (InvalidDataException e) {
                     reportRecordFailure(record, e);
                 }
+                processed++;
+                if (bufferedRows >= flushConfig.autoFlushRows) {
+                    checkpoint();
+                }
             }
-            checkpointIfDue(records.isEmpty());
+            checkpointIfDue(false);
             applyBackpressure();
             requestNextTaskTick();
         } catch (LineSenderServerException | BatchTooLargeForCapException e) {
-            onRejection(e, records);
+            onRejection(e, batch.subList(processed, batch.size()));
         } catch (LineSenderException | HttpClientException e) {
             Throwable latched = probeLatched();
             if (latched instanceof LineSenderServerException) {
-                onRejection(latched, records);
+                onRejection(latched, batch.subList(processed, batch.size()));
             } else {
-                onTransportFailure(latched != null ? latched : e, records);
+                onTransportFailure(latched != null ? latched : e, batch.subList(processed, batch.size()));
             }
         }
     }
@@ -273,6 +288,13 @@ class QwpSinkTask extends SinkTask {
         if (partitionsPaused && inflightRows() < config.getQwpMaxInflightRows()) {
             resumeAssignedPartitions();
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<SinkRecord> asList(Collection<SinkRecord> records) {
+        return records instanceof List<?> && records instanceof RandomAccess
+                ? (List<SinkRecord>) records
+                : new ArrayList<>(records);
     }
 
     private void applyBackpressure() {
@@ -402,14 +424,15 @@ class QwpSinkTask extends SinkTask {
         // Every chunk is a sublist of this call's members, so identity is the right key.
         Set<SinkRecord> reportedHere = Collections.newSetFromMap(new IdentityHashMap<>());
         int start = 0;
-        int width = members.size();
-        int end = members.size();
+        int maxChunkRows = flushConfig.autoFlushRows;
+        int width = Math.min(members.size(), maxChunkRows);
+        int end = width;
         boolean flushed = false;
         if (awaiting != null) {
             end = leadingAwaitedMembers(members);
             if (end == 0) {
                 awaiting = null;
-                end = members.size();
+                end = width;
             } else {
                 width = end;
                 flushed = true;
@@ -454,7 +477,7 @@ class QwpSinkTask extends SinkTask {
                 if (remaining == 0) {
                     break;
                 }
-                width = Math.min(Math.max(1, width * 2), remaining);
+                width = (int) Math.min(Math.min(Math.max(1L, (long) width * 2L), remaining), maxChunkRows);
                 end = start + width;
             } catch (LineSenderServerException | BatchTooLargeForCapException e) {
                 awaiting = null;
@@ -478,7 +501,7 @@ class QwpSinkTask extends SinkTask {
                     if (remaining == 0) {
                         break;
                     }
-                    width = config.isDlqSendBatchOnError() ? remaining : 1;
+                    width = config.isDlqSendBatchOnError() ? Math.min(remaining, maxChunkRows) : 1;
                     end = start + width;
                 } else {
                     width = Math.max(1, chunk.size() / 2);
@@ -609,6 +632,14 @@ class QwpSinkTask extends SinkTask {
     private void onRejection(Throwable failure, Collection<SinkRecord> batch) {
         if (mode == Mode.QUARANTINE) {
             throw abortQuarantineStep(failure, 1L, "QWP quarantine step aborted");
+        }
+        if (failure instanceof LineSenderServerException && sender != null) {
+            // awaitAckedFsn() deliberately throws a latched rejection before returning ACK
+            // progress. Its snapshot accessor remains usable, so discard every checkpoint the
+            // server had already acknowledged before computing the replay/quarantine window.
+            // Do not use the trailing-unknown drain here: the poisoned sender would just throw
+            // the same rejection again.
+            settleAcknowledged(sender.getAckedFsn(), false);
         }
         recover(failure, batch);
     }
@@ -815,6 +846,10 @@ class QwpSinkTask extends SinkTask {
 
     private void settle() {
         long acked = sender.getAckedFsn();
+        settleAcknowledged(acked, true);
+    }
+
+    private void settleAcknowledged(long acked, boolean drainTrailingUnknown) {
         if (acked > lastAckedFsn) {
             lastAckedFsn = acked;
             progress();
@@ -830,7 +865,8 @@ class QwpSinkTask extends SinkTask {
             popped = true;
             progress();
         }
-        if (!checkpoints.isEmpty()
+        if (drainTrailingUnknown
+                && !checkpoints.isEmpty()
                 && checkpoints.peekFirst().fsn < 0L
                 && bufferedRows == 0
                 && sender.drain(0L)) {

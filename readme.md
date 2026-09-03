@@ -15,9 +15,13 @@ The QuestDB WebSocket Protocol transport requires Kafka Connect 3.6 or newer,
 client.conf.string=ws::addr=questdb:9000;sf_max_total_bytes=268435456;
 ```
 
-QWP delivery is at least once. A reconnect, a split frame, or a multi-table
-server failure can replay rows that QuestDB already committed. Configure
-`DEDUP UPSERT KEYS` on target tables whenever duplicate rows are not acceptable.
+QWP delivery is at least once. A reconnect, a rejection, a byte-triggered split,
+or a multi-table server failure can replay rows that QuestDB already committed.
+Before rejection recovery the connector removes every acknowledged checkpoint it
+can identify. A byte-triggered client flush or a multi-frame connector flush can
+still leave an acknowledged prefix inside the rejected checkpoint, and that
+prefix is replayed. Configure `DEDUP UPSERT KEYS` on target tables whenever
+duplicate rows are not acceptable.
 
 The connector keeps Kafka as the durable log, so QWP store-and-forward is
 memory-only: `sf_dir` and `sf_durability` are rejected. `max.inflight.rows` is
@@ -49,12 +53,20 @@ while 5M records flow, asserting an exact deduplicated row count), a
 multi-worker test proving each worker resolves its own transport, and tests
 pinning the server behaviour the design relies on.
 
-Offsets are committed only after the corresponding QWP frame is acknowledged.
+Offsets are committed only after the corresponding QWP checkpoint is acknowledged.
+For QWP, `auto_flush_rows` and `auto_flush_interval` define connector checkpoint
+boundaries; the client-side row and time triggers are disabled so they cannot
+publish an untracked frame immediately before a checkpoint. The client byte
+trigger remains enabled and capped by the server-advertised batch size to protect
+wide batches.
+
 By default, only deterministic `SCHEMA_MISMATCH` terminal errors are eligible
 for quarantine and the configured Kafka Connect DLQ. Quarantine re-fetches the
 unacknowledged window from Kafka, then delivers poll batches synchronously and
-bisects rejected batches until it identifies the bad record. Its per-chunk wait
-is bounded by `qwp.quarantine.ack.timeout.ms` (1s by default), so recovery on a
+bisects rejected batches until it identifies the bad record. A quarantine chunk
+never exceeds `auto_flush_rows`; consequently `dlq.send.batch.on.error=true`
+reports at most that checkpoint-sized chunk rather than the whole poll batch.
+Its per-chunk wait is bounded by `qwp.quarantine.ack.timeout.ms` (1s by default), so recovery on a
 high-latency link is intentionally slower than normal pipelined delivery. Other
 terminal, security, and protocol failures fail the task. Transport and local
 store-and-forward capacity failures retire the sender and rewind the affected
