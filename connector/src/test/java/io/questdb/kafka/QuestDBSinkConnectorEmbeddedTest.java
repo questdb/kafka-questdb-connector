@@ -1154,7 +1154,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testExactlyOnce_withDedup(ConnectTestUtils.Transport transport) throws BrokenBarrierException, InterruptedException {
-        // TCP transport does not support exactly-once processing and is excluded from the default matrix.
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP,
+                "TCP transport does not support exactly-once processing");
         connect.kafka().createTopic(topicName, 4);
 
         Schema schema = SchemaBuilder.struct().name("com.example.Event")
