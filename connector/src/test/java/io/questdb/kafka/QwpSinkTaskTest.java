@@ -106,6 +106,18 @@ class QwpSinkTaskTest {
     }
 
     @Test
+    void oldestCheckpointClampsCommitWhenMultipleAreOutstanding() {
+        FakeSender sender = new FakeSender();
+        sender.drainSucceeds = false;
+        TestTask task = startTask(sender, 1);
+
+        task.put(Collections.singletonList(record(0, 10)));
+        task.put(Collections.singletonList(record(1, 11)));
+
+        assertOffset(0, task.preCommit(offsets(SOURCE, 2)));
+    }
+
+    @Test
     void unknownCheckpointInheritsNextPublishedFsn() {
         FakeSender sender = new FakeSender();
         sender.flushResults.add(-1L);
@@ -380,6 +392,22 @@ class QwpSinkTaskTest {
 
         assertEquals(1, task.fakeContext.resumeCalls);
         assertEquals(0L, task.fakeContext.rewinds.get(0).get(SOURCE));
+    }
+
+    @Test
+    void acknowledgedCheckpointResumesBackpressuredPartitions() {
+        FakeSender sender = new FakeSender();
+        sender.drainSucceeds = false;
+        Map<String, String> props = Collections.singletonMap(
+                QuestDBSinkConnectorConfig.QWP_MAX_INFLIGHT_ROWS_CONFIG, "1");
+        TestTask task = startTask(sender, 2, props, true);
+        task.put(List.of(record(0, 10), record(1, 11)));
+        assertEquals(1, task.fakeContext.pauseCalls);
+
+        sender.ackedFsn = 0;
+        task.put(Collections.emptyList());
+
+        assertEquals(1, task.fakeContext.resumeCalls);
     }
 
     @Test

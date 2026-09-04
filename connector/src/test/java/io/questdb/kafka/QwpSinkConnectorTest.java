@@ -71,4 +71,35 @@ class QwpSinkConnectorTest {
                 "select city, temperature from " + topic,
                 QUESTDB.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
     }
+
+    @Test
+    void resumesConsumptionAfterBackpressureSettles() {
+        connect.kafka().createTopic(topic, 1);
+        for (int i = 0; i < 5_000; i++) {
+            connect.kafka().produce(topic, "key", "{\"id\":" + i + "}");
+        }
+
+        Map<String, String> props = new HashMap<>();
+        props.put(ConnectorConfig.CONNECTOR_CLASS_CONFIG, QuestDBSinkConnector.class.getName());
+        props.put(ConnectorConfig.NAME_CONFIG, ConnectTestUtils.CONNECTOR_NAME);
+        props.put("topics", topic);
+        props.put("tasks.max", "1");
+        props.put("key.converter", StringConverter.class.getName());
+        props.put("value.converter", JsonConverter.class.getName());
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put(QuestDBSinkConnectorConfig.QWP_MAX_INFLIGHT_ROWS_CONFIG, "1");
+        props.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG,
+                "ws::addr=" + QUESTDB.getHost() + ':' + QUESTDB.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT)
+                        + ";auto_flush_rows=500;auto_flush_interval=25;sf_max_total_bytes=67108864;");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        QuestDBUtils.assertSqlEventually(
+                "\"count()\"\r\n5000\r\n",
+                "select count() from " + topic,
+                QUESTDB.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT));
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+    }
 }
