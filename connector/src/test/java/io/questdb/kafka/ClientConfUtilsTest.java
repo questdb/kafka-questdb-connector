@@ -1,10 +1,13 @@
 package io.questdb.kafka;
 
 import io.questdb.client.Sender;
+import io.questdb.client.cutlass.http.client.HttpClientException;
+import io.questdb.client.cutlass.line.LineSenderException;
 import io.questdb.client.std.str.StringSink;
 import org.apache.kafka.common.config.ConfigException;
 import org.junit.jupiter.api.Test;
 
+import java.net.ServerSocket;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -31,16 +34,22 @@ public class ClientConfUtilsTest {
     }
 
     @Test
-    public void testPatchedQwpFlushOwnershipIsAcceptedByClientParser() {
+    public void testPatchedQwpFlushOwnershipIsAcceptedByClientBuild() throws Exception {
+        int closedPort;
+        try (ServerSocket socket = new ServerSocket(0)) {
+            closedPort = socket.getLocalPort();
+        }
+
         StringSink sink = new StringSink();
         FlushConfig flushConfig = new FlushConfig();
         ClientConfUtils.patchConfStr(
-                "ws::addr=localhost:9000;auto_flush=on;auto_flush_rows=42;auto_flush_interval=100;",
+                "ws::addr=localhost:" + closedPort + ";auto_flush=on;auto_flush_rows=42;auto_flush_interval=100;",
                 sink,
                 flushConfig
         );
 
-        assertDoesNotThrow(() -> Sender.builder(sink));
+        LineSenderException exception = assertThrows(LineSenderException.class, () -> Sender.builder(sink).build());
+        assertInstanceOf(HttpClientException.class, exception.getCause());
         assertEquals(42, flushConfig.autoFlushRows);
         assertEquals(TimeUnit.MILLISECONDS.toNanos(100), flushConfig.autoFlushNanos);
     }
@@ -117,7 +126,7 @@ public class ClientConfUtilsTest {
             expectedPatchedConfStr += "initial_connect_retry=off;";
         }
         if (expectedPatchedConfStr.startsWith("ws::") || expectedPatchedConfStr.startsWith("wss::")) {
-            expectedPatchedConfStr += "auto_flush_rows=off;auto_flush_interval=off;";
+            expectedPatchedConfStr += "auto_flush_rows=off;auto_flush_interval=2147483646;";
         }
         assertEquals(expectedPatchedConfStr, sink.toString());
         assertEquals(expectedMaxPendingRows, flushConfig.autoFlushRows);

@@ -188,9 +188,11 @@ final class ClientConfUtils {
         if (isQwpTransport) {
             // The connector owns row/time flush decisions. Letting the client trigger at the
             // same boundary publishes before the connector can record the returned FSN, which
-            // leaves several frames indistinguishable during rejection recovery. Keep byte
-            // auto-flush: the client clamps it to the server batch cap and needs it for wide rows.
-            sink.put("auto_flush_rows=off;auto_flush_interval=off;");
+            // leaves several frames indistinguishable during rejection recovery. WebSocket does
+            // not support disabling the time trigger, so push it out to the largest value the
+            // client accepts. Keep byte auto-flush: the client clamps it to the server batch cap
+            // and needs it for wide rows.
+            sink.put("auto_flush_rows=off;auto_flush_interval=2147483646;");
         }
         if (!isQwpTransport) {
             sink.put("auto_flush=off;");

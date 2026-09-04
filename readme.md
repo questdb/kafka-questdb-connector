@@ -55,10 +55,10 @@ pinning the server behaviour the design relies on.
 
 Offsets are committed only after the corresponding QWP checkpoint is acknowledged.
 For QWP, `auto_flush_rows` and `auto_flush_interval` define connector checkpoint
-boundaries; the client-side row and time triggers are disabled so they cannot
-publish an untracked frame immediately before a checkpoint. The client byte
-trigger remains enabled and capped by the server-advertised batch size to protect
-wide batches.
+boundaries; the client-side row trigger is disabled and the time trigger is pushed
+out to the largest supported interval so they cannot publish an untracked frame
+immediately before a checkpoint. The client byte trigger remains enabled and
+capped by the server-advertised batch size to protect wide batches.
 
 By default, only deterministic `SCHEMA_MISMATCH` terminal errors are eligible
 for quarantine and the configured Kafka Connect DLQ. Quarantine re-fetches the
