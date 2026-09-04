@@ -446,6 +446,21 @@ class QwpSinkTaskTest {
     }
 
     @Test
+    void incrementalOpenRepausesNewPartitionWhileBackpressured() {
+        FakeSender sender = new FakeSender();
+        Map<String, String> props = Collections.singletonMap(
+                QuestDBSinkConnectorConfig.QWP_MAX_INFLIGHT_ROWS_CONFIG, "1");
+        TestTask task = startTask(sender, 2, props, true);
+        task.put(List.of(record(0, 10), record(1, 11)));
+        assertEquals(Collections.singleton(SOURCE), task.fakeContext.paused);
+
+        task.fakeContext.assignment.add(OTHER);
+        task.open(Collections.singleton(OTHER));
+
+        assertEquals(Set.of(SOURCE, OTHER), task.fakeContext.paused);
+    }
+
+    @Test
     void transportFailureNeverRewindsRevokedOriginalPartition() {
         FakeSender sender = new FakeSender();
         sender.flushFailure = new LineSenderException("append deadline");
