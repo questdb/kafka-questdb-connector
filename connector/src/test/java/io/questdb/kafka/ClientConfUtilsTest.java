@@ -62,6 +62,12 @@ public class ClientConfUtilsTest {
         assertConfStringIsPatched("https::addr=localhost:9000;auto_flush=on;", "https::addr=localhost:9000;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
         assertConfStringIsPatched("https::addr=localhost:9000;foo=bar;auto_flush_interval=100;", "https::addr=localhost:9000;foo=bar;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, TimeUnit.MILLISECONDS.toNanos(100));
         assertConfStringIsPatched("https::addr=localhost:9000;foo=bar;auto_flush_interval=100;auto_flush_rows=42;", "https::addr=localhost:9000;foo=bar;auto_flush=off;",42, TimeUnit.MILLISECONDS.toNanos(100));
+        // HTTP historically accepts non-positive row/interval triggers and intervals wider than
+        // the QWP client's int-millisecond limit. Keep that compatibility while QWP rejects them.
+        assertConfStringIsPatched("http::addr=localhost:9000;auto_flush_rows=0;", "http::addr=localhost:9000;auto_flush=off;", 0, DEFAULT_FLUSH_INTERVAL_NANOS);
+        assertConfStringIsPatched("https::addr=localhost:9000;auto_flush_rows=-5;", "https::addr=localhost:9000;auto_flush=off;", -5, DEFAULT_FLUSH_INTERVAL_NANOS);
+        assertConfStringIsPatched("http::addr=localhost:9000;auto_flush_interval=0;", "http::addr=localhost:9000;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, 0);
+        assertConfStringIsPatched("https::addr=localhost:9000;auto_flush_interval=999999999999;", "https::addr=localhost:9000;auto_flush=off;", DEFAULT_MAX_PENDING_ROWS, TimeUnit.MILLISECONDS.toNanos(999_999_999_999L));
         assertConfStringIsPatched("ws::addr=localhost:9000;auto_flush_interval=100;auto_flush_rows=42;", "ws::addr=localhost:9000;sf_append_deadline_millis=30000;auto_flush_bytes=16777216;close_flush_timeout_millis=0;", 42, TimeUnit.MILLISECONDS.toNanos(100));
         assertConfStringIsPatched("wss::addr=localhost:9000;sf_max_total_bytes=1048576;sf_append_deadline_millis=1234;auto_flush_bytes=104857600;", "wss::addr=localhost:9000;sf_max_total_bytes=1048576;sf_append_deadline_millis=1234;auto_flush_bytes=104857600;close_flush_timeout_millis=0;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
         assertConfStringIsPatched("ws::addr=localhost:9000;close_flush_timeout_millis=2345;", "ws::addr=localhost:9000;close_flush_timeout_millis=2345;sf_append_deadline_millis=30000;auto_flush_bytes=16777216;", DEFAULT_MAX_PENDING_ROWS, DEFAULT_FLUSH_INTERVAL_NANOS);
@@ -97,6 +103,7 @@ public class ClientConfUtilsTest {
         assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush_interval=foo;", "Invalid auto_flush_interval value [auto_flush_interval=foo]");
         assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush_rows=foo;", "Invalid auto_flush_rows value [auto_flush_rows=foo]");
         assertConfStringPatchingThrowsConfigException("ws::addr=localhost:9000;auto_flush_interval=0;", "Invalid auto_flush_interval value [auto_flush_interval=0]");
+        assertConfStringPatchingThrowsConfigException("ws::addr=localhost:9000;auto_flush_interval=2147483648;", "Invalid auto_flush_interval value [auto_flush_interval=2147483648]");
         assertConfStringPatchingThrowsConfigException("ws::addr=localhost:9000;auto_flush_rows=0;", "Invalid auto_flush_rows value [auto_flush_rows=0]");
         assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush=off;", "QuestDB Kafka connector cannot have auto_flush disabled");
         assertConfStringPatchingThrowsConfigException("https::addr=localhost:9000;foo=bar;auto_flush_interval=off;", "QuestDB Kafka connector cannot have auto_flush_interval disabled");

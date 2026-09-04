@@ -79,7 +79,7 @@ final class ClientConfUtils {
                 } catch (NumericException e) {
                     throw new ConfigException("Invalid auto_flush_interval value [auto_flush_interval=" + tmpSink + ']');
                 }
-                if (millis < 1L || millis > Integer.MAX_VALUE) {
+                if (isQwpTransport && (millis < 1L || millis > Integer.MAX_VALUE)) {
                     throw new ConfigException("Invalid auto_flush_interval value [auto_flush_interval=" + tmpSink + ']');
                 }
                 flushConfig.autoFlushNanos = TimeUnit.MILLISECONDS.toNanos(millis);
@@ -99,7 +99,7 @@ final class ClientConfUtils {
                     } catch (NumericException e) {
                         throw new ConfigException("Invalid auto_flush_rows value [auto_flush_rows=" + tmpSink + ']');
                     }
-                    if (rows < 1) {
+                    if (isQwpTransport && rows < 1) {
                         throw new ConfigException("Invalid auto_flush_rows value [auto_flush_rows=" + tmpSink + ']');
                     }
                     flushConfig.autoFlushRows = rows;
