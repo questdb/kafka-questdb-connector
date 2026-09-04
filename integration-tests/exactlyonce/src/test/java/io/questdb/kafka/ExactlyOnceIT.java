@@ -9,8 +9,9 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.jetbrains.annotations.NotNull;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
@@ -52,7 +53,7 @@ public class ExactlyOnceIT {
 
     private static final DockerImageName KAFKA_CONTAINER_IMAGE = DockerImageName.parse("confluentinc/cp-kafka:7.8.0");
     private static final DockerImageName CONNECT_CONTAINER_IMAGE = DockerImageName.parse("confluentinc/cp-kafka-connect:7.8.0");
-    private static final DockerImageName QUESTDB_CONTAINER_IMAGE = DockerImageName.parse("questdb/questdb:9.3.2");
+    private static final DockerImageName QUESTDB_CONTAINER_IMAGE = DockerImageName.parse("questdb/questdb:10.0.0");
     private static final int KAFKA_CLUSTER_SIZE = 3;
     private static final int CONNECT_CLUSTER_SIZE = 2;
 
@@ -198,9 +199,10 @@ public class ExactlyOnceIT {
                         .withStartupTimeout(ofMinutes(5)));
     }
 
-    @Test
-    public void test() throws Exception {
-        String topicName = "mytopic";
+    @ParameterizedTest(name = "transport = {0}")
+    @ValueSource(strings = {/*"http", */"ws"})
+    public void test(String transport) throws Exception {
+        String topicName = "mytopic_" + transport;
 
         Properties props = new Properties();
         String bootstrapServers = kafkas[0].getBootstrapServers();
@@ -231,7 +233,7 @@ public class ExactlyOnceIT {
                 questdb.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT),
                 QuestDBUtils.Endpoint.EXEC);
 
-        startConnector();
+        startConnector(transport, topicName);
 
         CyclicBarrier barrier = new CyclicBarrier(2);
         startKillingRandomContainers(barrier);
@@ -299,15 +301,20 @@ public class ExactlyOnceIT {
         }).start();
     }
 
-    private static void startConnector() throws IOException, InterruptedException, URISyntaxException {
-        String confString = "http::addr=questdb:9000;retry_timeout=60000;";
+    private static void startConnector(String transport, String topicName) throws IOException, InterruptedException, URISyntaxException {
+        // Over HTTP the client-side retry_timeout carries the task through
+        // outages; over QWP (ws) the client retries transient failures and
+        // replays from the acked watermark on its own.
+        String confString = "http".equals(transport)
+                ? "http::addr=questdb:9000;retry_timeout=60000;"
+                : "ws::addr=questdb:9000;";
 
-        String payload = "{\"name\":\"my-connector\",\"config\":{" +
+        String payload = "{\"name\":\"my-connector-" + transport + "\",\"config\":{" +
                 "\"tasks.max\":\"4\"," +
                 "\"connector.class\":\"io.questdb.kafka.QuestDBSinkConnector\"," +
                 "\"key.converter\":\"org.apache.kafka.connect.storage.StringConverter\"," +
                 "\"value.converter\":\"org.apache.kafka.connect.json.JsonConverter\"," +
-                "\"topics\":\"mytopic\"," +
+                "\"topics\":\"" + topicName + "\"," +
                 "\"value.converter.schemas.enable\":\"false\"," +
                 "\"timestamp.field.name\":\"ts\"," +
                 "\"timestamp.units\":\"nanos\"," +

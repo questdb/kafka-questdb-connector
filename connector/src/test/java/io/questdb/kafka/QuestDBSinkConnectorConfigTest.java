@@ -20,6 +20,31 @@ import static org.junit.jupiter.api.Assertions.*;
 public class QuestDBSinkConnectorConfigTest {
 
     @Test
+    public void testQwpDefaultsAndRanges() {
+        Map<String, String> props = baseConnectorProps();
+        props.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, "ws::addr=localhost:9000;");
+        QuestDBSinkConnectorConfig config = new QuestDBSinkConnectorConfig(props);
+        assertEquals(300_000L, config.getQwpProgressTimeoutMs());
+        assertEquals(150_000, config.getQwpMaxInflightRows());
+        assertEquals(500L, config.getQwpCommitAckTimeoutMs());
+        assertEquals(1_000L, config.getQwpQuarantineAckTimeoutMs());
+
+        props.put(QuestDBSinkConnectorConfig.QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG, "-1");
+        assertThrows(ConfigException.class, () -> new QuestDBSinkConnectorConfig(props));
+        props.put(QuestDBSinkConnectorConfig.QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG, "0");
+        assertEquals(0L, new QuestDBSinkConnectorConfig(props).getQwpCommitAckTimeoutMs());
+
+        props.put(QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "0");
+        assertThrows(ConfigException.class, () -> new QuestDBSinkConnectorConfig(props));
+        props.put(QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "1");
+        props.put(QuestDBSinkConnectorConfig.QWP_MAX_INFLIGHT_ROWS_CONFIG, "0");
+        assertThrows(ConfigException.class, () -> new QuestDBSinkConnectorConfig(props));
+        props.put(QuestDBSinkConnectorConfig.QWP_MAX_INFLIGHT_ROWS_CONFIG, "1");
+        props.put(QuestDBSinkConnectorConfig.QWP_QUARANTINE_ACK_TIMEOUT_MS_CONFIG, "0");
+        assertThrows(ConfigException.class, () -> new QuestDBSinkConnectorConfig(props));
+    }
+
+    @Test
     public void testClientConfigurationStringCannotBeCombinedWithExplicitClientConfig() {
         assertCannotBeSetTogetherWithConfigString(QuestDBSinkConnectorConfig.HOST_CONFIG, "localhost");
         assertCannotBeSetTogetherWithConfigString(QuestDBSinkConnectorConfig.USERNAME, "joe");

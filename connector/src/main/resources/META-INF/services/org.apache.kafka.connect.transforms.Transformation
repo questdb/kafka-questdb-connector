@@ -1,0 +1,4 @@
+io.questdb.kafka.OrderBookToArray$Key
+io.questdb.kafka.OrderBookToArray$Value
+io.questdb.kafka.StructArrayExplode$Key
+io.questdb.kafka.StructArrayExplode$Value

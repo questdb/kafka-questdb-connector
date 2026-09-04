@@ -11,6 +11,12 @@
 
     <dependencies>
         <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>connect-api</artifactId>
+            <version>${kafka.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
             <groupId>com.github.rerorero</groupId>
             <artifactId>kafka-smt-jsonpath-tools</artifactId>
             <version>0.2.0</version>
@@ -59,6 +65,14 @@
         <dependency>
             <groupId>com.squareup.okhttp3</groupId>
             <artifactId>okhttp</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Without a binding, slf4j discards every log line the embedded Kafka Connect
+             worker and this connector emit, which makes an integration failure unreadable. -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-reload4j</artifactId>
+            <version>2.0.17</version>
             <scope>test</scope>
         </dependency>
         <dependency>
