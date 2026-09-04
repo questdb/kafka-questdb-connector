@@ -247,6 +247,25 @@ class QwpSinkTaskTest {
     }
 
     @Test
+    void partialFailureDoesNotReReportDlqdPrefixAfterRewind() {
+        FakeSender failed = new FakeSender();
+        failed.setterFailure = schemaMismatch(0);
+        FakeSender replacement = new FakeSender();
+        TestTask task = startTask(List.of(failed, replacement), 10, Collections.emptyMap(), true);
+        List<SinkRecord> batch = List.of(
+                recordValue(0, Collections.singletonMap(10L, 10L)), record(1, 11));
+
+        task.put(batch);
+        assertEquals(Collections.singletonList(0L), task.fakeContext.reportedOffsets);
+
+        long rewind = task.fakeContext.rewinds.get(0).get(SOURCE);
+        task.put(batch.subList(Math.toIntExact(rewind), batch.size()));
+
+        assertEquals(Collections.singletonList(0L), task.fakeContext.reportedOffsets);
+        assertEquals(Collections.singletonList(11L), replacement.writtenValues);
+    }
+
+    @Test
     void rejectionWithoutUsableDlqIsTerminalAndDiagnostic() {
         FakeSender sender = new FakeSender();
         Map<String, String> props = Collections.singletonMap("errors.tolerance", "none");
@@ -849,6 +868,14 @@ class QwpSinkTaskTest {
     }
 
     private static SinkRecord record(TopicPartition source, long offset, long value) {
+        return recordValue(source, offset, value);
+    }
+
+    private static SinkRecord recordValue(long offset, Object value) {
+        return recordValue(SOURCE, offset, value);
+    }
+
+    private static SinkRecord recordValue(TopicPartition source, long offset, Object value) {
         return new SinkRecord(
                 "renamed", 9, null, null, null, value, offset,
                 null, TimestampType.NO_TIMESTAMP_TYPE, Collections.emptyList(),
@@ -1088,6 +1115,7 @@ class QwpSinkTaskTest {
         private final Set<TopicPartition> assignment = new HashSet<>();
         private final boolean hasReporter;
         private int pauseCalls;
+        private final List<Long> reportedOffsets = new ArrayList<>();
         private final List<Long> reportedValues = new ArrayList<>();
         private int requestCommitCalls;
         private int resumeCalls;
@@ -1149,6 +1177,7 @@ class QwpSinkTaskTest {
                 return null;
             }
             return (record, error) -> {
+                reportedOffsets.add(record.originalKafkaOffset());
                 reportedValues.add(record.value() instanceof Number
                         ? ((Number) record.value()).longValue()
                         : -1L);
