@@ -404,29 +404,31 @@ class QwpSinkTaskTest {
                 QuestDBSinkConnectorConfig.QWP_MAX_INFLIGHT_ROWS_CONFIG, "1");
         TestTask task = startTask(sender, 2, props, true);
         task.put(List.of(record(0, 10), record(1, 11)));
-        assertEquals(1, task.fakeContext.pauseCalls);
+        assertEquals(Collections.singleton(SOURCE), task.fakeContext.paused);
         sender.awaitFailure = new LineSenderException("connection lost");
 
         task.put(Collections.emptyList());
 
-        assertEquals(1, task.fakeContext.resumeCalls);
+        assertTrue(task.fakeContext.paused.isEmpty());
         assertEquals(0L, task.fakeContext.rewinds.get(0).get(SOURCE));
     }
 
     @Test
-    void acknowledgedCheckpointResumesBackpressuredPartitions() {
+    void acknowledgedCheckpointResumesAndRearmsBackpressure() {
         FakeSender sender = new FakeSender();
         sender.drainSucceeds = false;
         Map<String, String> props = Collections.singletonMap(
                 QuestDBSinkConnectorConfig.QWP_MAX_INFLIGHT_ROWS_CONFIG, "1");
         TestTask task = startTask(sender, 2, props, true);
         task.put(List.of(record(0, 10), record(1, 11)));
-        assertEquals(1, task.fakeContext.pauseCalls);
+        assertEquals(Collections.singleton(SOURCE), task.fakeContext.paused);
 
         sender.ackedFsn = 0;
         task.put(Collections.emptyList());
+        assertTrue(task.fakeContext.paused.isEmpty());
 
-        assertEquals(1, task.fakeContext.resumeCalls);
+        task.put(List.of(record(2, 12), record(3, 13)));
+        assertEquals(Collections.singleton(SOURCE), task.fakeContext.paused);
     }
 
     @Test
@@ -1114,11 +1116,10 @@ class QwpSinkTaskTest {
     private static final class FakeContext implements SinkTaskContext {
         private final Set<TopicPartition> assignment = new HashSet<>();
         private final boolean hasReporter;
-        private int pauseCalls;
+        private final Set<TopicPartition> paused = new HashSet<>();
         private final List<Long> reportedOffsets = new ArrayList<>();
         private final List<Long> reportedValues = new ArrayList<>();
         private int requestCommitCalls;
-        private int resumeCalls;
         private final List<Map<TopicPartition, Long>> rewinds = new ArrayList<>();
         private final List<Long> timeouts = new ArrayList<>();
 
@@ -1153,16 +1154,16 @@ class QwpSinkTaskTest {
 
         @Override
         public void pause(TopicPartition... partitions) {
-            pauseCalls++;
+            Collections.addAll(paused, partitions);
         }
 
         @Override
         public void resume(TopicPartition... partitions) {
-            resumeCalls++;
             for (TopicPartition partition : partitions) {
                 if (!assignment.contains(partition)) {
                     throw new IllegalStateException("Cannot resume unassigned partition " + partition);
                 }
+                paused.remove(partition);
             }
         }
 
