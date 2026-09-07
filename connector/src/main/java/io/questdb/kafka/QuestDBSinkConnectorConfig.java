@@ -148,8 +148,6 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(VALUE_FORMAT_CONFIG, Type.STRING, "connect", ConfigDef.ValidString.in("connect", "json", "json_envelope"), Importance.MEDIUM, VALUE_FORMAT_DOC)
                 .define(QWP_PROGRESS_TIMEOUT_MS_CONFIG, Type.LONG, 300_000L, ConfigDef.Range.atLeast(1L), Importance.MEDIUM, QWP_PROGRESS_TIMEOUT_MS_DOC)
                 .define(QWP_MAX_INFLIGHT_ROWS_CONFIG, Type.INT, 150_000, ConfigDef.Range.atLeast(1), Importance.MEDIUM, QWP_MAX_INFLIGHT_ROWS_DOC)
-                .define("progress.timeout.ms", Type.STRING, null, renamedSetting(QWP_PROGRESS_TIMEOUT_MS_CONFIG), Importance.LOW, "Removed; use " + QWP_PROGRESS_TIMEOUT_MS_CONFIG)
-                .define("max.inflight.rows", Type.STRING, null, renamedSetting(QWP_MAX_INFLIGHT_ROWS_CONFIG), Importance.LOW, "Removed; use " + QWP_MAX_INFLIGHT_ROWS_CONFIG)
                 .define(QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG, Type.LONG, 500L, ConfigDef.Range.atLeast(0L), Importance.LOW, QWP_COMMIT_ACK_TIMEOUT_MS_DOC)
                 .define(QWP_QUARANTINE_ACK_TIMEOUT_MS_CONFIG, Type.LONG, 1_000L, ConfigDef.Range.atLeast(1L), Importance.LOW, QWP_QUARANTINE_ACK_TIMEOUT_MS_DOC)
                 .define(QWP_DLQ_TERMINAL_CATEGORIES_CONFIG, Type.LIST, "SCHEMA_MISMATCH", (name, value) -> parseDlqEligibleCategories((List<?>) value), Importance.LOW, QWP_DLQ_TERMINAL_CATEGORIES_DOC);
@@ -201,14 +199,6 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
             }
         }
         return result;
-    }
-
-    private static ConfigDef.Validator renamedSetting(String replacement) {
-        return (name, value) -> {
-            if (value != null) {
-                throw new ConfigException(name, value, "Renamed to '" + replacement + "'; remove the old setting and use the new name");
-            }
-        };
     }
 
     public Password getConfigurationString() {

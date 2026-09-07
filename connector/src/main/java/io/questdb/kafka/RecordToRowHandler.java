@@ -133,6 +133,11 @@ final class RecordToRowHandler {
         }
     }
 
+    /** True when the designated timestamp is assembled from several fields. */
+    boolean hasComposedTimestamp() {
+        return composedTimestampFields != null;
+    }
+
     /**
      * Fast path for raw JSON payloads (value.converter=ByteArrayConverter): the bytes are
      * parsed once, directly into Sender calls. The standard path costs two object graphs

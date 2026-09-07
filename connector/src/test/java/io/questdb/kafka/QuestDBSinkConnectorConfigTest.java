@@ -12,6 +12,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 import static org.apache.kafka.connect.runtime.ConnectorConfig.KEY_CONVERTER_CLASS_CONFIG;
 import static org.apache.kafka.connect.runtime.ConnectorConfig.VALUE_CONVERTER_CLASS_CONFIG;
@@ -127,30 +128,68 @@ public class QuestDBSinkConnectorConfigTest {
     }
 
     @Test
-    public void testRenamedQwpSettingsRequireMigration() {
-        for (String oldName : Arrays.asList("progress.timeout.ms", "max.inflight.rows")) {
-            Map<String, String> props = baseConnectorProps();
-            props.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, "ws::addr=localhost:9000;");
-            props.put(oldName, "10");
-            for (boolean bothNames : Arrays.asList(false, true)) {
-                if (bothNames) {
-                    props.put("qwp." + oldName, "20");
-                }
-                ConfigValue value = new QuestDBSinkConnector().validate(props).configValues().stream()
-                        .filter(v -> v.name().equals(oldName)).findFirst().orElseThrow();
-                assertEquals(1, value.errorMessages().size());
-                assertTrue(value.errorMessages().get(0).contains("Renamed to 'qwp." + oldName + "'"));
-                assertThrows(ConfigException.class, () -> new QuestDBSinkConnectorConfig(props));
-            }
-            props.remove(oldName);
-            QuestDBSinkConnectorConfig config = new QuestDBSinkConnectorConfig(props);
-            assertEquals(20, oldName.equals("progress.timeout.ms")
-                    ? config.getQwpProgressTimeoutMs() : config.getQwpMaxInflightRows());
+    public void testClientConfStringAndEnvironmentVariableCannotBeCombined() {
+        Map<String, String> props = baseConnectorProps();
+        props.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, "ws::addr=localhost:9000;");
+        Function<String, String> env = name -> "QDB_CLIENT_CONF".equals(name) ? "http::addr=localhost:9000;" : null;
+        assertEquals(Arrays.asList("Only one of 'client.conf.string' or QDB_CLIENT_CONF environment variable"
+                        + " must be set. They cannot be used together."),
+                confStringErrors(new QuestDBSinkConnector().validate(props, env)));
+        // the same properties are clean on a worker that does not export the variable
+        assertTrue(confStringErrors(new QuestDBSinkConnector().validate(props, NO_ENV)).isEmpty());
+    }
+
+    @Test
+    public void testValidateReportsEveryConflictingClientSetting() {
+        Map<String, String> props = baseConnectorProps();
+        props.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, "ws::addr=localhost:9000;");
+        props.put(QuestDBSinkConnectorConfig.HOST_CONFIG, "localhost");
+        props.put(QuestDBSinkConnectorConfig.TOKEN, "secret");
+        props.put(QuestDBSinkConnectorConfig.USERNAME, "admin");
+        QuestDBSinkConnector connector = new QuestDBSinkConnector();
+        // every offending key is reported in one pass, so the operator does not fix them one 400 at a time
+        for (String name : Arrays.asList(QuestDBSinkConnectorConfig.HOST_CONFIG,
+                QuestDBSinkConnectorConfig.TOKEN, QuestDBSinkConnectorConfig.USERNAME)) {
+            assertEquals(Arrays.asList("Only one of '" + name + "' or 'client.conf.string' must be set."),
+                    fieldErrors(connector, props, name), name);
         }
     }
 
+    /** No worker environment, so an exported QDB_CLIENT_CONF cannot leak into the assertions. */
+    private static final Function<String, String> NO_ENV = name -> null;
+
     private List<String> clientConfErrors(QuestDBSinkConnector connector, Map<String, String> config) {
-        return connector.validate(config).configValues().stream()
+        return connector.validate(config, NO_ENV).configValues().stream()
+                .filter(value -> value.name().equals(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG))
+                .findFirst().orElseThrow().errorMessages();
+    }
+
+    @Test
+    public void testValidateRejectsUnparseablePollInterval() {
+        Map<String, String> config = baseConnectorProps();
+        config.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, "ws::addr=localhost:9000;sf_append_deadline_millis=1000;");
+        config.put("consumer.override.max.poll.interval.ms", "30s");
+        assertEquals(1, clientConfErrors(new QuestDBSinkConnector(), config).size());
+        assertTrue(clientConfErrors(new QuestDBSinkConnector(), config).get(0).contains("must be a long"));
+    }
+
+    @Test
+    public void testDefaultAppendDeadlineIsCheckedAgainstPollInterval() {
+        // no sf_append_deadline_millis in the string: the patched default must reach the comparison
+        Map<String, String> config = baseConnectorProps();
+        config.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, "ws::addr=localhost:9000;");
+        // literal on purpose: deriving it from the constant would make the mutant move the expectation
+        assertEquals(30_000L, ClientConfUtils.DEFAULT_QWP_SF_APPEND_DEADLINE_MILLIS);
+        config.put("consumer.override.max.poll.interval.ms", "30000");
+        assertEquals(Arrays.asList("sf_append_deadline_millis must be lower than consumer.override.max.poll.interval.ms"),
+                clientConfErrors(new QuestDBSinkConnector(), config));
+
+        config.put("consumer.override.max.poll.interval.ms", "30001");
+        assertTrue(clientConfErrors(new QuestDBSinkConnector(), config).isEmpty());
+    }
+
+    private List<String> confStringErrors(org.apache.kafka.common.config.Config config) {
+        return config.configValues().stream()
                 .filter(value -> value.name().equals(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG))
                 .findFirst().orElseThrow().errorMessages();
     }
@@ -207,7 +246,9 @@ public class QuestDBSinkConnectorConfigTest {
             props.put("timestamp.field.name", format.equals("connect") ? "date, time" : "timestamp");
             assertTrue(fieldErrors(new QuestDBSinkConnector(), props, "timestamp.field.name").isEmpty());
             QuestDBSinkConnectorConfig config = new QuestDBSinkConnectorConfig(props);
-            new RecordToRowHandler(config, null, false, false);
+            RecordToRowHandler handler = new RecordToRowHandler(config, null, false, false);
+            // a single field name stays on the scalar path; only "date, time" is composed
+            assertEquals(format.equals("connect"), handler.hasComposedTimestamp(), format);
         }
     }
 
@@ -229,7 +270,7 @@ public class QuestDBSinkConnectorConfigTest {
     }
 
     private List<String> fieldErrors(QuestDBSinkConnector connector, Map<String, String> props, String name) {
-        return connector.validate(props).configValues().stream().filter(v -> v.name().equals(name))
+        return connector.validate(props, NO_ENV).configValues().stream().filter(v -> v.name().equals(name))
                 .findFirst().orElseThrow().errorMessages();
     }
 

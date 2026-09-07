@@ -10,6 +10,7 @@ import org.apache.kafka.connect.sink.SinkConnector;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 public final class QuestDBSinkConnector extends SinkConnector {
     private Map<String, String> configProps;
@@ -49,8 +50,14 @@ public final class QuestDBSinkConnector extends SinkConnector {
 
     @Override
     public Config validate(Map<String, String> connectorConfigs) {
+        return validate(connectorConfigs, System::getenv);
+    }
+
+    // Package-private so tests can supply a worker environment instead of inheriting the one
+    // the test JVM happens to run with.
+    Config validate(Map<String, String> connectorConfigs, Function<String, String> env) {
         Config result = super.validate(connectorConfigs);
-        validateClientConfiguration(connectorConfigs, result);
+        validateClientConfiguration(connectorConfigs, result, env);
         ConfigValue timestampField = configValue(result, QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG);
         try {
             QuestDBSinkConnectorConfig.validateTimestampOptions((String) timestampField.value(),
@@ -75,10 +82,10 @@ public final class QuestDBSinkConnector extends SinkConnector {
         return config.configValues().stream().filter(value -> value.name().equals(name)).findFirst().orElseThrow();
     }
 
-    private static void validateClientConfiguration(Map<String, String> connectorConfigs, Config result) {
+    private static void validateClientConfiguration(Map<String, String> connectorConfigs, Config result, Function<String, String> env) {
         String host = connectorConfigs.get(QuestDBSinkConnectorConfig.HOST_CONFIG);
         String confString = connectorConfigs.get(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG);
-        String envConfString = System.getenv("QDB_CLIENT_CONF");
+        String envConfString = env.apply("QDB_CLIENT_CONF");
 
         // cannot set client configuration string via both explicit config and environment variable
         if (confString != null && envConfString != null) {
