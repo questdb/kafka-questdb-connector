@@ -11,7 +11,6 @@ import io.questdb.kafka.compat.datetime.DateFormat;
 import io.questdb.kafka.compat.datetime.DateLocaleFactory;
 import io.questdb.kafka.compat.datetime.microtime.Micros;
 import org.apache.kafka.connect.data.*;
-import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -120,17 +119,8 @@ final class RecordToRowHandler {
         recordToTable = Templating.newTableTableFn(config.getTable());
 
         String timestampFieldName = config.getDesignatedTimestampColumnName();
-        if (timestampFieldName != null && timestampFieldName.contains(",")) {
-            String[] fields = timestampFieldName.split(",");
-            composedTimestampFields = new String[fields.length];
-            for (int i = 0; i < fields.length; i++) {
-                String field = fields[i].trim();
-                if (field.isEmpty()) {
-                    throw new ConnectException("Empty field name in '" + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG
-                            + "': '" + timestampFieldName + "'");
-                }
-                composedTimestampFields[i] = field;
-            }
+        composedTimestampFields = QuestDBSinkConnectorConfig.parseComposedTimestampFields(timestampFieldName);
+        if (composedTimestampFields != null) {
             timestampColumnName = null;
             composedTimestampValues = new String[composedTimestampFields.length];
             composedBuffer = composedTimestampFields.length == 2
@@ -138,14 +128,8 @@ final class RecordToRowHandler {
                     : new CompositeCharSequence(composedTimestampFields.length);
         } else {
             timestampColumnName = timestampFieldName;
-            composedTimestampFields = null;
             composedTimestampValues = null;
             composedBuffer = null;
-        }
-        if (rawJson && composedTimestampFields != null) {
-            throw new ConnectException("value.format=json does not support composed timestamps ("
-                    + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG
-                    + " naming several fields)");
         }
     }
 

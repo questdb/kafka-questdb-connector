@@ -35,7 +35,6 @@ import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.RandomAccess;
 import java.util.Set;
@@ -100,8 +99,8 @@ class QwpSinkTask extends SinkTask {
         StringSink patched = new StringSink();
         ClientConfUtils.patchConfStr(confString, patched, flushConfig);
         patchedConfString = patched.toString();
-        validatePollInterval(props, flushConfig.sfAppendDeadlineMillis);
-        dlqEligibleCategories = parseDlqEligibleCategories(config.getQwpDlqTerminalCategories());
+        ClientConfUtils.validatePollInterval(props, flushConfig.sfAppendDeadlineMillis);
+        dlqEligibleCategories = QuestDBSinkConnectorConfig.parseDlqEligibleCategories(config.getQwpDlqTerminalCategories());
         try {
             reporter = context.errantRecordReporter();
         } catch (NoSuchMethodError | NoClassDefFoundError e) {
@@ -923,38 +922,8 @@ class QwpSinkTask extends SinkTask {
         return new ConnectException("QuestDB rejected a QWP batch that exceeds the server cap", failure);
     }
 
-    private static EnumSet<SenderError.Category> parseDlqEligibleCategories(List<String> configured) {
-        EnumSet<SenderError.Category> result = EnumSet.noneOf(SenderError.Category.class);
-        for (String value : configured) {
-            try {
-                result.add(SenderError.Category.valueOf(value.trim().toUpperCase(Locale.ENGLISH)));
-            } catch (IllegalArgumentException e) {
-                throw new ConfigException(QuestDBSinkConnectorConfig.QWP_DLQ_TERMINAL_CATEGORIES_CONFIG,
-                        value,
-                        "unknown QWP terminal category");
-            }
-        }
-        return result;
-    }
-
     private static <K, V> boolean removeKeys(Map<K, V> map, Collection<K> keys) {
         return map.keySet().removeAll(keys);
-    }
-
-    private static void validatePollInterval(Map<String, String> props, long appendDeadline) {
-        String pollInterval = props.get("consumer.override.max.poll.interval.ms");
-        if (pollInterval == null) {
-            return;
-        }
-        long maxPollInterval;
-        try {
-            maxPollInterval = Long.parseLong(pollInterval);
-        } catch (NumberFormatException e) {
-            throw new ConfigException("consumer.override.max.poll.interval.ms", pollInterval, "must be a long");
-        }
-        if (appendDeadline >= maxPollInterval) {
-            throw new ConfigException("sf_append_deadline_millis must be lower than consumer.override.max.poll.interval.ms");
-        }
     }
 
     private static final class Checkpoint {

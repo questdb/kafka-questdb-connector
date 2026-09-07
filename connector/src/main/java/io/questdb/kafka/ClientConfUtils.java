@@ -9,6 +9,7 @@ import io.questdb.client.std.str.StringSink;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.config.types.Password;
 
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 final class ClientConfUtils {
@@ -209,6 +210,45 @@ final class ClientConfUtils {
         StringSink scheme = Misc.getThreadLocalSink();
         return ConfStringParser.of(confStr, scheme) >= 0
                 && (Chars.equals(scheme, "ws") || Chars.equals(scheme, "wss"));
+    }
+
+    /**
+     * Runs the checks a task performs on its client configuration string at startup, so the
+     * connector's validate() can reject a bad string before any task is created. Environment
+     * variables are worker-local: a string that does not expand on this worker is left for the
+     * task to resolve.
+     */
+    static void validateConfString(String confStr, Map<String, String> props) {
+        String expanded;
+        try {
+            expanded = ConfStringEnvInterpolator.expand(confStr);
+        } catch (ConfStringEnvInterpolator.MissingEnvironmentVariableException e) {
+            return;
+        }
+        if (expanded == null || expanded.isEmpty()) {
+            return;
+        }
+        FlushConfig flushConfig = new FlushConfig();
+        patchConfStr(expanded, new StringSink(), flushConfig);
+        if (isQwp(expanded)) {
+            validatePollInterval(props, flushConfig.sfAppendDeadlineMillis);
+        }
+    }
+
+    static void validatePollInterval(Map<String, String> props, long appendDeadline) {
+        String pollInterval = props.get("consumer.override.max.poll.interval.ms");
+        if (pollInterval == null) {
+            return;
+        }
+        long maxPollInterval;
+        try {
+            maxPollInterval = Long.parseLong(pollInterval);
+        } catch (NumberFormatException e) {
+            throw new ConfigException("consumer.override.max.poll.interval.ms", pollInterval, "must be a long");
+        }
+        if (appendDeadline >= maxPollInterval) {
+            throw new ConfigException("sf_append_deadline_millis must be lower than consumer.override.max.poll.interval.ms");
+        }
     }
 
     static String resolveConfString(QuestDBSinkConnectorConfig config) {

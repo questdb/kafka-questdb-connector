@@ -59,12 +59,107 @@ public class QuestDBSinkConnectorConfigTest {
     public void testEitherHostOrClientConfigStringMustBeSet() {
         Map<String, String> config = baseConnectorProps();
         QuestDBSinkConnector connector = new QuestDBSinkConnector();
-        try {
-            connector.validate(config);
-            fail("Expected IllegalArgumentException");
-        } catch (IllegalArgumentException e) {
-            assertEquals("Either 'client.conf.string' or 'host' must be set.", e.getMessage());
+        assertEquals(Arrays.asList("Either 'client.conf.string' or 'host' must be set."), clientConfErrors(connector, config));
+    }
+
+    @Test
+    public void testValidateRejectsBadClientConfigurationStringBeforeTaskStart() {
+        assertValidateRejectsConfString("ws::addr=localhost:9000;sf_dir=/var/lib/qdb;",
+                "QuestDB Kafka connector supports memory-only store-and-forward; sf_dir is not allowed with QWP");
+        assertValidateRejectsConfString("wss::addr=localhost:9000;sf_durability=sync;",
+                "QuestDB Kafka connector supports memory-only store-and-forward; sf_durability is not allowed with QWP");
+        assertValidateRejectsConfString("ws::addr=localhost:9000;initial_connect_retry=on;",
+                "QuestDB Kafka connector requires initial_connect_retry=off for QWP");
+        assertValidateRejectsConfString("ws::addr=localhost:9000;auto_flush_rows=off;",
+                "QuestDB Kafka connector cannot have auto_flush_rows disabled");
+        assertValidateRejectsConfString("http::addr=localhost:9000;auto_flush_interval=off;",
+                "QuestDB Kafka connector cannot have auto_flush_interval disabled");
+    }
+
+    @Test
+    public void testValidateRejectsAppendDeadlineAtOrAbovePollInterval() {
+        Map<String, String> config = baseConnectorProps();
+        config.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, "ws::addr=localhost:9000;sf_append_deadline_millis=30000;");
+        config.put("consumer.override.max.poll.interval.ms", "30000");
+        QuestDBSinkConnector connector = new QuestDBSinkConnector();
+        assertEquals(Arrays.asList("sf_append_deadline_millis must be lower than consumer.override.max.poll.interval.ms"),
+                clientConfErrors(connector, config));
+
+        config.put("consumer.override.max.poll.interval.ms", "30001");
+        assertTrue(clientConfErrors(connector, config).isEmpty());
+    }
+
+    @Test
+    public void testValidateAcceptsValidClientConfigurationStrings() {
+        for (String confStr : Arrays.asList(
+                "ws::addr=localhost:9000;",
+                "wss::addr=localhost:9000;sf_max_total_bytes=268435456;auto_flush_rows=1000;",
+                "http::addr=localhost:9000;",
+                "tcp::addr=localhost:9009;")) {
+            Map<String, String> config = baseConnectorProps();
+            config.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, confStr);
+            assertTrue(clientConfErrors(new QuestDBSinkConnector(), config).isEmpty());
         }
+    }
+
+    @Test
+    public void testValidateLeavesUnresolvableEnvironmentVariablesToTheTask() {
+        // the variable may exist only on the worker that runs the task
+        Map<String, String> config = baseConnectorProps();
+        config.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, "ws::addr=${QDB_KAFKA_TEST_UNDEFINED_HOST}:9000;sf_dir=/var/lib/qdb;");
+        assertTrue(clientConfErrors(new QuestDBSinkConnector(), config).isEmpty());
+    }
+
+    @Test
+    public void testValidateRejectsMalformedEnvironmentReferences() {
+        for (String suffix : Arrays.asList("${};", "${HOST;", "${BAD-NAME};",
+                "${QDB_KAFKA_TEST_UNDEFINED_HOST};token=${};")) {
+            Map<String, String> config = baseConnectorProps();
+            config.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, "ws::addr=" + suffix);
+            assertFalse(clientConfErrors(new QuestDBSinkConnector(), config).isEmpty(), suffix);
+        }
+    }
+
+    @Test
+    public void testValidateTrimsClientConfigurationLikeTaskStartup() {
+        assertValidateRejectsConfString("  ws::addr=localhost:9000;sf_dir=/var/lib/qdb;  ",
+                "QuestDB Kafka connector supports memory-only store-and-forward; sf_dir is not allowed with QWP");
+    }
+
+    @Test
+    public void testRenamedQwpSettingsRequireMigration() {
+        for (String oldName : Arrays.asList("progress.timeout.ms", "max.inflight.rows")) {
+            Map<String, String> props = baseConnectorProps();
+            props.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, "ws::addr=localhost:9000;");
+            props.put(oldName, "10");
+            for (boolean bothNames : Arrays.asList(false, true)) {
+                if (bothNames) {
+                    props.put("qwp." + oldName, "20");
+                }
+                ConfigValue value = new QuestDBSinkConnector().validate(props).configValues().stream()
+                        .filter(v -> v.name().equals(oldName)).findFirst().orElseThrow();
+                assertEquals(1, value.errorMessages().size());
+                assertTrue(value.errorMessages().get(0).contains("Renamed to 'qwp." + oldName + "'"));
+                assertThrows(ConfigException.class, () -> new QuestDBSinkConnectorConfig(props));
+            }
+            props.remove(oldName);
+            QuestDBSinkConnectorConfig config = new QuestDBSinkConnectorConfig(props);
+            assertEquals(20, oldName.equals("progress.timeout.ms")
+                    ? config.getQwpProgressTimeoutMs() : config.getQwpMaxInflightRows());
+        }
+    }
+
+    private List<String> clientConfErrors(QuestDBSinkConnector connector, Map<String, String> config) {
+        return connector.validate(config).configValues().stream()
+                .filter(value -> value.name().equals(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG))
+                .findFirst().orElseThrow().errorMessages();
+    }
+
+    private void assertValidateRejectsConfString(String confStr, String expectedMessage) {
+        Map<String, String> config = baseConnectorProps();
+        config.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, confStr);
+        QuestDBSinkConnector connector = new QuestDBSinkConnector();
+        assertEquals(Arrays.asList(expectedMessage), clientConfErrors(connector, config));
     }
 
     private void assertCannotBeSetTogetherWithConfigString(String configKey, String configValue) {
@@ -73,12 +168,69 @@ public class QuestDBSinkConnectorConfigTest {
         config.put(configKey, configValue);
 
         QuestDBSinkConnector connector = new QuestDBSinkConnector();
-        try {
-            connector.validate(config);
-            fail("Expected IllegalArgumentException");
-        } catch (IllegalArgumentException e) {
-            assertEquals("Only one of '" + configKey + "' or 'client.conf.string' must be set.", e.getMessage());
+        assertEquals(Arrays.asList("Only one of '" + configKey + "' or 'client.conf.string' must be set."),
+                fieldErrors(connector, config, configKey));
+    }
+
+    @Test
+    public void testTimestampFieldsRejectEmptyAndDuplicateNamesBeforeStartup() {
+        for (String fields : Arrays.asList("", " ", ",", "date,", ",time", "date,,time", "date, ,time", "date,date", "date, date")) {
+            Map<String, String> props = baseConnectorProps();
+            props.put("client.conf.string", "ws::addr=localhost:9000;");
+            props.put("timestamp.field.name", fields);
+            assertFalse(fieldErrors(new QuestDBSinkConnector(), props, "timestamp.field.name").isEmpty(), fields);
+            assertThrows(ConfigException.class, () -> new QuestDBSinkConnectorConfig(props), fields);
         }
+    }
+
+    @Test
+    public void testTimestampConflictsRejectDuringValidationAndStartup() {
+        for (String format : Arrays.asList("json", "json_envelope", "connect")) {
+            Map<String, String> props = baseConnectorProps();
+            props.put("client.conf.string", "ws::addr=localhost:9000;");
+            props.put("timestamp.field.name", "date,time");
+            props.put("value.format", format);
+            if (format.equals("connect")) {
+                props.put("timestamp.kafka.native", "true");
+            }
+            assertFalse(fieldErrors(new QuestDBSinkConnector(), props, "timestamp.field.name").isEmpty());
+            assertThrows(ConfigException.class, () -> new QuestDBSinkConnectorConfig(props));
+        }
+    }
+
+    @Test
+    public void testValidTimestampConfigurations() {
+        for (String format : Arrays.asList("connect", "json", "json_envelope")) {
+            Map<String, String> props = baseConnectorProps();
+            props.put("client.conf.string", "ws::addr=localhost:9000;");
+            props.put("value.format", format);
+            props.put("timestamp.field.name", format.equals("connect") ? "date, time" : "timestamp");
+            assertTrue(fieldErrors(new QuestDBSinkConnector(), props, "timestamp.field.name").isEmpty());
+            QuestDBSinkConnectorConfig config = new QuestDBSinkConnectorConfig(props);
+            new RecordToRowHandler(config, null, false, false);
+        }
+    }
+
+    @Test
+    public void testDlqCategoriesValidatedBeforeStartup() {
+        Map<String, String> props = baseConnectorProps();
+        props.put("client.conf.string", "ws::addr=localhost:9000;");
+        props.put("qwp.dlq.terminal.categories", "SCHEMA_MISSMATCH");
+        assertTrue(fieldErrors(new QuestDBSinkConnector(), props, "qwp.dlq.terminal.categories").get(0).contains("unknown QWP terminal category"));
+        assertThrows(ConfigException.class, () -> new QuestDBSinkConnectorConfig(props));
+        props.put("qwp.dlq.terminal.categories", null);
+        assertFalse(fieldErrors(new QuestDBSinkConnector(), props, "qwp.dlq.terminal.categories").isEmpty());
+        assertThrows(ConfigException.class, () -> new QuestDBSinkConnectorConfig(props));
+        for (String categories : Arrays.asList("schema_mismatch", "", " SCHEMA_MISMATCH ")) {
+            props.put("qwp.dlq.terminal.categories", categories);
+            assertTrue(fieldErrors(new QuestDBSinkConnector(), props, "qwp.dlq.terminal.categories").isEmpty());
+            new QuestDBSinkConnectorConfig(props);
+        }
+    }
+
+    private List<String> fieldErrors(QuestDBSinkConnector connector, Map<String, String> props, String name) {
+        return connector.validate(props).configValues().stream().filter(v -> v.name().equals(name))
+                .findFirst().orElseThrow().errorMessages();
     }
 
     @Test

@@ -2,14 +2,14 @@ package io.questdb.kafka;
 
 import org.apache.kafka.common.config.Config;
 import org.apache.kafka.common.config.ConfigDef;
+import org.apache.kafka.common.config.ConfigException;
+import org.apache.kafka.common.config.ConfigValue;
 import org.apache.kafka.connect.connector.Task;
 import org.apache.kafka.connect.sink.SinkConnector;
 
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 public final class QuestDBSinkConnector extends SinkConnector {
     private Map<String, String> configProps;
@@ -49,70 +49,56 @@ public final class QuestDBSinkConnector extends SinkConnector {
 
     @Override
     public Config validate(Map<String, String> connectorConfigs) {
-        String kafkaNative = connectorConfigs.get(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG);
-        if (Boolean.parseBoolean(kafkaNative) && connectorConfigs.get(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG) != null) {
-            throw new IllegalArgumentException("Cannot use '" + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG
-                    + "' with '" + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG +"'. These options are mutually exclusive.");
+        Config result = super.validate(connectorConfigs);
+        validateClientConfiguration(connectorConfigs, result);
+        ConfigValue timestampField = configValue(result, QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG);
+        try {
+            QuestDBSinkConnectorConfig.validateTimestampOptions((String) timestampField.value(),
+                    Boolean.TRUE.equals(configValue(result, QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG).value()),
+                    (String) configValue(result, QuestDBSinkConnectorConfig.VALUE_FORMAT_CONFIG).value());
+        } catch (ConfigException e) {
+            timestampField.addErrorMessage(e.getMessage());
         }
-
-        validateTimestampFieldNames(connectorConfigs);
-        validateClientConfiguration(connectorConfigs);
-        return super.validate(connectorConfigs);
-    }
-
-    private static void validateTimestampFieldNames(Map<String, String> connectorConfigs) {
-        String timestampFieldName = connectorConfigs.get(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG);
-        if (timestampFieldName == null || !timestampFieldName.contains(",")) {
-            return;
-        }
-
-        String[] fields = timestampFieldName.split(",");
-        Set<String> seen = new HashSet<>();
-        for (String field : fields) {
-            String trimmed = field.trim();
-            if (trimmed.isEmpty()) {
-                throw new IllegalArgumentException("Empty field name in '" + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG
-                        + "': '" + timestampFieldName + "'");
-            }
-            if (!seen.add(trimmed)) {
-                throw new IllegalArgumentException("Duplicate field name '" + trimmed + "' in '"
-                        + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG + "': '" + timestampFieldName + "'");
+        // Environment-only configuration is resolved on the worker running the task.
+        String confString = connectorConfigs.get(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG);
+        if (confString != null) {
+            try {
+                ClientConfUtils.validateConfString(confString.trim(), connectorConfigs);
+            } catch (ConfigException e) {
+                configValue(result, QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG).addErrorMessage(e.getMessage());
             }
         }
+        return result;
     }
 
-    private static void validateClientConfiguration(Map<String, String> connectorConfigs) {
+    private static ConfigValue configValue(Config config, String name) {
+        return config.configValues().stream().filter(value -> value.name().equals(name)).findFirst().orElseThrow();
+    }
+
+    private static void validateClientConfiguration(Map<String, String> connectorConfigs, Config result) {
         String host = connectorConfigs.get(QuestDBSinkConnectorConfig.HOST_CONFIG);
         String confString = connectorConfigs.get(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG);
         String envConfString = System.getenv("QDB_CLIENT_CONF");
 
         // cannot set client configuration string via both explicit config and environment variable
         if (confString != null && envConfString != null) {
-            throw new IllegalArgumentException("Only one of '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' or QDB_CLIENT_CONF environment variable must be set. They cannot be used together.");
+            configValue(result, QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG).addErrorMessage("Only one of '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' or QDB_CLIENT_CONF environment variable must be set. They cannot be used together.");
         }
 
         if (confString == null && envConfString == null) {
             if (host == null) {
-                throw new IllegalArgumentException("Either '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' or '" + QuestDBSinkConnectorConfig.HOST_CONFIG + "' must be set.");
+                configValue(result, QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG).addErrorMessage("Either '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' or '" + QuestDBSinkConnectorConfig.HOST_CONFIG + "' must be set.");
             }
             return; // configuration string is not used, nothing else to validate
         }
 
         // configuration string is used, let's validate no other client configuration is set
-        if (host != null) {
-            throw new IllegalArgumentException("Only one of '" + QuestDBSinkConnectorConfig.HOST_CONFIG + "' or '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' must be set.");
-        }
-        if (connectorConfigs.get(QuestDBSinkConnectorConfig.TLS) != null) {
-            throw new IllegalArgumentException("Only one of '" + QuestDBSinkConnectorConfig.TLS + "' or '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' must be set.");
-        }
-        if (connectorConfigs.get(QuestDBSinkConnectorConfig.TLS_VALIDATION_MODE_CONFIG) != null) {
-            throw new IllegalArgumentException("Only one of '" + QuestDBSinkConnectorConfig.TLS_VALIDATION_MODE_CONFIG + "' or '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' must be set.");
-        }
-        if (connectorConfigs.get(QuestDBSinkConnectorConfig.TOKEN) != null) {
-            throw new IllegalArgumentException("Only one of '" + QuestDBSinkConnectorConfig.TOKEN + "' or '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' must be set.");
-        }
-        if (connectorConfigs.get(QuestDBSinkConnectorConfig.USERNAME) != null) {
-            throw new IllegalArgumentException("Only one of '" + QuestDBSinkConnectorConfig.USERNAME + "' or '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' must be set.");
+        for (String name : new String[]{QuestDBSinkConnectorConfig.HOST_CONFIG, QuestDBSinkConnectorConfig.TLS,
+                QuestDBSinkConnectorConfig.TLS_VALIDATION_MODE_CONFIG, QuestDBSinkConnectorConfig.TOKEN, QuestDBSinkConnectorConfig.USERNAME}) {
+            if (connectorConfigs.get(name) != null) {
+                configValue(result, name).addErrorMessage("Only one of '" + name + "' or '"
+                        + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' must be set.");
+            }
         }
     }
 }

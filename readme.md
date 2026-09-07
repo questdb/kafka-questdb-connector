@@ -24,8 +24,11 @@ prefix is replayed. Configure `DEDUP UPSERT KEYS` on target tables whenever
 duplicate rows are not acceptable.
 
 The connector keeps Kafka as the durable log, so QWP store-and-forward is
-memory-only: `sf_dir` and `sf_durability` are rejected. `max.inflight.rows` is
+memory-only: `sf_dir` and `sf_durability` are rejected. `qwp.max.inflight.rows` is
 a soft pause threshold, and the current poll batch may overshoot it.
+The former names `max.inflight.rows` and `progress.timeout.ms` are rejected with
+migration guidance. Rename them to `qwp.max.inflight.rows` and
+`qwp.progress.timeout.ms`, respectively, before upgrading.
 `sf_max_total_bytes` caps the client's encoded store-and-forward segments; it
 does not include Kafka Connect's current poll batch. The connector itself retains
 only per-flush offset checkpoints, not `SinkRecord` payloads.
@@ -70,7 +73,7 @@ Its per-chunk wait is bounded by `qwp.quarantine.ack.timeout.ms` (1s by default)
 high-latency link is intentionally slower than normal pipelined delivery. Other
 terminal, security, and protocol failures fail the task. Transport and local
 store-and-forward capacity failures retire the sender and rewind the affected
-partitions; `progress.timeout.ms` is the bound on a persistent outage. Advanced
+partitions; `qwp.progress.timeout.ms` is the bound on a persistent outage. Advanced
 users can explicitly extend `qwp.dlq.terminal.categories`; doing so can blame
 valid records for server or client faults and is not recommended.
 
