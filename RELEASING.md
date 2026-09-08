@@ -21,7 +21,7 @@ the workflow is built around that.
      the release version in the POMs;
    - creates a **draft** GitHub release with the `-bin.zip` attached and
      auto-generated notes;
-   - opens a `chore: bump version to X.Z-SNAPSHOT` pull request against `main`.
+   - opens a `chore: bump version to X.(Y+1)-SNAPSHOT` pull request against `main`.
 4. Edit the draft release notes and publish the release.
 5. Review and merge the bump pull request. It goes through normal CI and
    review like any other change.

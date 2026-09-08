@@ -154,7 +154,6 @@ jobs:
     env:
       RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
       RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
-      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
     steps:
       - name: Validate release credentials
         env:
@@ -195,7 +194,6 @@ jobs:
           cache: maven
 
       - name: Configure git identity
-        id: identity
         env:
           GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
           APP_SLUG: ${{ steps.release-app-token.outputs.app-slug }}
