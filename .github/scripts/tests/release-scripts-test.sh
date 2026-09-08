@@ -150,6 +150,18 @@ run_rollback() {
     )
 }
 
+run_rollback_without_token() {
+    local work="$1"
+    local expected_oid="$2"
+
+    (
+        cd "${work}"
+        GITHUB_REPOSITORY="questdb/kafka-questdb-connector" \
+        GH_TOKEN="" \
+            "${ROLLBACK_SCRIPT}" v0.24 "${expected_oid}"
+    )
+}
+
 test_deletes_matching_orphan_tag() {
     local test_dir="$1/orphan-tag"
     mkdir -p "${test_dir}"
@@ -165,6 +177,41 @@ test_deletes_matching_orphan_tag() {
 
     assert_tag_absent "${remote}" v0.24
     pass "matching orphan tag is deleted"
+}
+
+test_skips_missing_remote_tag_without_token_warning() {
+    local test_dir="$1/no-remote-tag"
+    mkdir -p "${test_dir}"
+    local repo_data remote work expected_oid output
+    repo_data="$(make_tagged_repo "${test_dir}")"
+    remote="$(printf '%s\n' "${repo_data}" | sed -n '1p')"
+    work="$(printf '%s\n' "${repo_data}" | sed -n '2p')"
+    expected_oid="$(printf '%s\n' "${repo_data}" | sed -n '3p')"
+    git -C "${work}" push --quiet origin ":refs/tags/v0.24"
+
+    output="$(run_rollback_without_token "${work}" "${expected_oid}" 2>&1)"
+
+    assert_eq "No remote tag v0.24 exists; no rollback is needed." "${output}" \
+        "rollback output for an absent remote tag"
+    assert_tag_absent "${remote}" v0.24
+    pass "absent remote tag needs no token and emits no warning"
+}
+
+test_warns_when_matching_remote_tag_has_no_token() {
+    local test_dir="$1/missing-token"
+    mkdir -p "${test_dir}"
+    local repo_data remote work expected_oid output
+    repo_data="$(make_tagged_repo "${test_dir}")"
+    remote="$(printf '%s\n' "${repo_data}" | sed -n '1p')"
+    work="$(printf '%s\n' "${repo_data}" | sed -n '2p')"
+    expected_oid="$(printf '%s\n' "${repo_data}" | sed -n '3p')"
+
+    output="$(run_rollback_without_token "${work}" "${expected_oid}" 2>&1)"
+
+    assert_eq "::warning::Cannot roll back v0.24: GitHub repository or App token is unavailable." "${output}" \
+        "rollback output for a matching tag without credentials"
+    assert_tag_exists "${remote}" v0.24
+    pass "matching remote tag without a token emits a warning"
 }
 
 test_preserves_tag_when_draft_exists() {
@@ -247,6 +294,8 @@ main() {
     test_rejects_final_pom_without_override
     test_allows_explicit_release_override
     test_deletes_matching_orphan_tag "${TEST_TEMP_DIR}"
+    test_skips_missing_remote_tag_without_token_warning "${TEST_TEMP_DIR}"
+    test_warns_when_matching_remote_tag_has_no_token "${TEST_TEMP_DIR}"
     test_preserves_tag_when_draft_exists "${TEST_TEMP_DIR}"
     test_preserves_tag_for_published_release "${TEST_TEMP_DIR}"
     test_preserves_tag_when_release_inspection_fails "${TEST_TEMP_DIR}"

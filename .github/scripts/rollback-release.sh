@@ -13,11 +13,6 @@ if [[ ! "${expected_tag_oid}" =~ ^[0-9a-f]{40,64}$ ]]; then
     echo "::warning::Refusing rollback because the expected tag object ID is invalid."
     exit 0
 fi
-if [[ -z "${GITHUB_REPOSITORY:-}" || -z "${GH_TOKEN:-}" ]]; then
-    echo "::warning::Cannot roll back ${release_tag}: GitHub repository or App token is unavailable."
-    exit 0
-fi
-
 if ! remote_tag_refs="$(git ls-remote --refs origin "refs/tags/${release_tag}")"; then
     echo "::warning::Could not inspect remote tag ${release_tag}; preserving it for manual inspection."
     exit 0
@@ -29,6 +24,10 @@ if [[ -z "${remote_tag_oid}" ]]; then
 fi
 if [[ "${remote_tag_oid}" != "${expected_tag_oid}" ]]; then
     echo "::warning::Remote tag ${release_tag} does not match this run's tag object; preserving it."
+    exit 0
+fi
+if [[ -z "${GITHUB_REPOSITORY:-}" || -z "${GH_TOKEN:-}" ]]; then
+    echo "::warning::Cannot roll back ${release_tag}: GitHub repository or App token is unavailable."
     exit 0
 fi
 
