@@ -1,30 +1,321 @@
-name: Create a release from a tag
+name: Release
+
+# Release model (no pushes to main, verify-before-tag):
+#
+#   resolve -> publish (gated: commit + tag locally, build + test, push tag,
+#                        draft release) -> open-bump-pr
+#
+#   * main is PR-only by org ruleset, so the workflow never pushes to it. The
+#     release commit ("Release vX.Y", poms at X.Y) lives only under the tag,
+#     one commit off main. The next -SNAPSHOT bump lands as a normal PR.
+#   * The release commit and tag are created locally BEFORE the build, so the
+#     git-commit-id plugin stamps the distribution with the tagged commit. The
+#     tag is pushed only after the build and its tests passed.
+#     Creating the tag is the single step that needs a ruleset bypass, and
+#     that bypass is granted to a dedicated GitHub App, never to main.
+#   * The GitHub release is created as a DRAFT with the connector zip
+#     attached and auto-generated notes. Edit the notes, then publish.
+#
+# Org/repo prerequisites (one-time, not enforceable from this file):
+#   * The org "Maven release" GitHub App (the one java-questdb-client uses) is
+#     a bypass actor on the org `restrict-tag-pushing` ruleset. Install it on
+#     this repository with Contents: read/write and Pull requests: read/write.
+#   * Repository variable MAVEN_RELEASE_GITHUB_APP_CLIENT_ID and the
+#     `maven-release` environment secret MAVEN_RELEASE_GITHUB_APP_PRIVATE_KEY
+#     identify that app. The built-in GITHUB_TOKEN cannot push tags here and
+#     PRs it opens do not trigger CI, so the app token is used for both.
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
-      - "v*.*"
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Branch to release from"
+        required: true
+        default: "main"
+        type: string
+      release_version_override:
+        description: "Optional release version; normally the current POM version without -SNAPSHOT"
+        required: false
+        type: string
+      next_development_version_override:
+        description: "Optional next development version; normally the release version with the last component bumped, plus -SNAPSHOT"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  VERSIONS_PLUGIN: org.codehaus.mojo:versions-maven-plugin:2.18.0
 
 jobs:
-  build:
+  resolve:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      release_version: ${{ steps.versions.outputs.release_version }}
+      release_tag: ${{ steps.versions.outputs.release_tag }}
+      next_development_version: ${{ steps.versions.outputs.next_development_version }}
+      source_sha: ${{ steps.versions.outputs.source_sha }}
     steps:
-      - uses: actions/checkout@v3
+      - name: Validate workflow configuration
+        env:
+          MAVEN_RELEASE_GITHUB_APP_CLIENT_ID: ${{ vars.MAVEN_RELEASE_GITHUB_APP_CLIENT_ID }}
+        run: |
+          if [[ -z "${MAVEN_RELEASE_GITHUB_APP_CLIENT_ID}" ]]; then
+            echo "::error::Repository variable MAVEN_RELEASE_GITHUB_APP_CLIENT_ID is required. See the header of this workflow."
+            exit 1
+          fi
+
+      - name: Check out source ref
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+
       - name: Set up JDK 17
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
         with:
-          java-version: '17'
-          distribution: 'temurin'
+          distribution: temurin
+          java-version: "17"
           cache: maven
-      - name: Build with Maven
-        #we are skipping tests as tests are executed when creating a tag
-        run: mvn -B package --file pom.xml -DskipTests
-      - name: Release
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+
+      - name: Resolve versions and guard against re-release
+        id: versions
+        env:
+          RELEASE_VERSION_OVERRIDE: ${{ inputs.release_version_override }}
+          NEXT_DEVELOPMENT_VERSION_OVERRIDE: ${{ inputs.next_development_version_override }}
+        run: |
+          set -euo pipefail
+
+          pom_version="$(mvn -B -q -N -DforceStdout help:evaluate -Dexpression=project.version)"
+          if [[ -z "${pom_version}" ]]; then
+            echo "::error::Could not read project version from ${{ inputs.source_ref }}."
+            exit 1
+          fi
+
+          if [[ -n "${RELEASE_VERSION_OVERRIDE}" ]]; then
+            release_version="${RELEASE_VERSION_OVERRIDE}"
+          else
+            release_version="${pom_version%-SNAPSHOT}"
+          fi
+
+          if [[ "${release_version}" == *-SNAPSHOT ]]; then
+            echo "::error::Refusing to release a SNAPSHOT version (${release_version})."
+            exit 1
+          fi
+          if [[ ! "${release_version}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::Release version '${release_version}' is not in X.Y or X.Y.Z form."
+            exit 1
+          fi
+
+          if [[ -n "${NEXT_DEVELOPMENT_VERSION_OVERRIDE}" ]]; then
+            next_development_version="${NEXT_DEVELOPMENT_VERSION_OVERRIDE}"
+          else
+            # Bump the last version component: 0.24 -> 0.25-SNAPSHOT, 1.2.3 -> 1.2.4-SNAPSHOT.
+            prefix="${release_version%.*}"
+            last="${release_version##*.}"
+            next_development_version="${prefix}.$((last + 1))-SNAPSHOT"
+          fi
+          if [[ "${next_development_version}" != *-SNAPSHOT ]]; then
+            echo "::error::Next development version '${next_development_version}' must end in -SNAPSHOT."
+            exit 1
+          fi
+
+          release_tag="v${release_version}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${release_tag}" >/dev/null 2>&1; then
+            echo "::error::Tag ${release_tag} already exists. Merge the snapshot-bump PR (or bump the version) before releasing."
+            exit 1
+          fi
+
+          source_sha="$(git rev-parse HEAD)"
+
+          {
+            echo "release_version=${release_version}"
+            echo "release_tag=${release_tag}"
+            echo "next_development_version=${next_development_version}"
+            echo "source_sha=${source_sha}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Release ${release_tag} from ${source_sha}; next development version ${next_development_version}."
+
+  publish:
+    needs: resolve
+    runs-on: ubuntu-latest
+    environment: maven-release
+    # CI takes ~10 minutes; bound a hung test suite.
+    timeout-minutes: 40
+    permissions:
+      contents: read    # GITHUB_TOKEN only; the tag push and release use the app token.
+    env:
+      RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
+      RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+    steps:
+      - name: Validate release credentials
+        env:
+          MAVEN_RELEASE_GITHUB_APP_PRIVATE_KEY: ${{ secrets.MAVEN_RELEASE_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          if [[ -z "${MAVEN_RELEASE_GITHUB_APP_PRIVATE_KEY}" ]]; then
+            echo "::error::Environment secret MAVEN_RELEASE_GITHUB_APP_PRIVATE_KEY is required. See the header of this workflow."
+            exit 1
+          fi
+
+      - name: Create release GitHub App token
+        id: release-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          files: |
-            Release.txt
-            connector/target/kafka-questdb-connector-*-bin.zip
-          draft: true
+          client-id: ${{ vars.MAVEN_RELEASE_GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MAVEN_RELEASE_GITHUB_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Check out release source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.resolve.outputs.source_sha }}
+          fetch-depth: 0
+          token: ${{ steps.release-app-token.outputs.token }}
+
+      - name: Re-assert the tag is still free
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "::error::Tag ${RELEASE_TAG} appeared since resolve. Aborting."
+            exit 1
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Configure git identity
+        id: identity
+        env:
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
+          APP_SLUG: ${{ steps.release-app-token.outputs.app-slug }}
+        run: |
+          # Commit as the app's bot user so the commits are attributed to a
+          # GitHub account; unattributed commits need an extra PR approval here.
+          app_user_id="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${app_user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+
+      - name: Create release commit and tag
+        run: |
+          # The release commit is created BEFORE the build so that the
+          # git-commit-id plugin stamps the distribution with the commit the
+          # tag will point at. Nothing is pushed yet. The commit is never
+          # pushed to a branch; only the tag references it.
+          mvn -B -ntp "${VERSIONS_PLUGIN}:set" -DnewVersion="${RELEASE_VERSION}" -DprocessAllModules=true -DgenerateBackupPoms=false
+          git commit -am "Release ${RELEASE_TAG}"
+          git tag -a "${RELEASE_TAG}" -m "kafka-questdb-connector ${RELEASE_TAG}"
+
+      - name: Build and test the tagged tree
+        run: mvn -B -ntp package
+
+      - name: Upload connector distribution
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: connector-distribution
+          path: connector/target/kafka-questdb-connector-${{ env.RELEASE_VERSION }}-bin.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Push release tag
+        id: tag
+        run: git push origin "refs/tags/${RELEASE_TAG}"
+
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
+        run: |
+          gh release create "${RELEASE_TAG}" \
+            --draft \
+            --verify-tag \
+            --title "${RELEASE_TAG}" \
+            --generate-notes \
+            "connector/target/kafka-questdb-connector-${RELEASE_VERSION}-bin.zip"
+          echo "::notice::Draft release ${RELEASE_TAG} created. Edit the notes and publish it: ${{ github.server_url }}/${{ github.repository }}/releases"
+
+      - name: Roll back the tag if the release could not be created
+        if: failure() && steps.tag.outcome == 'success'
+        run: |
+          if git push origin ":refs/tags/${RELEASE_TAG}"; then
+            echo "Deleted tag ${RELEASE_TAG}; the run can be retried."
+          else
+            echo "::warning::Could not delete tag ${RELEASE_TAG}. Delete it manually before retrying."
+          fi
+
+  open-bump-pr:
+    needs:
+      - resolve
+      - publish
+    runs-on: ubuntu-latest
+    environment: maven-release
+    timeout-minutes: 15
+    permissions:
+      contents: read    # GITHUB_TOKEN only; the branch push and PR use the app token.
+    env:
+      NEXT_DEVELOPMENT_VERSION: ${{ needs.resolve.outputs.next_development_version }}
+      RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+      SOURCE_REF: ${{ inputs.source_ref }}
+    steps:
+      - name: Create release GitHub App token
+        id: release-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.MAVEN_RELEASE_GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MAVEN_RELEASE_GITHUB_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Check out source ref
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          token: ${{ steps.release-app-token.outputs.token }}
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Open next-development-version bump PR
+        env:
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
+          APP_SLUG: ${{ steps.release-app-token.outputs.app-slug }}
+        run: |
+          branch="chore/bump-${NEXT_DEVELOPMENT_VERSION}"
+          app_user_id="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${app_user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          git checkout -B "${branch}"
+
+          mvn -B -ntp "${VERSIONS_PLUGIN}:set" -DnewVersion="${NEXT_DEVELOPMENT_VERSION}" -DprocessAllModules=true -DgenerateBackupPoms=false
+
+          if git diff --quiet; then
+            echo "${SOURCE_REF} is already at ${NEXT_DEVELOPMENT_VERSION}; nothing to bump."
+            exit 0
+          fi
+
+          git commit -am "chore: bump version to ${NEXT_DEVELOPMENT_VERSION}"
+          git push --force origin "${branch}"
+
+          if [[ -z "$(gh pr list --head "${branch}" --state open --json number --jq '.[].number')" ]]; then
+            gh pr create \
+              --base "${SOURCE_REF}" \
+              --head "${branch}" \
+              --title "chore: bump version to ${NEXT_DEVELOPMENT_VERSION}" \
+              --body "Post-release housekeeping after tagging ${RELEASE_TAG}. Merge before the next release."
+          else
+            echo "A bump PR for ${branch} already exists."
+          fi
