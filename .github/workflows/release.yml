@@ -92,7 +92,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          pom_version="$(mvn -B -q -N -DforceStdout help:evaluate -Dexpression=project.version)"
+          pom_version="$(mvn -B -q -N -DforceStdout org.apache.maven.plugins:maven-help-plugin:3.5.1:evaluate -Dexpression=project.version)"
           if [[ -z "${pom_version}" ]]; then
             echo "::error::Could not read project version from ${{ inputs.source_ref }}."
             exit 1
@@ -244,7 +244,10 @@ jobs:
           echo "::notice::Draft release ${RELEASE_TAG} created. Edit the notes and publish it: ${{ github.server_url }}/${{ github.repository }}/releases"
 
       - name: Roll back the tag and draft release if the release could not be created
-        if: failure() && steps.tag.outcome == 'success'
+        # failure() is false when the job is cancelled by an operator or by the
+        # job timeout, so check cancelled() too; otherwise the pushed tag would
+        # block the next attempt.
+        if: (failure() || cancelled()) && steps.tag.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
         run: |
@@ -254,7 +257,8 @@ jobs:
           # assetless draft behind, and GitHub allows a second draft on the same
           # tag, so a retry would produce two drafts and the wrong one could be
           # published. Delete the release first, then the tag.
-          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+          # Only a draft is ever deleted; a release someone already published stays.
+          if [[ "$(gh release view "${RELEASE_TAG}" --json isDraft --jq .isDraft 2>/dev/null)" == "true" ]]; then
             if gh release delete "${RELEASE_TAG}" --yes; then
               echo "Deleted draft release ${RELEASE_TAG}."
             else

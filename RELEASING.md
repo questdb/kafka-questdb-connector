@@ -30,7 +30,7 @@ the workflow is built around that.
 
 If the run fails before the tag is pushed nothing has happened and the run can
 simply be retried. If the tag was pushed but the draft release could not be
-created, the workflow deletes the draft release, if one was created at all, and
+created, or the run was cancelled or timed out at that point, the workflow deletes the draft release, if one was created at all, and
 then the tag, so the run can be retried.
 
 ## One-time setup
