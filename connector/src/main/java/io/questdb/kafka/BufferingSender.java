@@ -295,6 +295,26 @@ final class BufferingSender implements Sender {
     }
 
     @Override
+    public long flushAndGetSequence() {
+        return sender.flushAndGetSequence();
+    }
+
+    @Override
+    public long getAckedFsn() {
+        return sender.getAckedFsn();
+    }
+
+    @Override
+    public boolean awaitAckedFsn(long targetFsn, long timeoutMillis) {
+        return sender.awaitAckedFsn(targetFsn, timeoutMillis);
+    }
+
+    @Override
+    public boolean drain(long timeoutMillis) {
+        return sender.drain(timeoutMillis);
+    }
+
+    @Override
     public void close() {
         sender.close();
     }

@@ -1,6 +1,6 @@
 services:
   questdb:
-    image: questdb/questdb:9.3.2
+    image: questdb/questdb:10.0.1
     expose:
       - "9000"
     ports:

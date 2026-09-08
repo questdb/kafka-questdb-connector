@@ -73,6 +73,7 @@ public final class ConfStringEnvInterpolator {
         }
 
         StringBuilder result = new StringBuilder(len);
+        String missingVariable = null;
         int i = 0;
 
         while (i < len) {
@@ -99,9 +100,13 @@ public final class ConfStringEnvInterpolator {
                         validateVariableName(varName, i);
                         String value = envLookup.apply(varName);
                         if (value == null) {
-                            throw new ConfigException("Environment variable '" + varName + "' is not defined");
+                            // Finish checking syntax before deferring a worker-local lookup.
+                            if (missingVariable == null) {
+                                missingVariable = varName;
+                            }
+                        } else {
+                            result.append(value);
                         }
-                        result.append(value);
                         i = varEnd + 1;
                     } else {
                         // Just a dollar sign not followed by $ or {
@@ -119,7 +124,16 @@ public final class ConfStringEnvInterpolator {
             }
         }
 
+        if (missingVariable != null) {
+            throw new MissingEnvironmentVariableException(missingVariable);
+        }
         return result.toString();
+    }
+
+    static final class MissingEnvironmentVariableException extends ConfigException {
+        MissingEnvironmentVariableException(String name) {
+            super("Environment variable '" + name + "' is not defined");
+        }
     }
 
     private static int findClosingBrace(String input, int start) {

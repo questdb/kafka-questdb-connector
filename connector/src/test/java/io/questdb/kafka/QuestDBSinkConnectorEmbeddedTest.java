@@ -20,7 +20,7 @@ import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.FixedHostPortGenericContainer;
 import org.testcontainers.containers.GenericContainer;
@@ -51,7 +51,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 public final class QuestDBSinkConnectorEmbeddedTest {
     private static int httpPort = -1;
     private static int ilpPort = -1;
-    private static final String OFFICIAL_QUESTDB_DOCKER = "questdb/questdb:9.3.2";
+    private static final String OFFICIAL_QUESTDB_DOCKER = "questdb/questdb:10.0.0";
     private static final boolean DUMP_QUESTDB_CONTAINER_LOGS = true;
 
     private EmbeddedConnectCluster connect;
@@ -112,6 +112,9 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         httpPort = selfGenericContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT);
         ilpPort = selfGenericContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT);
+        // The server-main log line can precede stable HTTP service after recovery. A restart
+        // test immediately reuses the fixed port, so wait for an actual request to succeed.
+        QuestDBUtils.awaitReady(httpPort);
 
         return selfGenericContainer;
     }
@@ -126,10 +129,28 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         Map<String, String> props = new HashMap<>();
         props.put("connector.client.config.override.policy", "All");
+        // service_load skips the ~200ms reflective classpath scan per worker
+        // start; the third-party test SMT (PayloadBasisRouter) gets its missing
+        // ServiceLoader manifest from src/test/resources.
+        props.put("plugin.discovery", "service_load");
+        // Internal topics default to 25 offset + 5 status partitions; every
+        // partition costs read-to-end rounds at runtime and a checkpoint flush
+        // at broker shutdown.
+        props.put("offset.storage.partitions", "1");
+        props.put("status.storage.partitions", "1");
+        // On close, every consumer's final close-fetch-session request sits in
+        // the broker's delayed-fetch purgatory for up to fetch.max.wait.ms
+        // (default 500ms). The task consumer and the herder's member close
+        // sequentially, so the default costs ~800ms of every cluster stop.
+        props.put("consumer.fetch.max.wait.ms", "50");
+        props.put("fetch.max.wait.ms", "50");
         connect = new EmbeddedConnectCluster.Builder()
                 .name("questdb-connect-cluster")
                 .workerProps(props)
-                .numWorkers(4)
+                // One worker: none of these tests exercise worker failover
+                // (that is ExactlyOnceIT's job) and each extra worker adds
+                // ~250ms startup and ~1s shutdown to every single test.
+                .numWorkers(1)
                 .build();
 
         connect.start();
@@ -138,13 +159,77 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @AfterEach
     public void tearDown() {
         connect.stop();
+        // Stop first so no in-flight rows recreate tables, then reclaim the disk:
+        // the class shares one QuestDB instance and it preallocates tens of MB per
+        // table, which reached ~17GB of tables over a full class run.
+        QuestDBUtils.dropAllTables(httpPort);
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testSmoke(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testRawJsonFormat(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
+        // value.format=json parses the payload itself, so the converter must hand it the raw bytes
+        props.put("value.converter", "org.apache.kafka.connect.converters.ByteArrayConverter");
+        props.put(QuestDBSinkConnectorConfig.VALUE_FORMAT_CONFIG, "json");
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "sym");
+        props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "ts");
+        props.put(QuestDBSinkConnectorConfig.TIMESTAMP_UNITS_CONFIG, "nanos");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        connect.kafka().produce(topicName, "k1",
+                "{\"sym\":\"abc\",\"px\":1.5,\"seq\":42,\"nested\":{\"inner\":7},\"ts\":1700000000000000000}");
+        connect.kafka().produce(topicName, "k2",
+                "{\"sym\":\"xyz\",\"px\":2.5,\"seq\":43,\"nested\":{\"inner\":8},\"ts\":1700000001000000000}");
+
+        QuestDBUtils.assertSqlEventually("\"sym\",\"px\",\"seq\",\"nested_inner\"\r\n"
+                        + "\"abc\",1.5,42,7\r\n"
+                        + "\"xyz\",2.5,43,8\r\n",
+                "select sym, px, seq, nested_inner from " + topicName + " order by timestamp",
+                httpPort);
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testRawJsonFormat_malformedPayloadGoesToDlq(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
+        props.put("value.converter", "org.apache.kafka.connect.converters.ByteArrayConverter");
+        props.put(QuestDBSinkConnectorConfig.VALUE_FORMAT_CONFIG, "json");
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put("errors.deadletterqueue.topic.name", "dlq");
+        props.put("errors.deadletterqueue.topic.replication.factor", "1");
+        props.put("errors.tolerance", "all");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        connect.kafka().produce(topicName, "bad", "{\"broken\":");
+        connect.kafka().produce(topicName, "good", "{\"px\":9.5}");
+
+        if (transport == ConnectTestUtils.Transport.TCP) {
+            // A malformed payload is detected part-way through building the row, and a partial
+            // row cannot be discarded over TCP - cancelRow() is illegal there - so continuing
+            // would emit a malformed line. The task must fail instead. Documented limitation.
+            ConnectTestUtils.assertConnectorTaskFailedEventually(connect);
+            return;
+        }
+
+        QuestDBUtils.assertSqlEventually("\"px\"\r\n9.5\r\n",
+                "select px from " + topicName, httpPort);
+        ConsumerRecords<byte[], byte[]> fetched = connect.kafka().consume(1, 60_000, "dlq");
+        Assertions.assertEquals(1, fetched.count(), "malformed payload should land in the DLQ");
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testSmoke(ConnectTestUtils.Transport transport) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
@@ -167,10 +252,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testTableTemplateWithKey_withSchema(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testTableTemplateWithKey_withSchema(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, "${topic}.${key}");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
@@ -205,10 +290,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testTableTemplateWithKeyAndPartition_withSchema(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testTableTemplateWithKeyAndPartition_withSchema(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 3);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, "${topic}.${key}_${partition}");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
@@ -242,10 +327,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 httpPort);
     }
 
-    @Test
-    public void testTombstoneRecordFilter() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testTombstoneRecordFilter(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
 
         // this FILTER transform is no longer needed since the connector filters out tombstone records by default
@@ -280,8 +366,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testRegexRouter(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testRegexRouter(ConnectTestUtils.Transport transport) {
         // 1. Define source topics and expected target tables
         String ordersAddTopic = "orders.add";
         String ordersModifyTopic = "orders.modify";
@@ -292,6 +378,13 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         String authTable = "auth";
         String tradesTable = "trades"; // same as topic, no change expected
 
+        // These table names are fixed (not per-run), so rows from a previous
+        // parameterized leg would accumulate in the shared QuestDB container
+        // and break the exact-match asserts. Start from a clean slate.
+        for (String table : new String[]{ordersTable, authTable, tradesTable}) {
+            QuestDBUtils.dropTableIfExists(table, httpPort);
+        }
+
         // 2. Create source Kafka topics
         connect.kafka().createTopic(ordersAddTopic, 1);
         connect.kafka().createTopic(ordersModifyTopic, 1);
@@ -300,7 +393,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
         // 3. Configure the connector
         // Use one of the topics for base props, then override 'topics'
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, ordersAddTopic, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, ordersAddTopic, transport);
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false"); // Simplify assertions
 
         // Override the topics to subscribe to all source topics
@@ -352,10 +445,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testTableTemplateWithKey_schemaless(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testTableTemplateWithKey_schemaless(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, "literal_${topic}_literal_${key}_literal");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
         props.put("value.converter.schemas.enable", "false");
@@ -376,10 +469,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testTableTemplateWithKeyAndPartition_schemaless(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testTableTemplateWithKeyAndPartition_schemaless(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 3);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, "literal_${topic}_literal_${key}_literal_${partition}");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
         props.put("value.converter.schemas.enable", "false");
@@ -400,10 +493,12 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testDeadLetterQueue_wrongJson(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDeadLetterQueue_wrongJson(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put("errors.deadletterqueue.topic.name", "dlq");
         props.put("errors.deadletterqueue.topic.replication.factor", "1");
@@ -425,10 +520,13 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         Assertions.assertEquals("{\"not valid json}", new String(dqlRecord.value()));
     }
 
-    @Test
-    public void testDeadLetterQueue_invalidTableName() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDeadLetterQueue_invalidTableName(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("errors.deadletterqueue.topic.name", "dlq");
         props.put("errors.deadletterqueue.topic.replication.factor", "1");
         props.put("errors.tolerance", "all");
@@ -456,10 +554,13 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         Assertions.assertEquals(badObjectString, new String(iterator.next().value()));
     }
 
-    @Test
-    public void testDeadLetterQueue_invalidColumnName() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDeadLetterQueue_invalidColumnName(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("errors.deadletterqueue.topic.name", "dlq");
         props.put("errors.deadletterqueue.topic.replication.factor", "1");
         props.put("errors.tolerance", "all");
@@ -486,10 +587,13 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         Assertions.assertEquals(badObjectString, new String(iterator.next().value()));
     }
 
-    @Test
-    public void testDeadLetterQueue_unsupportedType() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDeadLetterQueue_unsupportedType(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("errors.deadletterqueue.topic.name", "dlq");
         props.put("errors.deadletterqueue.topic.replication.factor", "1");
         props.put("errors.tolerance", "all");
@@ -497,8 +601,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
-        // contains array - not supported
-        String badObjectString = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":[1, 2, 3]}";
+        // contains a string array, which QuestDB does not support
+        String badObjectString = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":[\"a\", \"b\", \"c\"]}";
 
         connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
         connect.kafka().produce(topicName, "key", badObjectString);
@@ -516,10 +620,13 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         Assertions.assertEquals(badObjectString, new String(iterator.next().value()));
     }
 
-    @Test
-    public void testDeadLetterQueue_emptyTable() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDeadLetterQueue_emptyTable(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, "${key}");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
         props.put("value.converter.schemas.enable", "false");
@@ -546,10 +653,13 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         Assertions.assertEquals(emptyRecordValue, new String(iterator.next().value()));
     }
 
-    @Test
-    public void testDeadLetterQueue_badColumnType() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDeadLetterQueue_badColumnType(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put("errors.deadletterqueue.topic.name", "dlq");
         props.put("errors.deadletterqueue.topic.replication.factor", "1");
@@ -567,7 +677,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         String goodRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d042\"}";
         String goodRecordC = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d043\"}";
         String badRecordA = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"Invalid UUID\"}";
-        String badRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":\"not a number\",\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d041\"}";
+        String badRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"Also Invalid UUID\"}";
 
         // interleave good and bad records
         connect.kafka().produce(topicName, "key", goodRecordA);
@@ -591,10 +701,107 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     }
 
-    @Test
-    public void testDeadLetterQueue_sendBatchOnError() {
+    /**
+     * A burst large enough that the client publishes frames on its own cadence before the
+     * connector ever checkpoints. The rejected frame then belongs to no flush entry the
+     * connector recorded, which must still isolate the offending record instead of failing
+     * the task with an empty DLQ. Sized above the client's 1000-row auto-flush trigger.
+     */
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDeadLetterQueue_rejectionInsideAClientPublishedFrame(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
+        props.put("value.converter.schemas.enable", "false");
+        props.put("errors.deadletterqueue.topic.name", "dlq");
+        props.put("errors.deadletterqueue.topic.replication.factor", "1");
+        props.put("errors.tolerance", "all");
+        // A 5 ms quarantine ACK budget forces slower hosts to hand the unresolved span back to
+        // Connect. The awaiting span and its offset disposition must survive that redelivery.
+        props.put("qwp.quarantine.ack.timeout.ms", "5");
+
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
+                "create table " + topicName + " (id long, w long, ts timestamp) timestamp(ts) partition by day wal",
+                httpPort,
+                QuestDBUtils.Endpoint.EXEC);
+
+        // 'w' is never written by a good record, so the client holds no cached type for it
+        // and the rejection comes from the server rather than from client-side validation.
+        int total = 2000;
+        int badIndex = 5;
+        String badRecord = "{\"id\":" + badIndex + ",\"w\":\"not a number\"}";
+        for (int i = 0; i < total; i++) {
+            connect.kafka().produce(topicName, "key", i == badIndex ? badRecord : "{\"id\":" + i + "}");
+        }
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        QuestDBUtils.assertSqlEventually("\"count()\"\r\n" + (total - 1) + "\r\n",
+                "select count() from " + topicName,
+                httpPort);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        ConsumerRecords<byte[], byte[]> fetchedRecords = connect.kafka().consume(1, 120_000, "dlq");
+        Assertions.assertEquals(1, fetchedRecords.count());
+        Assertions.assertEquals(badRecord, new String(fetchedRecords.iterator().next().value()));
+    }
+
+    /**
+     * The same rejection, but with the burst still arriving while the connector runs. The
+     * records beyond the rejected checkpoint are the point: Connect holds the batch it could not
+     * deliver and keeps every partition paused until a put() returns normally, so the task has
+     * to hand that batch back the moment quarantine ends instead of refusing it again.
+     */
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDeadLetterQueue_rejectionWhileRecordsKeepArriving(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
+        props.put("value.converter.schemas.enable", "false");
+        props.put("errors.deadletterqueue.topic.name", "dlq");
+        props.put("errors.deadletterqueue.topic.replication.factor", "1");
+        props.put("errors.tolerance", "all");
+        props.put("qwp.quarantine.ack.timeout.ms", "5");
+
+        QuestDBUtils.assertSql(
+                "{\"ddl\":\"OK\"}",
+                "create table " + topicName + " (id long, w long, ts timestamp) timestamp(ts) partition by day wal",
+                httpPort,
+                QuestDBUtils.Endpoint.EXEC);
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        int total = 2000;
+        int badIndex = 5;
+        String badRecord = "{\"id\":" + badIndex + ",\"w\":\"not a number\"}";
+        for (int i = 0; i < total; i++) {
+            connect.kafka().produce(topicName, "key", i == badIndex ? badRecord : "{\"id\":" + i + "}");
+        }
+
+        QuestDBUtils.assertSqlEventually("\"count()\"\r\n" + (total - 1) + "\r\n",
+                "select count() from " + topicName,
+                httpPort);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        ConsumerRecords<byte[], byte[]> fetchedRecords = connect.kafka().consume(1, 120_000, "dlq");
+        Assertions.assertEquals(1, fetchedRecords.count());
+        Assertions.assertEquals(badRecord, new String(fetchedRecords.iterator().next().value()));
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDeadLetterQueue_sendBatchOnError(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put("errors.deadletterqueue.topic.name", "dlq");
         props.put("errors.deadletterqueue.topic.replication.factor", "1");
@@ -613,7 +820,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         String goodRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d042\"}";
         String goodRecordC = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d043\"}";
         String badRecordA = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"Invalid UUID\"}";
-        String badRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":\"not a number\",\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d041\"}";
+        String badRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"Also Invalid UUID\"}";
 
         // interleave good and bad records
         connect.kafka().produce(topicName, "key", goodRecordA);
@@ -633,10 +840,13 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 httpPort);
     }
 
-    @Test
-    public void testbadColumnType_noDLQ() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testBadColumnType_noDLQ(ConnectTestUtils.Transport transport) {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP); // TCP does not support DLQ
+
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -651,7 +861,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         String goodRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d042\"}";
         String goodRecordC = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d043\"}";
         String badRecordA = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"Invalid UUID\"}";
-        String badRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":\"not a number\",\"id\":\"ad956a45-a55b-441e-b80d-023a2bf5d041\"}";
+        String badRecordB = "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42,\"id\":\"Also Invalid UUID\"}";
 
         // interleave good and bad records
         connect.kafka().produce(topicName, "key", goodRecordA);
@@ -664,10 +874,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testSymbol(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testSymbol(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "firstname,lastname");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -693,7 +903,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testRetrying_badDataStopsTheConnectorEventually_tcp() throws Exception {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, false);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(
+                questDBContainer,
+                topicName,
+                ConnectTestUtils.Transport.TCP);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.RETRY_BACKOFF_MS, "1000");
         props.put(QuestDBSinkConnectorConfig.MAX_RETRIES, "5");
@@ -726,7 +939,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     @Test
     public void testRetrying_badDataStopsTheConnectorEventually_http() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(
+                questDBContainer,
+                topicName,
+                ConnectTestUtils.Transport.HTTP);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.RETRY_BACKOFF_MS, "1000");
         props.put(QuestDBSinkConnectorConfig.MAX_RETRIES, "5");
@@ -750,13 +966,19 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testRetrying_recoversFromInfrastructureIssues(boolean useHttp) throws Exception {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testRetrying_recoversFromInfrastructureIssues(ConnectTestUtils.Transport transport) throws Exception {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.RETRY_BACKOFF_MS, "1000");
         props.put(QuestDBSinkConnectorConfig.MAX_RETRIES, "40");
+        if (transport == ConnectTestUtils.Transport.QWP) {
+            // Keep QuestDB down past the client's local append deadline. QWP must retire the
+            // sender and rewind rather than fail the task at that deadline.
+            props.compute(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG,
+                    (key, value) -> value + "sf_append_deadline_millis=2000;");
+        }
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
@@ -774,6 +996,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
             connect.kafka().produce(topicName, "key2", "{\"firstname\":\"John\",\"lastname\":\"Doe\",\"age\":42}");
             Thread.sleep(500);
         }
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         // restart QuestDB
         questDBContainer = newQuestDbContainer();
@@ -789,11 +1012,42 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testJsonNestedLongTimestampInSeconds(boolean useHttp) {
+    @Test
+    public void testQwpOutageAtStartIsRetriedByPut() {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(
+                questDBContainer,
+                topicName,
+                ConnectTestUtils.Transport.QWP);
+        props.put("value.converter.schemas.enable", "false");
+        props.put(QuestDBSinkConnectorConfig.RETRY_BACKOFF_MS, "100");
+
+        boolean restarted = false;
+        try {
+            questDBContainer.stop();
+            connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+            connect.kafka().produce(topicName, "key", "{\"value\":42}");
+            ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+            questDBContainer = newQuestDbContainer();
+            restarted = true;
+            QuestDBUtils.assertSqlEventually("\"value\"\r\n42\r\n",
+                    "select value from " + topicName,
+                    20,
+                    httpPort);
+            ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+        } finally {
+            if (!restarted) {
+                questDBContainer = newQuestDbContainer();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testJsonNestedLongTimestampInSeconds(ConnectTestUtils.Transport transport) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "timeseriesElement_observationDateTime");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
@@ -817,10 +1071,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testEmptyCollection_wontFailTheConnector(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testEmptyCollection_wontFailTheConnector(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         // filter out all message
         props.put("transforms", "drop");
         props.put("transforms.drop.type", "org.apache.kafka.connect.transforms.Filter");
@@ -849,10 +1103,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testSymbol_withAllOtherILPTypes(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testSymbol_withAllOtherILPTypes(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "firstname");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -902,10 +1156,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testUpfrontTable_withSymbols(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testUpfrontTable_withSymbols(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "firstname,lastname");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -934,9 +1188,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 httpPort);
     }
 
-    @Test
-    public void testExactlyOnce_withDedup() throws BrokenBarrierException, InterruptedException {
-        // no parametrized since TCP transport does not support exactly-once processing
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testExactlyOnce_withDedup(ConnectTestUtils.Transport transport) throws BrokenBarrierException, InterruptedException {
+        Assumptions.assumeTrue(transport != ConnectTestUtils.Transport.TCP,
+                "TCP transport does not support exactly-once processing");
         connect.kafka().createTopic(topicName, 4);
 
         Schema schema = SchemaBuilder.struct().name("com.example.Event")
@@ -979,7 +1235,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 QuestDBUtils.Endpoint.EXEC);
 
         // start connector
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "ts");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
@@ -1021,10 +1277,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testTimestampUnitResolution_auto(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testTimestampUnitResolution_auto(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
@@ -1055,16 +1311,16 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @ParameterizedTest
     @CsvSource({
-            "seconds, true",
-            "seconds, false",
-            "millis, true",
-            "millis, false",
-            "micros, true",
-            "micros, false",
-            "nanos, true",
-            "nanos, false",
+            "seconds, HTTP",
+            "seconds, QWP",
+            "millis, HTTP",
+            "millis, QWP",
+            "micros, HTTP",
+            "micros, QWP",
+            "nanos, HTTP",
+            "nanos, QWP",
     })
-    public void testTimestampUnitResolution0(String mode, boolean useHttp) {
+    public void testTimestampUnitResolution0(String mode, ConnectTestUtils.Transport transport) {
         TimeUnit unit;
         switch (mode) {
             case "nanos":
@@ -1083,7 +1339,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 throw new IllegalArgumentException("Unknown mode: " + mode);
         }
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
         props.put(QuestDBSinkConnectorConfig.TIMESTAMP_UNITS_CONFIG, mode);
@@ -1111,9 +1367,9 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testKafkaNativeTimestampsAndExplicitDesignatedFieldTimestampMutuallyExclusive(boolean useHttp) {
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testKafkaNativeTimestampsAndExplicitDesignatedFieldTimestampMutuallyExclusive(ConnectTestUtils.Transport transport) {
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG, "true");
@@ -1126,10 +1382,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testKafkaNativeTimestamp(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testKafkaNativeTimestamp(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_KAFKA_NATIVE_CONFIG, "true");
 
@@ -1162,10 +1418,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testTimestampSMT_parseTimestamp_schemaLess(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testTimestampSMT_parseTimestamp_schemaLess(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
@@ -1207,10 +1463,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testTimestampSMT_parseTimestamp_withSchema(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testTimestampSMT_parseTimestamp_withSchema(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
 
@@ -1251,10 +1507,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testUpfrontTable(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testUpfrontTable(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
@@ -1282,10 +1538,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 httpPort);
     }
 
-    @Test
-    public void testContentBasedRouting_extractFromValueStruct() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testContentBasedRouting_extractFromValueStruct(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("transforms", "route");
         props.put("transforms.route.type", "io.github.rerorero.kafka.smt.PayloadBasisRouter$Value");
         props.put("transforms.route.replacement", topicName + "-{$.firstname}");
@@ -1321,10 +1578,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 httpPort);
     }
 
-    @Test
-    public void testContentBasedRouting_extractFromKey() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testContentBasedRouting_extractFromKey(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(KEY_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put("key.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
@@ -1364,10 +1622,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testDesignatedTimestamp_noSchema_unixEpochMillis(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDesignatedTimestamp_noSchema_unixEpochMillis(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
@@ -1382,10 +1640,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testDesignatedTimestamp_noSchema_dateTransform_fromStringToTimestamp(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDesignatedTimestamp_noSchema_dateTransform_fromStringToTimestamp(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put("transforms", "convert_birth");
         props.put("transforms.convert_birth.type", "org.apache.kafka.connect.transforms.TimestampConverter$Value");
@@ -1405,10 +1663,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testDesignatedTimestamp_withSchema(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDesignatedTimestamp_withSchema(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -1439,10 +1697,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testDoNotIncludeKey(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDoNotIncludeKey(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
@@ -1473,10 +1731,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 httpPort);
     }
 
-    @Test
-    public void testExtractKafkaIngestionTimestampAsField_designated() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testExtractKafkaIngestionTimestampAsField_designated(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "birth"); // the field is injected via InsertField SMT
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
         props.put("transforms", "InsertField");
@@ -1512,10 +1771,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
                 httpPort);
     }
 
-    @Test
-    public void testExtractKafkaIngestionTimestampAsField_nondesignated_schemaless() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testExtractKafkaIngestionTimestampAsField_nondesignated_schemaless(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
         props.put("value.converter.schemas.enable", "false");
         props.put("transforms", "InsertField,TimestampConverter");
@@ -1556,10 +1816,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testJsonNoSchema(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testJsonNoSchema(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -1572,10 +1832,29 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testJsonNoSchema_mixedFlotingAndIntTypes(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testIllegalColumnNameOnEmptyContainersIsIgnored(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
+        props.put("value.converter.schemas.enable", "false");
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        connect.kafka().produce(topicName, "key", "{\"firstname\":\"John\",\"meta-data\":{}}");
+        connect.kafka().produce(topicName, "key", "{\"firstname\":\"Jane\",\"meta-data\":[]}");
+
+        QuestDBUtils.assertSqlEventually("\"firstname\"\r\n"
+                        + "\"John\"\r\n"
+                        + "\"Jane\"\r\n",
+                "select firstname from " + topicName,
+                httpPort);
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testJsonNoSchema_mixedFlotingAndIntTypes(ConnectTestUtils.Transport transport) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DOUBLE_COLUMNS_CONFIG, "age");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
@@ -1592,8 +1871,8 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testJsonNoSchema_intArraySendAsDoubleArray(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testJsonNoSchema_intArraySendAsDoubleArray(ConnectTestUtils.Transport transport) {
         // In schema-less mode, we have to be lenient with array element types.
         // Since floating point numbers without any actual decimal point are
         // instantiated as integers by Kafka Connect.
@@ -1605,7 +1884,7 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
 
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -1618,10 +1897,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testPrimitiveKey(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testPrimitiveKey(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
@@ -1644,10 +1923,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testParsingStringTimestamp_designatedTimestampNotListedExplicitly(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testParsingStringTimestamp_designatedTimestampNotListedExplicitly(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
@@ -1676,10 +1955,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testParsingStringTimestamp(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testParsingStringTimestamp(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
@@ -1711,10 +1990,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testParsingStringTimestamp_defaultPattern(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testParsingStringTimestamp_defaultPattern(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "born");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
@@ -1745,10 +2024,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testCustomPrefixWithPrimitiveKeyAndValues(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testCustomPrefixWithPrimitiveKeyAndValues(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(KEY_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
         props.put(VALUE_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
         props.put(QuestDBSinkConnectorConfig.KEY_PREFIX_CONFIG, "col_key");
@@ -1766,23 +2045,23 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testSkipUnsupportedType_Bytes(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testSkipUnsupportedType_BytesWithIllegalColumnName(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.SKIP_UNSUPPORTED_TYPES_CONFIG, "true");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
         Schema schema = SchemaBuilder.struct().name("com.example.Person")
                 .field("firstname", Schema.STRING_SCHEMA)
                 .field("lastname", Schema.STRING_SCHEMA)
-                .field("age", Schema.BYTES_SCHEMA)
+                .field("meta-data", Schema.BYTES_SCHEMA)
                 .build();
 
         Struct struct = new Struct(schema)
                 .put("firstname", "John")
                 .put("lastname", "Doe")
-                .put("age", new byte[]{1, 2, 3});
+                .put("meta-data", new byte[]{1, 2, 3});
 
         connect.kafka().produce(topicName, "key", new String(converter.fromConnectData(topicName, schema, struct)));
 
@@ -1793,10 +2072,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testDefaultPrefixWithPrimitiveKeyAndValues(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDefaultPrefixWithPrimitiveKeyAndValues(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(KEY_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
         props.put(VALUE_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
 
@@ -1812,10 +2091,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testStructKey(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testStructKey(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         //overrider the convertor from String to Json
         props.put(KEY_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
@@ -1839,10 +2118,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testStructKeyWithNoPrefix(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testStructKeyWithNoPrefix(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         //overrider the convertor from String to Json
         props.put(KEY_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put(VALUE_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
@@ -1868,10 +2147,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testStructKeyAndPrimitiveValue(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testStructKeyAndPrimitiveValue(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         //overrider the convertor from String to Json
         props.put(KEY_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put(VALUE_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
@@ -1897,11 +2176,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testExplicitTableName(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testExplicitTableName(ConnectTestUtils.Transport transport) {
         String tableName = ConnectTestUtils.newTableName();
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, tableName);
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -1925,10 +2204,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testLogicalTypes(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testLogicalTypes(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -1976,10 +2255,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testDecimalTypeNotSupported(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testDecimalTypeNotSupported(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -2002,10 +2281,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testNestedStructInValue(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testNestedStructInValue(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -2035,10 +2314,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testMultiLevelNestedStructInValue(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testMultiLevelNestedStructInValue(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, topicName);
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -2079,10 +2358,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testFloat32ArraySupport(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testFloat32ArraySupport(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -2110,10 +2389,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testFloat64ArraySupport(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testFloat64ArraySupport(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "devices");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
@@ -2141,10 +2420,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testSchemalessFloatArraySupport() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testSchemalessFloatArraySupport(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -2161,10 +2441,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testSchemalessFloatArraySupport_floatFollowedByInt() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testSchemalessFloatArraySupport_floatFollowedByInt(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -2181,10 +2462,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testSchemalessFloatArraySupport_intFollowedByFloat() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testSchemalessFloatArraySupport_intFollowedByFloat(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -2202,10 +2484,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
 
-    @Test
-    public void testIntegerArrayRejection() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testIntegerArrayRejection(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put("errors.tolerance", "none");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
@@ -2230,10 +2513,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testNestedStructWithArray(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testNestedStructWithArray(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -2267,10 +2550,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testArrayWithSkipUnsupportedTypes() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testArrayWithSkipUnsupportedTypes(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("skip.unsupported.types", "true");
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
@@ -2300,10 +2584,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void test2DDoubleArraySupport(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void test2DDoubleArraySupport(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -2336,10 +2620,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testOrderBookToArraySMT(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testOrderBookToArraySMT(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
 
         // Configure the OrderBookToArray SMT
@@ -2386,10 +2670,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testOrderBookToArraySMT_schemaless() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testOrderBookToArraySMT_schemaless(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
 
         // Configure the OrderBookToArray SMT
@@ -2418,10 +2703,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void test3DDoubleArraySupport(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void test3DDoubleArraySupport(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -2454,10 +2739,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testSchemaless2DArraySupport() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testSchemaless2DArraySupport(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -2474,10 +2760,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testSchemaless3DArraySupport() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testSchemaless3DArraySupport(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -2495,10 +2782,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void test2DFloatArraySupport(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void test2DFloatArraySupport(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
@@ -2530,10 +2817,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testJaggedArrayRejection() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testJaggedArrayRejection(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put("errors.tolerance", "none");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
@@ -2547,10 +2835,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void test2DArrayWithSymbolColumns(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void test2DArrayWithSymbolColumns(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "sensor_id");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
@@ -2584,10 +2872,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void test3DArrayWithSymbolColumns(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void test3DArrayWithSymbolColumns(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put(QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG, "device_id");
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
@@ -2621,10 +2909,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testOrderBookToArraySMT_intAndFloatCoercion() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testOrderBookToArraySMT_intAndFloatCoercion(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put("transforms", "orderbook");
         props.put("transforms.orderbook.type", "io.questdb.kafka.OrderBookToArray$Value");
@@ -2659,10 +2948,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testOrderBookToArraySMT_missingSourceField() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testOrderBookToArraySMT_missingSourceField(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put("transforms", "orderbook");
         props.put("transforms.orderbook.type", "io.questdb.kafka.OrderBookToArray$Value");
@@ -2698,10 +2988,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testOrderBookToArraySMT_emptySourceArray() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testOrderBookToArraySMT_emptySourceArray(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put("transforms", "orderbook");
         props.put("transforms.orderbook.type", "io.questdb.kafka.OrderBookToArray$Value");
@@ -2754,10 +3045,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         ConnectTestUtils.assertConnectorTaskFailedEventually(connect);
     }
 
-    @Test
-    public void testOrderBookToArraySMT_targetCollidesWithExisting() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testOrderBookToArraySMT_targetCollidesWithExisting(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put("transforms", "orderbook");
         props.put("transforms.orderbook.type", "io.questdb.kafka.OrderBookToArray$Value");
@@ -2795,10 +3087,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testMarketData_orderBookToArray_withTimestamp_schemaless() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testMarketData_orderBookToArray_withTimestamp_schemaless(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "received_at");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
@@ -2867,10 +3160,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testMarketData_orderBookToArray_stringEncodedPrices_schemaless() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testMarketData_orderBookToArray_stringEncodedPrices_schemaless(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "received_at");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
@@ -2928,10 +3222,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testComposedTimestamp_schemaless(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testComposedTimestamp_schemaless(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "date,time");
@@ -2960,10 +3254,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testComposedTimestamp_withSchema(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testComposedTimestamp_withSchema(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "date,time");
         props.put(QuestDBSinkConnectorConfig.TIMESTAMP_FORMAT, "yyyyMMddHHmmssSSS");
@@ -3045,10 +3339,10 @@ public final class QuestDBSinkConnectorEmbeddedTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    public void testStructArrayExplodeSMT(boolean useHttp) {
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testStructArrayExplodeSMT(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, useHttp);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
 
         props.put("transforms", "explode");
@@ -3094,10 +3388,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testStructArrayExplodeSMT_schemaless() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testStructArrayExplodeSMT_schemaless(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
 
         props.put("transforms", "explode");
@@ -3121,10 +3416,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testStructArrayExplodeSMT_intAndFloatCoercion() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testStructArrayExplodeSMT_intAndFloatCoercion(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put("transforms", "explode");
         props.put("transforms.explode.type", "io.questdb.kafka.StructArrayExplode$Value");
@@ -3159,10 +3455,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testStructArrayExplodeSMT_missingSourceField() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testStructArrayExplodeSMT_missingSourceField(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put("transforms", "explode");
         props.put("transforms.explode.type", "io.questdb.kafka.StructArrayExplode$Value");
@@ -3199,10 +3496,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testStructArrayExplodeSMT_emptySourceArray() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testStructArrayExplodeSMT_emptySourceArray(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put("transforms", "explode");
         props.put("transforms.explode.type", "io.questdb.kafka.StructArrayExplode$Value");
@@ -3255,10 +3553,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         ConnectTestUtils.assertConnectorTaskFailedEventually(connect);
     }
 
-    @Test
-    public void testStructArrayExplodeSMT_targetCollidesWithExisting() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testStructArrayExplodeSMT_targetCollidesWithExisting(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
         props.put("transforms", "explode");
         props.put("transforms.explode.type", "io.questdb.kafka.StructArrayExplode$Value");
@@ -3296,10 +3595,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testStructArrayExplodeSMT_stringEncodedValues() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testStructArrayExplodeSMT_stringEncodedValues(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
 
         props.put("transforms", "explode");
@@ -3324,10 +3624,11 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         );
     }
 
-    @Test
-    public void testMarketData_structArrayExplode_withTimestamp_schemaless() {
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testMarketData_structArrayExplode_withTimestamp_schemaless(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
-        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, true);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
         props.put(QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG, "received_at");
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");

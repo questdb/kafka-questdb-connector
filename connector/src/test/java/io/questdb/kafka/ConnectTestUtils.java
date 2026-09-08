@@ -42,7 +42,25 @@ public final class ConnectTestUtils {
         Awaitility.await().atMost(CONNECTOR_START_TIMEOUT_MS, MILLISECONDS).untilAsserted(() -> assertConnectorTaskState(connect, CONNECTOR_NAME, expectedState));
     }
 
+    enum Transport {
+        HTTP, TCP, QWP
+    }
+
+    static java.util.stream.Stream<Transport> defaultTransports() {
+        String override = System.getProperty("questdb.test.transports");
+        if (override == null || override.trim().isEmpty()) {
+            return java.util.stream.Stream.of(Transport.HTTP, Transport.QWP, Transport.TCP);
+        }
+        return java.util.Arrays.stream(override.split(","))
+                .map(String::trim)
+                .map(Transport::valueOf);
+    }
+
     static Map<String, String> baseConnectorProps(GenericContainer<?> questDBContainer, String topicName, boolean useHttp) {
+        return baseConnectorProps(questDBContainer, topicName, useHttp ? Transport.HTTP : Transport.TCP);
+    }
+
+    static Map<String, String> baseConnectorProps(GenericContainer<?> questDBContainer, String topicName, Transport transport) {
         String host = questDBContainer.getHost();
 
         Map<String, String> props = new HashMap<>();
@@ -50,17 +68,26 @@ public final class ConnectTestUtils {
         props.put("topics", topicName);
         props.put(KEY_CONVERTER_CLASS_CONFIG, StringConverter.class.getName());
         props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        // Tests write tiny batches; the default 1s allowed.lag would delay the
+        // timer-driven flush (and thus every visibility assert) by ~1s.
+        props.put(QuestDBSinkConnectorConfig.ALLOWED_LAG_CONFIG, "100");
 
         String confString;
-        if (useHttp) {
-            int port = questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT);
-            confString = "http::addr=" + host + ":" + port + ";";
-            props.put("client.conf.string", confString);
-        } else {
-            int port = questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT);
-            confString = "tcp::addr=" + host + ":" + port + ";protocol_version=2;";
-            props.put("client.conf.string", confString);
+        switch (transport) {
+            case HTTP:
+                confString = "http::addr=" + host + ":" + questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT) + ";";
+                break;
+            case TCP:
+                confString = "tcp::addr=" + host + ":" + questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_ILP_PORT) + ";protocol_version=2;";
+                break;
+            case QWP:
+                // QWP is WebSocket over the HTTP port
+                confString = "ws::addr=" + host + ":" + questDBContainer.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT) + ";";
+                break;
+            default:
+                throw new IllegalArgumentException("Unknown transport: " + transport);
         }
+        props.put("client.conf.string", confString);
         return props;
     }
 
@@ -77,9 +104,26 @@ public final class ConnectTestUtils {
         }
         for (ConnectorStateInfo.TaskState taskState : taskStates) {
             if (!Objects.equals(taskState.state(), expectedState.toString())) {
-                fail("Task " + taskState.id() + " for connector " + connectorName + " is in state " + taskState.state() + " but expected " + expectedState);
+                fail("Task " + taskState.id() + " for connector " + connectorName + " is in state " + taskState.state()
+                        + " but expected " + expectedState + ". Trace: " + singleLine(taskState.trace()));
             }
         }
+    }
+
+    /**
+     * A task trace is a full stack trace. Embedding one in a failure message corrupts
+     * surefire's fork channel ("Corrupted channel by directly writing to native stream"),
+     * and a corrupted channel loses every result for the class: the run then reports
+     * "Tests run: 0" and the build goes GREEN despite a genuine failure. Measured on this
+     * suite: a ~2000 char trace corrupts, 300 does not. The head of the trace is also the
+     * useful part - exception type, message, and the frame that threw.
+     */
+    private static String singleLine(String trace) {
+        if (trace == null || trace.isEmpty()) {
+            return "<no trace>";
+        }
+        String flattened = trace.replaceAll("\\R+", " | ").replace('\t', ' ');
+        return flattened.length() <= 300 ? flattened : flattened.substring(0, 300) + " ...(truncated)";
     }
 
     static String newTopicName() {

@@ -24,6 +24,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.MountableFile;
 
+import java.util.HashMap;
 import java.util.Map;
 
 import static java.util.Collections.singletonMap;
@@ -79,8 +80,13 @@ public class QuestDBSinkConnectorEmbeddedAuthTest {
         jsonConverter.configure(singletonMap(ConverterConfig.TYPE_CONFIG, ConverterType.VALUE.getName()));
         converter = jsonConverter;
 
+        // The third-party test SMT (PayloadBasisRouter) ships no ServiceLoader
+        // manifest, so the strict service_load discovery cannot be used here.
+        Map<String, String> workerProps = new HashMap<>();
+        workerProps.put("plugin.discovery", "hybrid_warn");
         connect = new EmbeddedConnectCluster.Builder()
                 .name("questdb-connect-cluster")
+                .workerProps(workerProps)
                 .build();
 
         connect.start();

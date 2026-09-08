@@ -1116,12 +1116,12 @@ public class TimestampFormatCompilerTest {
 
     @Test
     public void testTimeZone4() {
-        assertThat("dd-MM-yy HH:m z", "2010-09-03T21:01:00.000Z", "03-09-10 23:01 Hora de verano de Sudáfrica", "es-PA");
+        assertThat("dd-MM-yy HH:m z", "2010-09-03T21:01:00.000Z", "03-09-10 23:01 " + localizedDstName(), "es-PA");
     }
 
     @Test
     public void testTimeZone5() {
-        assertThat("dd-MM-yy HH:m [z]", "2010-09-03T21:01:00.000Z", "03-09-10 23:01 [Hora de verano de Sudáfrica]", "es-PA");
+        assertThat("dd-MM-yy HH:m [z]", "2010-09-03T21:01:00.000Z", "03-09-10 23:01 [" + localizedDstName() + "]", "es-PA");
     }
 
     @Test
@@ -1234,6 +1234,18 @@ public class TimestampFormatCompilerTest {
         sink.clear();
         REFERENCE.format(compiler.compile(pattern).parse(input, defaultLocale), defaultLocale, "Z", sink);
         assertEquals(expected, sink.toString());
+    }
+
+    /**
+     * Long localized DST name of a UTC+2 zone, read from the JDK rather than
+     * hard-coded: the CLDR spelling changes between JDK releases (JDK 17 says
+     * "Hora de verano de Sudáfrica", JDK 25 says "hora de verano de
+     * Johannesburgo"). The parsed offset is what this test is about, and that
+     * is +2 either way.
+     */
+    private static String localizedDstName() {
+        return java.util.TimeZone.getTimeZone("Africa/Johannesburg")
+                .getDisplayName(true, java.util.TimeZone.LONG, Locale.forLanguageTag("es-PA"));
     }
 
     private void assertThat(String pattern, String expected, String input) throws NumericException {
