@@ -133,6 +133,15 @@ jobs:
       RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
       RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
     steps:
+      - name: Validate release credentials
+        env:
+          MAVEN_RELEASE_GITHUB_APP_PRIVATE_KEY: ${{ secrets.MAVEN_RELEASE_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          if [[ -z "${MAVEN_RELEASE_GITHUB_APP_PRIVATE_KEY}" ]]; then
+            echo "::error::Environment secret MAVEN_RELEASE_GITHUB_APP_PRIVATE_KEY is required. See the header of this workflow."
+            exit 1
+          fi
+
       - name: Check out release source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -177,15 +186,6 @@ jobs:
           path: connector/target/kafka-questdb-connector-${{ env.RELEASE_VERSION }}-bin.zip
           if-no-files-found: error
           retention-days: 7
-
-      - name: Validate release credentials
-        env:
-          MAVEN_RELEASE_GITHUB_APP_PRIVATE_KEY: ${{ secrets.MAVEN_RELEASE_GITHUB_APP_PRIVATE_KEY }}
-        run: |
-          if [[ -z "${MAVEN_RELEASE_GITHUB_APP_PRIVATE_KEY}" ]]; then
-            echo "::error::Environment secret MAVEN_RELEASE_GITHUB_APP_PRIVATE_KEY is required. See the header of this workflow."
-            exit 1
-          fi
 
       - name: Create release GitHub App token
         id: release-app-token
