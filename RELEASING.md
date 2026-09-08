@@ -8,8 +8,8 @@ the workflow is built around that.
 
 1. Make sure `main` is green and the root `pom.xml` is at the version you want
    to release, with a `-SNAPSHOT` suffix (for example `0.24-SNAPSHOT` releases
-   `v0.24`). Override the version in the workflow inputs only for a hotfix
-   branch or an unusual jump.
+   `v0.24`). The workflow always releases `main`; use the version override only
+   for an unusual version jump.
 2. Open **Actions → Release → Run workflow** on `main`.
 3. Wait for the run to finish, roughly 15 minutes. The workflow:
    - sets the release version in all POMs, commits `Release vX.Y` on a
@@ -28,10 +28,13 @@ the workflow is built around that.
 6. Publish the connector on Confluent Hub as before; that step is manual and
    outside this workflow.
 
-If the run fails before the tag is pushed nothing has happened and the run can
-simply be retried. If the tag was pushed but the draft release could not be
-created, or the run was cancelled or timed out at that point, the workflow deletes the draft release, if one was created at all, and
-then the tag, so the run can be retried.
+If the run fails before the tag is pushed, nothing has happened and the run can
+simply be retried. If the run is cancelled while the push is in flight, the
+workflow removes the tag only when its object ID matches the tag created by that
+run and no GitHub release exists. If a draft or published release exists, or if
+the workflow cannot inspect the release or prove tag ownership, it preserves
+both for manual inspection instead of risking destructive cleanup. Delete a
+preserved draft and tag manually before retrying.
 
 ## One-time setup
 
