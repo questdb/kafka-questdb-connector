@@ -30,7 +30,8 @@ the workflow is built around that.
 
 If the run fails before the tag is pushed nothing has happened and the run can
 simply be retried. If the tag was pushed but the draft release could not be
-created, the workflow deletes the tag again so the run can be retried.
+created, the workflow deletes the draft release, if one was created at all, and
+then the tag, so the run can be retried.
 
 ## One-time setup
 
@@ -44,7 +45,14 @@ so the workflow uses the app token for the tag, the release and the bump PR.
   **Pull requests: read/write**.
 - Repository variable `MAVEN_RELEASE_GITHUB_APP_CLIENT_ID`: the app's client ID.
 - Environment `maven-release`, secret `MAVEN_RELEASE_GITHUB_APP_PRIVATE_KEY`:
-  the app's private key. Add required reviewers to the environment if you
-  want a manual approval gate; it sits before the build and the tag push.
+  the app's private key. Adding required reviewers to the environment gives you
+  a manual approval gate, but be aware that two jobs use the environment, so
+  GitHub asks for approval **twice**: once before the build and the tag push,
+  and once more at the very end, before the bump pull request is opened. The
+  second prompt arrives after the tag and the draft release already exist, so
+  the run looks stuck on a release that has in fact succeeded. If that second
+  approval expires, no bump pull request is opened and the next release stops
+  at the "tag already exists" guard; open the bump pull request by hand in that
+  case.
 
 Never add a bypass for `main`; the bump goes through a pull request on purpose.

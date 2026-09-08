@@ -243,9 +243,24 @@ jobs:
             "connector/target/kafka-questdb-connector-${RELEASE_VERSION}-bin.zip"
           echo "::notice::Draft release ${RELEASE_TAG} created. Edit the notes and publish it: ${{ github.server_url }}/${{ github.repository }}/releases"
 
-      - name: Roll back the tag if the release could not be created
+      - name: Roll back the tag and draft release if the release could not be created
         if: failure() && steps.tag.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
         run: |
+          # `gh release create --draft` does not clean up after itself: it creates
+          # the release first and uploads the zip second, and its own cleanup only
+          # runs for non-draft releases. A failed upload therefore leaves an
+          # assetless draft behind, and GitHub allows a second draft on the same
+          # tag, so a retry would produce two drafts and the wrong one could be
+          # published. Delete the release first, then the tag.
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            if gh release delete "${RELEASE_TAG}" --yes; then
+              echo "Deleted draft release ${RELEASE_TAG}."
+            else
+              echo "::warning::Could not delete draft release ${RELEASE_TAG}. Delete it manually before retrying."
+            fi
+          fi
           if git push origin ":refs/tags/${RELEASE_TAG}"; then
             echo "Deleted tag ${RELEASE_TAG}; the run can be retried."
           else
