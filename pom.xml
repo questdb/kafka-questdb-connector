@@ -129,34 +129,14 @@
                     <artifactId>maven-assembly-plugin</artifactId>
                     <version>2.5.3</version>
                 </plugin>
-                <plugin>
-                    <groupId>org.apache.maven.plugins</groupId>
-                    <artifactId>maven-release-plugin</artifactId>
-                    <version>2.5.3</version>
-                    <configuration>
-                        <useReleaseProfile>false</useReleaseProfile>
-                        <tagNameFormat>v@{project.version}</tagNameFormat>
-                        <allowTimestampedSnapshots>true</allowTimestampedSnapshots>
-                    </configuration>
-                </plugin>
             </plugins>
         </pluginManagement>
     </build>
-
-    <profiles>
-        <profile>
-            <id>release</id>
-            <modules>
-                <module>connector</module>
-            </modules>
-        </profile>
-    </profiles>
 
     <scm>
         <connection>scm:git:https://github.com/questdb/kafka-questdb-connector.git</connection>
         <developerConnection>scm:git:https://github.com/questdb/kafka-questdb-connector.git</developerConnection>
         <url>https://github.com/questdb/kafka-questdb-connector</url>
-        <tag>HEAD</tag>
     </scm>
 
     <licenses>
