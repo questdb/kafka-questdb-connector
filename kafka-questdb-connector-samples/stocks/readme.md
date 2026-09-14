@@ -19,12 +19,12 @@ Bear in mind the sample starts multiple containers. It's running fine on my mach
 1. Clone this repository via `git clone https://github.com/questdb/kafka-questdb-connector.git`
 2. `cd kafka-questdb-connector/kafka-questdb-connector-samples/stocks/` to enter the directory with this sample.
 3. Run `docker compose build` to build docker images with the sample project. This will take a few minutes.
-4. Run `docker compose up` to start Postgres, Java stock price updater app, Apache Kafka, Kafka Connect with Debezium and QuestDB connectors, QuestDB and Grafana. This will take a few minutes.
+4. Run `docker compose up` to start Postgres, Java stock price updater app, Apache Kafka, Kafka Connect with the Debezium and QuestDB connectors, QuestDB and Grafana. This will take a few minutes.
 5. The previous command will generate a lot of log messages. Eventually logging should cease. This means all containers are running. 
 6. At this point we have all infrastructure running, the Java application keeps updating stock prices in Postgres. However, the rest of the pipeline is not yet running. We need to start the Kafka Connect connectors. Kafka Connect has a REST API, so we can use `curl` to start the connectors.
 7. In a separate shell, execute following command to start Debezium connector:
     ```shell
-    curl -X POST -H "Content-Type: application/json" -d  '{"name":"debezium_source","config":{"tasks.max":1,"database.hostname":"postgres","database.port":5432,"database.user":"postgres","database.password":"postgres","connector.class":"io.debezium.connector.postgresql.PostgresConnector","database.dbname":"postgres","topic.prefix":"dbserver1"}} ' localhost:8083/connectors
+    curl -X POST -H "Content-Type: application/json" -d  '{"name":"debezium_source","config":{"tasks.max":1,"database.hostname":"postgres","database.port":5432,"database.user":"postgres","database.password":"postgres","connector.class":"io.debezium.connector.postgresql.PostgresConnector","database.dbname":"postgres","plugin.name":"pgoutput","topic.prefix":"dbserver1"}} ' localhost:8083/connectors
     ```
    It starts the Debezium connector that will capture changes from Postgres and feed them to Kafka.
 8. Execute following command to start QuestDB Kafka Connect sink:
@@ -64,7 +64,12 @@ If you like what you see and want to learn more about the internals of the proje
 6. Grafana
 
 ### Postgres
-The docker compose start Postgres image. It's using a container image provided by the Debezium project as they maintain a Postgres which is preconfigured for Debezium. 
+The docker compose starts the [official Postgres container image](https://hub.docker.com/_/postgres). The only Debezium-specific bit is that Postgres must run with `wal_level=logical`, so that Debezium can read changes from its write-ahead log. This is set via the container command in the [docker-compose file](docker-compose.yml):
+```yaml
+  postgres:
+    image: postgres:18
+    command: postgres -c wal_level=logical
+```
 
 ### Java stock price updater
 It's a Spring Boot application which during startup creates a table in Postgres and populates it with initial data.  
@@ -73,40 +78,64 @@ You can see the SQL executed in the [schema.sql](src/main/resources/schema.sql) 
 Once the application is started, it starts updating stock prices in regular intervals. The `price` and `last_update` columns are updated every time a new price is received for the stock symbol. It mimics a real-world scenario where you would have a Postgres table with the latest prices for each stock symbol. Such table would be typically used by a transactional system to get the latest prices for each stock symbol. It our case the transactional system is simulated by a [simple Java application](src/main/java/io/questdb/kafka/samples/StockService.java) which is randomly updating prices for each stock symbol in the Postgres table. The application generates 1000s of updates each second.
 
 The application is built and packaged as a container image when executing `docker compose build`. Inside the [docker-compose file](docker-compose.yml) you can see the container called `producer`. That's our Java application.
-```Dockerfile
+```yaml
   producer:
     image: kafka-questdb-connector-samples-stocks-generator
     build:
-      dockerfile: ./Dockerfile
+      dockerfile: Dockerfile-App
       context: .
     depends_on:
       postgres:
         condition: service_healthy
-    links:
-      - postgres:postgres
 ```
-The Dockefile is rather trivial:
+The [Dockerfile](Dockerfile-App) is rather trivial:
 ```Dockerfile
-FROM maven:3.9-eclipse-temurin-17 AS builder
+FROM maven:3.9-eclipse-temurin-21 AS builder
 COPY ./pom.xml /opt/stocks/pom.xml
 COPY ./src ./opt/stocks/src
 WORKDIR /opt/stocks
 RUN mvn clean install -DskipTests
 
-FROM eclipse-temurin:17-jre
+FROM eclipse-temurin:21-jre
 COPY --from=builder /opt/stocks/target/kafka-samples-stocks-*.jar /stocks.jar
 CMD ["java", "-jar", "/stocks.jar"]
 ```
-It uses Maven to build the application and then copies the resulting JAR file to the container image. The container image is based on Eclipse Temurin JDK 17. The application is started with `java -jar /stocks.jar` command.
+It uses Maven to build the application and then copies the resulting JAR file to the container image. The container image is based on Eclipse Temurin JRE 21. The application is started with `java -jar /stocks.jar` command.
 
 ### Debezium Postgres connector
 Debezium is an open source project which provides connectors for various databases. It is used to capture changes from a database and feed them to a Kafka topic. In other words: Whenever there is a change in a database table, Debezium will read the change and feed it to a Kafka topic. This way it translates operations such as INSERT or UPDATE into events which can be consumed by other systems. Debezium supports a wide range of databases. In this sample we use the Postgres connector.
 
-The Debezium Postgres connector is implemented as a Kafka Connect source connector. Inside the [docker-compose file](docker-compose.yml) it's called `connect` and its container image is also built during `docker compose build`. The [Dockerfile](../../Dockerfile-Samples) uses Debezium image. The Debezium image contains Kafka Connect runtime and Debezium connectors. Our Dockerfile amends it with Kafka Connect QuestDB Sink. 
+The Debezium Postgres connector is implemented as a Kafka Connect source connector. Inside the [docker-compose file](docker-compose.yml) it's called `connect` and its container image is also built during `docker compose build`. The [Dockerfile](Dockerfile-Connect) starts from the [official Apache Kafka image](https://hub.docker.com/r/apache/kafka), which already contains the Kafka Connect runtime. It downloads the Debezium Postgres connector and the QuestDB connector into the `/opt/kafka/plugins` directory and starts Kafka Connect in distributed mode:
+```Dockerfile
+# Kafka Connect worker built from the official Apache Kafka image.
+# The image ships the Connect runtime; we only add the two connector plugins.
+FROM apache/kafka:4.3.1
+
+# The QuestDB client bundles a small native library built against glibc.
+# The Kafka image is Alpine (musl) based, so add the glibc compatibility layer.
+USER root
+RUN apk add --no-cache gcompat libstdc++
+USER appuser
+
+ARG DEBEZIUM_VERSION=3.6.2.Final
+WORKDIR /opt/kafka/plugins
+
+# Debezium Postgres source connector (Postgres -> Kafka)
+RUN wget -qO- https://repo1.maven.org/maven2/io/debezium/debezium-connector-postgres/${DEBEZIUM_VERSION}/debezium-connector-postgres-${DEBEZIUM_VERSION}-plugin.tar.gz | tar xz
+
+# QuestDB sink connector (Kafka -> QuestDB), latest release
+RUN wget -q $(wget -qO- https://api.github.com/repos/questdb/kafka-questdb-connector/releases/latest | grep -o 'https://[^"]*-bin.zip') \
+    && unzip -q kafka-questdb-connector-*-bin.zip \
+    && rm kafka-questdb-connector-*-bin.zip
+
+COPY connect-distributed.properties /opt/kafka/config/connect-distributed.properties
+CMD ["/opt/kafka/bin/connect-distributed.sh", "/opt/kafka/config/connect-distributed.properties"]
+```
+The Kafka Connect worker itself is configured in [connect-distributed.properties](connect-distributed.properties). It tells the worker where the Kafka broker is, where to look for connector plugins and which Kafka topics to use for its own bookkeeping. 
 
 What's important: When this container start it just connects to Kafka broker, but it does not start any connectors. We need to start the connectors using `curl` command. This is how we started the Debezium connector:
 ```shell
-curl -X POST -H "Content-Type: application/json" -d  '{"name":"debezium_source","config":{"tasks.max":1,"database.hostname":"postgres","database.port":5432,"database.user":"postgres","database.password":"postgres","connector.class":"io.debezium.connector.postgresql.PostgresConnector","database.dbname":"postgres","topic.prefix":"dbserver1"}} ' localhost:8083/connectors
+curl -X POST -H "Content-Type: application/json" -d  '{"name":"debezium_source","config":{"tasks.max":1,"database.hostname":"postgres","database.port":5432,"database.user":"postgres","database.password":"postgres","connector.class":"io.debezium.connector.postgresql.PostgresConnector","database.dbname":"postgres","plugin.name":"pgoutput","topic.prefix":"dbserver1"}} ' localhost:8083/connectors
 ```
 It uses Kafka Connect REST interface to start a new connector with a given configuration. Let's have a closer look at the configuration. This is how it looks like when formatted for readability:
 ```json
@@ -120,11 +149,12 @@ It uses Kafka Connect REST interface to start a new connector with a given confi
     "database.password": "postgres",
     "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
     "database.dbname": "postgres",
+    "plugin.name": "pgoutput",
     "topic.prefix": "dbserver1"
   }
 }
 ```
-Most of the fields are self-explanatory. The only non-obvious one is `topic.prefix`. It's used by Debezium to generate Kafka topic names. The topic name is generated as `topic.prefix`.`schema`.`table`. In our case it's `dbserver1.public.stock`. It's important that it's unique for each database server. If you have multiple Postgres databases, you need to use different `topic.prefix` for each of them.
+Most of the fields are self-explanatory. `plugin.name` selects the Postgres logical decoding plugin. `pgoutput` is built into Postgres, so no extra extension has to be installed. The other non-obvious one is `topic.prefix`. It's used by Debezium to generate Kafka topic names. The topic name is generated as `topic.prefix`.`schema`.`table`. In our case it's `dbserver1.public.stock`. It's important that it's unique for each database server. If you have multiple Postgres databases, you need to use different `topic.prefix` for each of them.
 
 ### Kafka QuestDB connector
 The Kafka QuestDB connector re-uses the same Kafka Connect runtime as the Debezium connector. It's also started using `curl` command. This is how we started the QuestDB connector:
@@ -172,7 +202,7 @@ Let's focus on the ExtractNewRecordState transform a bit more. Why is it needed 
       "last_update": 1666172978269856
     },
     "source": {
-      "version": "2.7.3.Final",
+      "version": "3.6.2.Final",
       "connector": "postgresql",
       "name": "dbserver1",
       "ts_ms": 1666172978272,
@@ -207,7 +237,7 @@ This is the actual change in a table. It's a JSON object which contains the new 
 We cannot feed a full change object to Kafka Connect QuestDB Sink, because the sink would create a column for each field in the change object, including all metadata, for example the source part of the JSON:
 ```json
 "source": {
-  "version": "2.7.3.Final",
+  "version": "3.6.2.Final",
   "connector": "postgresql",
   "name": "dbserver1",
   "ts_ms": 1666172978272,

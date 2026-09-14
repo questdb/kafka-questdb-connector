@@ -1,8 +1,23 @@
-FROM ubuntu:24.04 AS builder
-WORKDIR /opt
-RUN apt-get update && apt-get install -y curl wget unzip jq
-RUN curl -s https://api.github.com/repos/questdb/kafka-questdb-connector/releases/latest | jq -r '.assets[]|select(.content_type == "application/zip")|.browser_download_url'|wget -qi -
-RUN unzip kafka-questdb-connector-*-bin.zip
+# Kafka Connect worker built from the official Apache Kafka image.
+# The image ships the Connect runtime; we only add the two connector plugins.
+FROM apache/kafka:4.3.1
 
-FROM debezium/connect:2.7.3.Final
-COPY --from=builder /opt/kafka-questdb-connector/*.jar /kafka/connect/questdb-connector/
+# The QuestDB client bundles a small native library built against glibc.
+# The Kafka image is Alpine (musl) based, so add the glibc compatibility layer.
+USER root
+RUN apk add --no-cache gcompat libstdc++
+USER appuser
+
+ARG DEBEZIUM_VERSION=3.6.2.Final
+WORKDIR /opt/kafka/plugins
+
+# Debezium Postgres source connector (Postgres -> Kafka)
+RUN wget -qO- https://repo1.maven.org/maven2/io/debezium/debezium-connector-postgres/${DEBEZIUM_VERSION}/debezium-connector-postgres-${DEBEZIUM_VERSION}-plugin.tar.gz | tar xz
+
+# QuestDB sink connector (Kafka -> QuestDB), latest release
+RUN wget -q $(wget -qO- https://api.github.com/repos/questdb/kafka-questdb-connector/releases/latest | grep -o 'https://[^"]*-bin.zip') \
+    && unzip -q kafka-questdb-connector-*-bin.zip \
+    && rm kafka-questdb-connector-*-bin.zip
+
+COPY connect-distributed.properties /opt/kafka/config/connect-distributed.properties
+CMD ["/opt/kafka/bin/connect-distributed.sh", "/opt/kafka/config/connect-distributed.properties"]
