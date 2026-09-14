@@ -55,7 +55,7 @@ such as `RegexRouter` still work. The documentation lists the remaining
 differences from the standard path.
 
 ## Sample Projects
-This repository contains a number of [sample projects.](kafka-questdb-connector-samples) showing how to use the connector. It also demonstrates how to use the connector together with Debezium for Change Data Capture.
+This repository contains a number of [sample projects.](kafka-questdb-connector-samples) showing how to use the connector. It also demonstrates how to use the connector together with Debezium for Change Data Capture, and how to configure it for [Protobuf messages with the Confluent Schema Registry](kafka-questdb-connector-samples/protobuf-schema-registry).
 
 ## Distribution
 Releases are published on GitHub: https://github.com/questdb/kafka-questdb-connector/releases/

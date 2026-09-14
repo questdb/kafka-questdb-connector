@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package io.questdb.kafka.domain;
+
+import "google/protobuf/timestamp.proto";
+
+// Same as student.proto, with one extra field. Parsed at runtime and sent as a
+// DynamicMessage to exercise schema evolution through the schema registry.
+message Student {
+  string firstname = 1;
+  string lastname = 2;
+  google.protobuf.Timestamp birthday = 3;
+  bool active = 4;
+}
