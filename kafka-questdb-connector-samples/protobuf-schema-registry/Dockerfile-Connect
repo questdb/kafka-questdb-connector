@@ -1,0 +1,10 @@
+FROM ubuntu:24.04 AS builder
+WORKDIR /opt
+RUN apt-get update && apt-get install -y curl wget unzip jq
+RUN curl -s https://api.github.com/repos/questdb/kafka-questdb-connector/releases/latest | jq -r '.assets[]|select(.content_type == "application/zip")|.browser_download_url'|wget -qi -
+RUN unzip kafka-questdb-connector-*-bin.zip
+
+# cp-kafka-connect ships the Confluent converters, including
+# io.confluent.connect.protobuf.ProtobufConverter, so only the QuestDB connector is added
+FROM confluentinc/cp-kafka-connect:7.8.0
+COPY --from=builder /opt/kafka-questdb-connector/*.jar /usr/share/java/kafka/

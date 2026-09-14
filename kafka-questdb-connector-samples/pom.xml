@@ -12,5 +12,6 @@
 
     <modules>
         <module>stocks</module>
+        <module>protobuf-schema-registry</module>
     </modules>
 </project>

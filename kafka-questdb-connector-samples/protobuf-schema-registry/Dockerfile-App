@@ -1,0 +1,10 @@
+FROM maven:3.9-eclipse-temurin-17 AS builder
+COPY ./pom.xml /opt/producer/pom.xml
+COPY ./src /opt/producer/src
+WORKDIR /opt/producer
+# generates Java classes from the .proto file and builds a single runnable jar
+RUN mvn -B clean package -DskipTests
+
+FROM eclipse-temurin:17-jre
+COPY --from=builder /opt/producer/target/kafka-samples-protobuf-schema-registry-*.jar /producer.jar
+CMD ["java", "-jar", "/producer.jar"]

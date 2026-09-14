@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package io.questdb.kafka.domain;
+
+import "google/protobuf/timestamp.proto";
+
+option java_package = "io.questdb.kafka.domain";
+option java_outer_classname = "SensorReadingProtos";
+option java_multiple_files = true;
+
+message SensorReading {
+  string sensor_id = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  // repeated numeric fields become QuestDB DOUBLE[] columns
+  repeated double values = 3;
+  // proto3 "optional" gives the field presence: an unset location is null, not ""
+  optional string location = 4;
+}
