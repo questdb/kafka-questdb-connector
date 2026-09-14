@@ -1,4 +1,3 @@
-version: '2.1'
 services:
   kafka-ui:
     container_name: kafka-ui

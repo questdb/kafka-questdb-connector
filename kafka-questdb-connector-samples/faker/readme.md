@@ -17,7 +17,7 @@ The project was tested on MacOS with M1, but it should work on other platforms t
 5. The previous command will generate a lot of log messages. Eventually logging should cease. This means both Apache Kafka and QuestDB are running. The last log message should contain the following text: `Session key updated`
 6. Execute the following command in shell: 
     ```shell
-    $ curl -X POST -H "Content-Type: application/json" -d '{"name":"questdb-connect","config":{"topics":"People","connector.class":"io.questdb.kafka.QuestDBSinkConnector","tasks.max":"1","key.converter":"org.apache.kafka.connect.storage.StringConverter","value.converter":"org.apache.kafka.connect.json.JsonConverter","value.converter.schemas.enable":"false","client.conf.string":"http::addr=questdb;", "timestamp.field.name": "birthday", "transforms":"convert_birthday","transforms.convert_birthday.type":"org.apache.kafka.connect.transforms.TimestampConverter$Value","transforms.convert_birthday.target.type":"Timestamp","transforms.convert_birthday.field":"birthday","transforms.convert_birthday.format": "yyyy-MM-dd'"'"'T'"'"'HH:mm:ss.SSSX"}}' localhost:8083/connectors
+    $ curl -X POST -H "Content-Type: application/json" -d '{"name":"questdb-connect","config":{"topics":"People","connector.class":"io.questdb.kafka.QuestDBSinkConnector","tasks.max":"1","key.converter":"org.apache.kafka.connect.storage.StringConverter","value.converter":"org.apache.kafka.connect.json.JsonConverter","value.converter.schemas.enable":"false","client.conf.string":"ws::addr=questdb:9000;", "timestamp.field.name": "birthday", "transforms":"convert_birthday","transforms.convert_birthday.type":"org.apache.kafka.connect.transforms.TimestampConverter$Value","transforms.convert_birthday.target.type":"Timestamp","transforms.convert_birthday.field":"birthday","transforms.convert_birthday.format": "yyyy-MM-dd'"'"'T'"'"'HH:mm:ss.SSSX"}}' localhost:8083/connectors
     ```
 7. The command above will create a new Kafka connector that will read data from the `People` topic and write it to a QuestDB table called `People`. The connector will also convert the `birthday` field to a timestamp.
 8. Go to the QuestDB console running at http://localhost:19000 and run `select * from 'People';` and you should see some rows.
@@ -34,7 +34,7 @@ The sample project consists of 3 components:
 
 The Kafka Connect configuration looks complex, but it's quite simple. Let's have a closer look. This is how the `curl` command looks like:
 ```shell
-$ curl -X POST -H "Content-Type: application/json" -d '{"name":"questdb-connect","config":{"topics":"People","connector.class":"io.questdb.kafka.QuestDBSinkConnector","tasks.max":"1","key.converter":"org.apache.kafka.connect.storage.StringConverter","value.converter":"org.apache.kafka.connect.json.JsonConverter","value.converter.schemas.enable":"false","client.conf.string":"http::addr=questdb;", "timestamp.field.name": "birthday", "transforms":"convert_birthday","transforms.convert_birthday.type":"org.apache.kafka.connect.transforms.TimestampConverter$Value","transforms.convert_birthday.target.type":"Timestamp","transforms.convert_birthday.field":"birthday","transforms.convert_birthday.format": "yyyy-MM-dd'"'"'T'"'"'HH:mm:ss.SSSX"}}' localhost:8083/connectors
+$ curl -X POST -H "Content-Type: application/json" -d '{"name":"questdb-connect","config":{"topics":"People","connector.class":"io.questdb.kafka.QuestDBSinkConnector","tasks.max":"1","key.converter":"org.apache.kafka.connect.storage.StringConverter","value.converter":"org.apache.kafka.connect.json.JsonConverter","value.converter.schemas.enable":"false","client.conf.string":"ws::addr=questdb:9000;", "timestamp.field.name": "birthday", "transforms":"convert_birthday","transforms.convert_birthday.type":"org.apache.kafka.connect.transforms.TimestampConverter$Value","transforms.convert_birthday.target.type":"Timestamp","transforms.convert_birthday.field":"birthday","transforms.convert_birthday.format": "yyyy-MM-dd'"'"'T'"'"'HH:mm:ss.SSSX"}}' localhost:8083/connectors
 ```
 
 It uses `curl` to submit a following JSON to Kafka Connect:
@@ -48,7 +48,7 @@ It uses `curl` to submit a following JSON to Kafka Connect:
     "key.converter": "org.apache.kafka.connect.storage.StringConverter",
     "value.converter": "org.apache.kafka.connect.json.JsonConverter",
     "value.converter.schemas.enable": "false",
-    "client.conf.string": "http::addr=questdb;",
+    "client.conf.string": "ws::addr=questdb:9000;",
     "timestamp.field.name": "birthday",
     "transforms": "convert_birthday",
     "transforms.convert_birthday.type": "org.apache.kafka.connect.transforms.TimestampConverter$Value",
@@ -62,6 +62,19 @@ Most of the fields are self-explanatory. The `transforms` field is a bit more co
 
 The other potentially non-obvious configuration elements are:
 1. `"value.converter.schemas.enable": "false"` It disables the schema support in the Kafka Connect JSON converter. The sample project doesn't use schemas.
-2. `"client.conf.string": "http::addr=questdb;"` It configures QuestDB client to use the HTTP transport and connect to a hostname `questdb`. The hostname is defined in the [docker-compose.yml](docker-compose.yml) file.
+2. `"client.conf.string": "ws::addr=questdb:9000;"` It configures QuestDB client to use the QWP transport and connect to a hostname `questdb` on port 9000. The hostname is defined in the [docker-compose.yml](docker-compose.yml) file. See [Why QWP?](#why-qwp) below.
 3. `"timestamp.field.name": "birthday"` It defines the name of the field that should be used as a timestamp. It uses the field that was converted by the Kafka Connect transformation described above.
 4. The ugly value in `"transforms.convert_birthday.format": "yyyy-MM-dd'"'"'T'"'"'HH:mm:ss.SSSX"`. This part looks funny: `'"'"'T'"'"'`. In fact, it's a way to submit an apostrophe via shell which uses apostrophes to define strings. The apostrophe is required to escape the `T` character in the date format. The date format is `yyyy-MM-dd'T'HH:mm:ss.SSSX`. If you know a better way to submit the same JSON then please [open a new issue](https://github.com/questdb/kafka-questdb-connector/issues/new). 
+
+## Why QWP?
+This sample uses `ws::`, the QuestDB WebSocket Protocol (QWP) transport, rather than the `http::` transport used by the other samples. Both work, but QWP is the better default when you care about not losing rows:
+
+1. **Kafka offsets are committed only after QuestDB acknowledges the data.** An offset advances only once QuestDB has confirmed the rows behind it, so if Kafka Connect or QuestDB dies mid-flight the sink resumes from the last acknowledged offset.
+2. **It holds throughput far better over a high-latency link.** QWP keeps writes pipelined instead of waiting for a response before sending more, so a Kafka Connect worker in a different region or cloud than QuestDB is not throttled by the round-trip time the way request/response HTTP is.
+
+QWP needs QuestDB 10 or newer and Kafka Connect 3.6 or newer. This sample satisfies both: [docker-compose.yml](docker-compose.yml) pins `questdb/questdb:10.0.1` and `confluentinc/cp-kafka-connect:7.8.0`, which ships Kafka 3.8. The `http::` and `tcp::` transports keep working unchanged - the [stocks](../stocks) and [confluent-docker-images](../confluent-docker-images) samples still use `http::`.
+
+### Delivery is at least once
+QWP guarantees that acknowledged data is not lost. It does not guarantee that data is written exactly once: a reconnect or a rejected batch can replay rows QuestDB already holds, so duplicates are possible.
+
+**This sample does not deduplicate.** The `People` table is created automatically by the connector without [DEDUP UPSERT KEYS](https://questdb.com/docs/concept/deduplication/), and the generated rows have no natural key anyway - the producer invents random names, so nothing in the payload identifies a row uniquely. That is fine here, where the point is to watch rows arrive. In a real deployment, create the target table upfront with `DEDUP UPSERT KEYS` over a column set that uniquely identifies a row whenever duplicates are not acceptable.
