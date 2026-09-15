@@ -1,0 +1,17 @@
+{
+  "name": "questdb-connect",
+  "config": {
+    "connector.class": "io.questdb.kafka.QuestDBSinkConnector",
+    "tasks.max": "1",
+    "topics": "trades",
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
+    "client.conf.string": "ws::addr=questdb:9000;",
+    "include.key": "false",
+    "symbols": "symbol,side",
+    "doubles": "price,amount",
+    "timestamp.field.name": "timestamp",
+    "timestamp.string.format": "yyyy-MM-ddTHH:mm:ss.SSSZ"
+  }
+}

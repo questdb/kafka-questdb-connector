@@ -1,10 +1,15 @@
 # Sample Project: Feeding changes from Postgres to QuestDB
 ## What does this sample do?
-This sample project demonstrates how to feed changes from a Postgres table to QuestDB. It uses the [Debezium Postgres connector](https://debezium.io/documentation/reference/stable/connectors/postgresql.html) to capture changes from a [Postgres database](https://www.postgresql.org/) and feed them to a [Kafka](https://kafka.apache.org/) topic. The [Kafka QuestDB connector](https://github.com/questdb/kafka-questdb-connector) then reads from the Kafka topic and writes the changes to a [QuestDB](questdb.io/) table. QuestDB is used for analytical queries on data and to feed the data to a Grafana dashboard for visualization.
+This sample project demonstrates how to feed changes from a Postgres table to QuestDB. It uses the [Debezium Postgres connector](https://debezium.io/documentation/reference/stable/connectors/postgresql.html) to capture changes from a [Postgres database](https://www.postgresql.org/) and feed them to a [Kafka](https://kafka.apache.org/) topic. The [Kafka QuestDB connector](https://github.com/questdb/kafka-questdb-connector) then reads from the Kafka topic and writes the changes to a [QuestDB](https://questdb.com/) table. QuestDB is used for analytical queries on data and to feed the data to a Grafana dashboard for visualization.
 
 The project can be seen as a reference architecture for a data pipeline that feeds changes from a Postgres database to QuestDB. Postgres is an excellent [transaction/OLTP](https://en.wikipedia.org/wiki/Online_transaction_processing) database. It excels with simple short-running queries. Hence, the `stock` table contains only the most recent snapshot of the data. It stores no history at all. 
 
 QuestDB is a time-series database which shines with time-series analytics. It is a great fit for storing historical data. The `stock` table inside QuestDB contains the full history of the `stock` table in Postgres. Whenever a stock price in Postgres is updated the change is written to QuestDB as a new row. 
+
+This is the third and last step of the [learning path](../readme.md). The [faker](../faker) and
+[protobuf-schema-registry](../protobuf-schema-registry) samples feed a Kafka topic from a producer you control.
+This one adds a second system, Postgres, and Debezium in between: the events in Kafka are database changes, not
+messages an application wrote. It also adds Debezium's `unwrap` transform and a Grafana dashboard on QuestDB.
 
 ## Prerequisites
 - Git
@@ -18,28 +23,26 @@ Bear in mind the sample starts multiple containers. It's running fine on my mach
 ## Running the sample
 1. Clone this repository via `git clone https://github.com/questdb/kafka-questdb-connector.git`
 2. `cd kafka-questdb-connector/kafka-questdb-connector-samples/stocks/` to enter the directory with this sample.
-3. Run `docker compose build` to build docker images with the sample project. This will take a few minutes.
-4. Run `docker compose up` to start Postgres, Java stock price updater app, Apache Kafka, Kafka Connect with the Debezium and QuestDB connectors, QuestDB and Grafana. This will take a few minutes.
-5. The previous command will generate a lot of log messages. Eventually logging should cease. This means all containers are running. 
-6. At this point we have all infrastructure running, the Java application keeps updating stock prices in Postgres. However, the rest of the pipeline is not yet running. We need to start the Kafka Connect connectors. Kafka Connect has a REST API, so we can use `curl` to start the connectors.
-7. In a separate shell, execute following command to start Debezium connector:
+3. Run `docker compose up --build --wait`. It builds the images, starts Postgres, the Java stock price updater, Apache Kafka, Kafka Connect with the Debezium and QuestDB connectors, QuestDB and Grafana in the background, and returns once Kafka Connect is ready to accept connectors. The first run takes a few minutes.
+4. At this point we have all infrastructure running, the Java application keeps updating stock prices in Postgres. However, the rest of the pipeline is not yet running. We need to start the two Kafka Connect connectors. Kafka Connect has a REST API, so we can use `curl` to start them.
+5. Start the Debezium connector from [debezium-source.json](debezium-source.json):
     ```shell
-    curl -X POST -H "Content-Type: application/json" -d  '{"name":"debezium_source","config":{"tasks.max":1,"database.hostname":"postgres","database.port":5432,"database.user":"postgres","database.password":"postgres","connector.class":"io.debezium.connector.postgresql.PostgresConnector","database.dbname":"postgres","plugin.name":"pgoutput","topic.prefix":"dbserver1"}} ' localhost:8083/connectors
+    curl -X POST -H "Content-Type: application/json" -d @debezium-source.json localhost:8083/connectors
     ```
-   It starts the Debezium connector that will capture changes from Postgres and feed them to Kafka.
-8. Execute following command to start QuestDB Kafka Connect sink:
+   It captures changes from Postgres and feeds them to Kafka.
+6. Start the QuestDB Kafka Connect sink from [questdb-sink.json](questdb-sink.json):
     ```shell
-    curl -X POST -H "Content-Type: application/json" -d '{"name":"questdb-connect","config":{"topics":"dbserver1.public.stock","table":"stock", "connector.class":"io.questdb.kafka.QuestDBSinkConnector","tasks.max":"1","key.converter":"org.apache.kafka.connect.storage.StringConverter","value.converter":"org.apache.kafka.connect.json.JsonConverter","client.conf.string":"http::addr=questdb;", "transforms":"unwrap", "transforms.unwrap.type":"io.debezium.transforms.ExtractNewRecordState", "include.key": "false", "symbols": "symbol", "timestamp.field.name": "last_update"}}' localhost:8083/connectors
+    curl -X POST -H "Content-Type: application/json" -d @questdb-sink.json localhost:8083/connectors
     ```
-   It starts the QuestDB Kafka Connect sink that will read changes from Kafka and write them to QuestDB.
-9. Go to QuestDB Web Console running at http://localhost:19000/ and execute following query:
+   It reads the changes from Kafka and writes them to QuestDB.
+7. Go to QuestDB Web Console running at http://localhost:19000/ and execute following query:
     ```sql
     select * from stock;
     ```
    It should return some rows. If it does not return any rows or returns a _table not found_ error then wait a few seconds and try again.
-10. Go to  Grafana Dashboard running at http://localhost:3000/d/stocks/stocks?orgId=1&refresh=5s&viewPanel=2. It should show some data. If it does not show any data, wait a few seconds, refresh try again.
-11. Play with the Grafana dashboard a bit. You can change the aggregation interval, change stock, zoom-in and zoom-out, etc.
-12. Go to [QuestDB Web Console](http://localhost:19000/) again and execute following query:
+8. Go to  Grafana Dashboard running at http://localhost:3000/d/stocks/stocks?orgId=1&refresh=5s&viewPanel=2. It should show some data. If it does not show any data, wait a few seconds, refresh try again.
+9. Play with the Grafana dashboard a bit. You can change the aggregation interval, change stock, zoom-in and zoom-out, etc.
+10. Go to [QuestDB Web Console](http://localhost:19000/) again and execute following query:
     ```sql
     SELECT
       timestamp,
@@ -52,7 +55,7 @@ Bear in mind the sample starts multiple containers. It's running fine on my mach
     SAMPLE by 1m;
     ```
     It returns the average, minimum and maximum stock price for IBM in each minute. You can change the `1m` to `1s` to get data aggregated by second. The `SAMPLE by` shows a bit of QuestDB syntax sugar to make time-related queries more readable. 
-13. Don't forget to stop the containers when you're done. The project generates a lot of data and you could run out of disk space. 
+11. Run `docker compose down` when you're done. The project generates a lot of data and you could run out of disk space. 
 
 ## Project Internals
 If you like what you see and want to learn more about the internals of the project, read on. It's time do demystify the black box. We will discuss these components:
@@ -135,19 +138,19 @@ The Kafka Connect worker itself is configured in [connect-distributed.properties
 
 What's important: When this container start it just connects to Kafka broker, but it does not start any connectors. We need to start the connectors using `curl` command. This is how we started the Debezium connector:
 ```shell
-curl -X POST -H "Content-Type: application/json" -d  '{"name":"debezium_source","config":{"tasks.max":1,"database.hostname":"postgres","database.port":5432,"database.user":"postgres","database.password":"postgres","connector.class":"io.debezium.connector.postgresql.PostgresConnector","database.dbname":"postgres","plugin.name":"pgoutput","topic.prefix":"dbserver1"}} ' localhost:8083/connectors
+curl -X POST -H "Content-Type: application/json" -d @debezium-source.json localhost:8083/connectors
 ```
-It uses Kafka Connect REST interface to start a new connector with a given configuration. Let's have a closer look at the configuration. This is how it looks like when formatted for readability:
+It uses Kafka Connect REST interface to start a new connector with a given configuration. Let's have a closer look at the configuration in [debezium-source.json](debezium-source.json):
 ```json
 {
   "name": "debezium_source",
   "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
     "tasks.max": 1,
     "database.hostname": "postgres",
     "database.port": 5432,
     "database.user": "postgres",
     "database.password": "postgres",
-    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
     "database.dbname": "postgres",
     "plugin.name": "pgoutput",
     "topic.prefix": "dbserver1"
@@ -159,20 +162,20 @@ Most of the fields are self-explanatory. `plugin.name` selects the Postgres logi
 ### Kafka QuestDB connector
 The Kafka QuestDB connector re-uses the same Kafka Connect runtime as the Debezium connector. It's also started using `curl` command. This is how we started the QuestDB connector:
 ```shell
-curl -X POST -H "Content-Type: application/json" -d '{"name":"questdb-connect","config":{"topics":"dbserver1.public.stock","table":"stock", "connector.class":"io.questdb.kafka.QuestDBSinkConnector","tasks.max":"1","key.converter":"org.apache.kafka.connect.storage.StringConverter","value.converter":"org.apache.kafka.connect.json.JsonConverter","client.conf.string":"http::addr=questdb;", "transforms":"unwrap", "transforms.unwrap.type":"io.debezium.transforms.ExtractNewRecordState", "include.key": "false", "symbols": "symbol", "timestamp.field.name": "last_update"}}' localhost:8083/connectors
+curl -X POST -H "Content-Type: application/json" -d @questdb-sink.json localhost:8083/connectors
 ```
-This is the connector JSON configuration nicely formatted:
+This is the configuration in [questdb-sink.json](questdb-sink.json):
 ```json
 {
   "name": "questdb-connect",
   "config": {
-    "topics": "dbserver1.public.stock",
-    "table": "stock",
     "connector.class": "io.questdb.kafka.QuestDBSinkConnector",
     "tasks.max": "1",
+    "topics": "dbserver1.public.stock",
+    "table": "stock",
     "key.converter": "org.apache.kafka.connect.storage.StringConverter",
     "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-    "client.conf.string": "http::addr=questdb;",
+    "client.conf.string": "ws::addr=questdb:9000;",
     "transforms": "unwrap",
     "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
     "include.key": "false",
@@ -181,10 +184,10 @@ This is the connector JSON configuration nicely formatted:
   }
 }
 ```
-Again, most of the fields are obvious. Let's focus on the non-obvious ones.
-1. `"symbols": "symbol"` this instruct to connector to use the [QuestDB symbol type](https://questdb.io/docs/concept/symbol/) for a column named "symbols". This column has low cardinality thus it's a good candidate for symbol type.
-2. `"client.conf.string": "http::addr=questdb;"` this configures the QuestDB client to use the HTTP transport and connect to a hostname `questdb`. The hostname is defined in the [docker-compose.yml](docker-compose.yml) file.
-3. `"timestamp.field.name": "last_update"` this instructs the connector to use the `last_update` column as the [designated timestamp](https://questdb.io/docs/concept/designated-timestamp/) column.
+Most of it is the same as in the [faker](../faker) sample. The differences:
+1. `"table": "stock"` the Debezium topic is called `dbserver1.public.stock`, which is not a name we want for a QuestDB table, so the target table is set explicitly.
+2. `"value.converter"` is used without `"value.converter.schemas.enable": "false"`, because Debezium embeds a schema in every JSON message.
+3. `"timestamp.field.name": "last_update"` the Postgres column that holds the time of the price update becomes the [designated timestamp](https://questdb.io/docs/concept/designated-timestamp/). Debezium sends it as microseconds since the epoch and the connector understands that natively.
 4. `"transforms":"unwrap"` and `"transforms.unwrap.type"` this instructs the connector to use Debezium's ExtractNewRecordState. 
 
 Let's focus on the ExtractNewRecordState transform a bit more. Why is it needed at all? For every change in the Postgres table the Debezium emits a JSON message to a Kafka topic. Messages look like this:
@@ -294,3 +297,8 @@ And this is then used by the candlestick chart to visualize the data.
 
 ### Summary of internals
 At this point you should have a good understanding of the architecture. If the explanation above is unclear then please [open a new issue](https://github.com/questdb/kafka-questdb-connector/issues/new).
+
+## Where to go next
+This is the end of the learning path. The [sample index](../readme.md) lists all samples, and the
+[connector documentation](https://questdb.com/docs/third-party-tools/kafka/questdb-kafka/) has the full
+configuration reference.
