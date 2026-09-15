@@ -13,6 +13,12 @@ import java.util.Map;
 import java.util.function.Function;
 
 public final class QuestDBSinkConnector extends SinkConnector {
+    // The deprecated 'host' option still works but is deliberately not advertised here: new
+    // deployments should configure the connection through the client configuration string.
+    static final String MISSING_CLIENT_CONFIGURATION_MESSAGE = "No QuestDB connection configured. Set '"
+            + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG
+            + "' (for example: wss::addr=localhost:9000;) or the QDB_CLIENT_CONF environment variable.";
+
     private Map<String, String> configProps;
 
     @Override
@@ -78,14 +84,20 @@ public final class QuestDBSinkConnector extends SinkConnector {
         return result;
     }
 
+    private static String blankToNull(String value) {
+        return value == null || value.trim().isEmpty() ? null : value;
+    }
+
     private static ConfigValue configValue(Config config, String name) {
         return config.configValues().stream().filter(value -> value.name().equals(name)).findFirst().orElseThrow();
     }
 
     private static void validateClientConfiguration(Map<String, String> connectorConfigs, Config result, Function<String, String> env) {
         String host = connectorConfigs.get(QuestDBSinkConnectorConfig.HOST_CONFIG);
-        String confString = connectorConfigs.get(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG);
-        String envConfString = env.apply("QDB_CLIENT_CONF");
+        // A blank value is what a task treats as unset (see ClientConfUtils.resolveConfString), so
+        // validate it the same way instead of letting it slip through to a failing task start.
+        String confString = blankToNull(connectorConfigs.get(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG));
+        String envConfString = blankToNull(env.apply("QDB_CLIENT_CONF"));
 
         // cannot set client configuration string via both explicit config and environment variable
         if (confString != null && envConfString != null) {
@@ -94,7 +106,7 @@ public final class QuestDBSinkConnector extends SinkConnector {
 
         if (confString == null && envConfString == null) {
             if (host == null) {
-                configValue(result, QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG).addErrorMessage("Either '" + QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG + "' or '" + QuestDBSinkConnectorConfig.HOST_CONFIG + "' must be set.");
+                configValue(result, QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG).addErrorMessage(MISSING_CLIENT_CONFIGURATION_MESSAGE);
             }
             return; // configuration string is not used, nothing else to validate
         }

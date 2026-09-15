@@ -57,10 +57,32 @@ public class QuestDBSinkConnectorConfigTest {
     }
 
     @Test
-    public void testEitherHostOrClientConfigStringMustBeSet() {
+    public void testMissingClientConfigurationIsReported() {
         Map<String, String> config = baseConnectorProps();
         QuestDBSinkConnector connector = new QuestDBSinkConnector();
-        assertEquals(Arrays.asList("Either 'client.conf.string' or 'host' must be set."), clientConfErrors(connector, config));
+        assertEquals(Arrays.asList("No QuestDB connection configured. Set 'client.conf.string' "
+                        + "(for example: wss::addr=localhost:9000;) or the QDB_CLIENT_CONF environment variable."),
+                clientConfErrors(connector, config));
+
+        // a blank value is what a task treats as unset, so it must be rejected the same way
+        for (String blank : Arrays.asList("", "   ")) {
+            config.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, blank);
+            assertEquals(Arrays.asList(QuestDBSinkConnector.MISSING_CLIENT_CONFIGURATION_MESSAGE),
+                    clientConfErrors(connector, config), "value=[" + blank + "]");
+        }
+
+        // the deprecated host option still satisfies the check
+        config.remove(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG);
+        config.put(QuestDBSinkConnectorConfig.HOST_CONFIG, "localhost");
+        assertTrue(clientConfErrors(connector, config).isEmpty());
+    }
+
+    @Test
+    public void testBlankClientConfigurationStringFallsBackToEnvironment() {
+        Map<String, String> config = baseConnectorProps();
+        config.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, "");
+        Function<String, String> env = name -> "QDB_CLIENT_CONF".equals(name) ? "http::addr=localhost:9000;" : null;
+        assertTrue(confStringErrors(new QuestDBSinkConnector().validate(config, env)).isEmpty());
     }
 
     @Test
