@@ -55,7 +55,8 @@ such as `RegexRouter` still work. The documentation lists the remaining
 differences from the standard path.
 
 ## Sample Projects
-This repository contains a number of [sample projects.](kafka-questdb-connector-samples) showing how to use the connector. It also demonstrates how to use the connector together with Debezium for Change Data Capture, and how to configure it for [Protobuf messages with the Confluent Schema Registry](kafka-questdb-connector-samples/protobuf-schema-registry).
+Start with the [faker sample](kafka-questdb-connector-samples/faker): one `docker compose up` and one `curl` give you a `trades` table in QuestDB fed from Kafka.
+The [sample projects](kafka-questdb-connector-samples) then build on it: the same trades as [Protobuf messages with the Confluent Schema Registry](kafka-questdb-connector-samples/protobuf-schema-registry), and [Change Data Capture from Postgres with Debezium](kafka-questdb-connector-samples/stocks).
 
 ## Distribution
 Releases are published on GitHub: https://github.com/questdb/kafka-questdb-connector/releases/

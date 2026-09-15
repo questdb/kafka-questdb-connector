@@ -1,10 +1,16 @@
 # Sample Project: Protobuf with Schema Registry
 ## What does this sample do?
 This sample shows how to feed [Protobuf](https://protobuf.dev/) messages from Apache Kafka to QuestDB with the
-[QuestDB Kafka connector](https://questdb.com/docs/third-party-tools/kafka/#questdb-kafka-connect-connector).
-A small Java application produces random stock trades, serializes them as Protobuf and registers the message schema
+[QuestDB Kafka connector](https://questdb.com/docs/third-party-tools/kafka/questdb-kafka/).
+A small Java application produces random trades, serializes them as Protobuf and registers the message schema
 in the [Confluent Schema Registry](https://docs.confluent.io/platform/current/schema-registry/index.html).
-The connector reads the topic, resolves the schema from the registry and writes each trade as a row of a QuestDB table.
+The connector reads the topic, resolves the schema from the registry and writes each trade as a row of the QuestDB
+table `trades`.
+
+This is the second step of the [learning path](../readme.md). The [faker](../faker) sample streams the same trades
+as schema-less JSON; this one adds typed messages, the Schema Registry and the Protobuf converter. Everything else,
+the compose setup, the QWP transport and the designated timestamp, works exactly as in faker and is not repeated
+here.
 
 This is the pipeline:
 ```
@@ -15,7 +21,7 @@ TradesProducer (Java) --Protobuf--> Kafka topic "trades" --ProtobufConverter--> 
 
 ## Prerequisites
 - Git
-- Working Docker environment, including docker-compose
+- Working Docker environment, including Docker Compose
 - Internet access to download dependencies
 
 The sample starts 5 containers. It needs a few GB of RAM; 8GB is enough.
@@ -23,38 +29,41 @@ The sample starts 5 containers. It needs a few GB of RAM; 8GB is enough.
 ## Running the sample
 1. Clone this repository via `git clone https://github.com/questdb/kafka-questdb-connector.git`
 2. `cd kafka-questdb-connector/kafka-questdb-connector-samples/protobuf-schema-registry/` to enter the directory with this sample.
-3. Run `docker compose build` to build the Docker images with the Java producer and Kafka Connect. This takes a few minutes: the producer image compiles the Protobuf schema and downloads its Maven dependencies.
-4. Run `docker compose up` to start Kafka, Schema Registry, Kafka Connect, QuestDB and the producer.
-5. The previous command generates a lot of log messages. Once the producer logs `Sent 100 trades` the whole pipeline up to Kafka is working.
-6. The producer has registered the schema of the `Trade` message in the Schema Registry. You can look at it:
+3. Run `docker compose up --build --wait`. It builds the Java producer and Kafka Connect images, starts Kafka,
+   Schema Registry, Kafka Connect, QuestDB and the producer in the background, and returns once Kafka Connect is
+   ready to accept connectors. The first run takes a few minutes: the producer image compiles the Protobuf schema
+   and downloads its Maven dependencies.
+4. The producer has registered the schema of the `Trade` message in the Schema Registry. You can look at it:
     ```shell
     curl -s localhost:8081/subjects/trades-value/versions/latest
     ```
    The subject name is `<topic>-value`. This is the schema the connector fetches when it reads the topic.
-7. At this point Kafka Connect is running but no connector is configured yet. Start the QuestDB connector via the Kafka Connect REST API:
+5. Submit the connector configuration from [connector.json](connector.json) to Kafka Connect:
     ```shell
-    curl -X POST -H "Content-Type: application/json" -d '{"name":"questdb-connect","config":{"connector.class":"io.questdb.kafka.QuestDBSinkConnector","tasks.max":"1","topics":"trades","key.converter":"org.apache.kafka.connect.storage.StringConverter","value.converter":"io.confluent.connect.protobuf.ProtobufConverter","value.converter.schema.registry.url":"http://schema-registry:8081","client.conf.string":"ws::addr=questdb:9000;","timestamp.field.name":"timestamp","symbols":"symbol,side,exchange","include.key":"false"}}' localhost:8083/connectors
+    curl -X POST -H "Content-Type: application/json" -d @connector.json localhost:8083/connectors
     ```
-   Kafka Connect responds with the configuration it accepted. The configuration is explained in detail [below](#configuring-the-connector-for-protobuf).
-8. Go to the QuestDB Web Console running at http://localhost:19000/ and execute:
+   Kafka Connect responds with the configuration it accepted. It is explained [below](#configuring-the-connector-for-protobuf).
+6. Go to the QuestDB Web Console running at http://localhost:19000/ and execute:
     ```sql
     select * from trades;
     ```
-   You should see trades arriving. If the table does not exist yet, wait a few seconds and try again. The table was created by the connector, with column types derived from the Protobuf schema:
+   You should see trades arriving. If the table does not exist yet, wait a few seconds and try again. The table was
+   created by the connector, with column types derived from the Protobuf schema:
     ```sql
     show columns from trades;
     ```
-9. Try a time-series query. This returns the volume-weighted average price per symbol for every 10 seconds:
+7. Try a time-series query. This returns the volume-weighted average price and the traded volume per symbol for
+   every 10 seconds:
     ```sql
-    SELECT timestamp, symbol, sum(price * quantity) / sum(quantity) AS vwap, sum(quantity) AS volume
+    SELECT timestamp, symbol, sum(price * amount) / sum(amount) AS vwap, sum(amount) AS volume
     FROM trades
-    WHERE side = 'BUY'
+    WHERE side = 'buy'
     SAMPLE BY 10s;
     ```
-10. Run `docker compose down` when you are done.
+8. Run `docker compose down` when you are done.
 
 ## Configuring the connector for Protobuf
-This is the connector configuration submitted in step 7, formatted for readability:
+This is [connector.json](connector.json), the configuration submitted in step 5:
 ```json
 {
   "name": "questdb-connect",
@@ -66,13 +75,13 @@ This is the connector configuration submitted in step 7, formatted for readabili
     "value.converter": "io.confluent.connect.protobuf.ProtobufConverter",
     "value.converter.schema.registry.url": "http://schema-registry:8081",
     "client.conf.string": "ws::addr=questdb:9000;",
-    "timestamp.field.name": "timestamp",
-    "symbols": "symbol,side,exchange",
-    "include.key": "false"
+    "include.key": "false",
+    "symbols": "symbol,side",
+    "timestamp.field.name": "timestamp"
   }
 }
 ```
-Only two settings are specific to Protobuf, the rest is the same as for any other format:
+Only two settings are specific to Protobuf, the rest is the same as in the [faker](../faker) sample:
 
 1. `"value.converter": "io.confluent.connect.protobuf.ProtobufConverter"` tells Kafka Connect how to turn the bytes of a
    Kafka message into a structured record. The Protobuf converter reads the schema ID that the Confluent serializer prepends
@@ -83,21 +92,13 @@ Only two settings are specific to Protobuf, the rest is the same as for any othe
    for example Confluent Cloud, add `"value.converter.basic.auth.credentials.source": "USER_INFO"` and
    `"value.converter.basic.auth.user.info": "<API key>:<API secret>"`.
 
-The remaining settings:
+Two differences from the JSON configuration in faker are worth noting:
 
-- `"key.converter": "org.apache.kafka.connect.storage.StringConverter"` - the producer uses the stock symbol, a plain string,
-  as the message key. Keys can be Protobuf too; then use the `ProtobufConverter` for the key as well, with `key.converter.schema.registry.url`.
-- `"include.key": "false"` - do not write the message key as a column. The symbol is already a field of the message.
-- `"timestamp.field.name": "timestamp"` - use the `timestamp` field of the message as the [designated timestamp](https://questdb.com/docs/concept/designated-timestamp/)
-  of the table. It is a `google.protobuf.Timestamp`, which the converter turns into a Kafka Connect timestamp, and the
-  connector understands that natively. Without this setting the connector would use the time the message was written to Kafka.
-- `"symbols": "symbol,side,exchange"` - store these low-cardinality string fields as QuestDB [SYMBOL](https://questdb.com/docs/concept/symbol/) columns
-  instead of VARCHAR. Note that `side` is a Protobuf enum; the converter delivers enums as their symbolic name.
-- `"client.conf.string": "ws::addr=questdb:9000;"` - how to reach QuestDB. `questdb` is the hostname of the QuestDB
-  container in [docker-compose.yml](docker-compose.yml). `ws::` selects the QuestDB WebSocket Protocol (QWP) transport,
-  which commits Kafka offsets only after QuestDB acknowledges the rows and keeps writes pipelined over slow links. It needs
-  QuestDB 10 or newer; the [faker](../faker) sample explains the trade-offs, including at-least-once delivery. `http::`
-  works too and is the choice for older QuestDB versions.
+- There is no `"doubles"` option. Protobuf messages are typed, so `price` and `amount` arrive as doubles and the
+  connector creates DOUBLE columns without help.
+- There is no `"timestamp.string.format"`. The `timestamp` field is a `google.protobuf.Timestamp`, which the
+  converter turns into a Kafka Connect timestamp, and the connector understands that natively. Keys can be Protobuf
+  too; then use the `ProtobufConverter` for the key as well, with `key.converter.schema.registry.url`.
 
 ### Where does the ProtobufConverter come from?
 The converter is not part of Apache Kafka. It is developed by Confluent and ships with the `confluentinc/cp-kafka-connect`
@@ -128,6 +129,9 @@ A few things worth knowing:
   `0`, `false` or `""` is what arrives, and that is what gets written. Declare the field `optional` when you need to tell
   the two apart; an unset `optional` field, an unset nested message and an unset `google.protobuf.Timestamp` arrive as
   null, and the connector then skips the column for that row. The designated timestamp is the exception: it must be set.
+- **Enums** arrive as their symbolic name, so an enum `Side { BUY = 1; SELL = 2; }` produces the strings `BUY` and
+  `SELL`. This sample declares `side` as a plain string holding `buy` or `sell` instead, to match the `trades` table on
+  [demo.questdb.io](https://demo.questdb.io).
 - **Timestamps** keep millisecond precision only. `google.protobuf.Timestamp` carries nanoseconds, but the converter
   hands the connector a Kafka Connect `Timestamp`, which is a millisecond value. If you need microseconds, send the
   timestamp as an `int64` of epoch micros and set `"timestamp.units": "micros"` on the connector.
@@ -144,15 +148,15 @@ including arrays, nested messages, enums and schema evolution, if you want to se
 ## Project internals
 The sample consists of 3 parts:
 
-1. The [Protobuf schema](src/main/proto/trade.proto) of a trade:
+1. The [Protobuf schema](src/main/proto/trade.proto) of a trade, the same shape as the `trades` table on
+   [demo.questdb.io](https://demo.questdb.io):
     ```protobuf
     message Trade {
       string symbol = 1;
-      Side side = 2;
+      string side = 2;   // "buy" or "sell"
       double price = 3;
-      int64 quantity = 4;
-      string exchange = 5;
-      google.protobuf.Timestamp timestamp = 6;
+      double amount = 4;
+      google.protobuf.Timestamp timestamp = 5;
     }
     ```
    [pom.xml](pom.xml) uses the `protobuf-maven-plugin` to generate a `Trade` Java class from it during the build.
@@ -174,12 +178,17 @@ The sample consists of 3 parts:
    - QuestDB - the database, its web console is exposed on port 19000
    - the producer - built from [Dockerfile-App](Dockerfile-App)
 
-   The Kafka Connect worker is configured with `JsonConverter` as the default value converter. The QuestDB connector
-   overrides it with the `ProtobufConverter` in its own configuration. This is the usual way to run connectors for
-   different formats on one Kafka Connect cluster.
+   Kafka, Schema Registry and Kafka Connect have healthchecks; `docker compose up --wait` returns when all of them
+   pass. The Kafka Connect worker is configured with `JsonConverter` as the default value converter. The QuestDB
+   connector overrides it with the `ProtobufConverter` in its own configuration. This is the usual way to run
+   connectors for different formats on one Kafka Connect cluster.
+
+## Next step
+[stocks](../stocks): change data capture. A Java application updates prices in Postgres, Debezium streams the
+changes to Kafka, the connector turns them into price history in QuestDB, and Grafana charts it.
 
 ## Further reading
-- [QuestDB Kafka connector documentation](https://questdb.com/docs/third-party-tools/kafka/#questdb-kafka-connect-connector)
+- [QuestDB Kafka connector documentation](https://questdb.com/docs/third-party-tools/kafka/questdb-kafka/)
 - [Protobuf Schema Serializer and Deserializer](https://docs.confluent.io/platform/current/schema-registry/fundamentals/serdes-develop/serdes-protobuf.html) in the Confluent documentation
 - [Avro integration test](../../integration-tests/avro-schema-registry) of the connector, if you use Avro instead of Protobuf
 

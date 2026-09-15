@@ -6,7 +6,7 @@ services:
     ports:
       - "19000:9000"
     environment:
-      - QDB_LINE_DEFAULT_PARTITION_BY=YEAR
+      - QDB_LINE_DEFAULT_PARTITION_BY=DAY
   kafka:
     image: apache/kafka:3.8.1
     container_name: broker
@@ -23,15 +23,19 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_NUM_PARTITIONS: 3
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
   producer:
     image: kafka-questdb-connector-samples-faker-generator
     build:
       dockerfile: Dockerfile-App
     depends_on:
-      - kafka
-    links:
-      - kafka:kafka
-      - questdb:questdb
+      kafka:
+        condition: service_healthy
   connect:
     image: kafka-questdb-connector-samples-connect
     build:
@@ -39,9 +43,18 @@ services:
     ports:
       - "8083:8083"
     depends_on:
-      - kafka
-    links:
-      - kafka:kafka
+      kafka:
+        condition: service_healthy
+      questdb:
+        condition: service_started
+    # `docker compose up --wait` returns once this passes, i.e. once the Kafka Connect
+    # REST API accepts requests and the connector can be submitted
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
     environment:
       CONNECT_BOOTSTRAP_SERVERS: "kafka:9092"
       CONNECT_GROUP_ID: "default"
