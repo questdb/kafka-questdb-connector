@@ -105,8 +105,25 @@ final class LookupEnrichment {
     /**
      * One full load. Throws {@link QueryException} as the client does, with status 0 for a
      * timeout, and {@link ConnectException} when the result does not have the required shape.
+     * <p>
+     * Any failure discards the handle, so the next load starts from a fresh one. A pooled query
+     * client can stay broken: with failover=off or failover_max_attempts=1 it reports a lost
+     * connection on every later query. Failures are rare and a rebuild costs one connect.
      */
     Lookup load() {
+        try {
+            return loadOnce();
+        } catch (RuntimeException e) {
+            try {
+                close();
+            } catch (RuntimeException closeFailure) {
+                e.addSuppressed(closeFailure);
+            }
+            throw e;
+        }
+    }
+
+    private Lookup loadOnce() {
         if (db == null) {
             db = QuestDB.builder()
                     .fromConfig(confString)
