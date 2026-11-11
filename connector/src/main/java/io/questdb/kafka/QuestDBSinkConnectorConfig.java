@@ -120,7 +120,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     private static final String ENRICHMENT_REFRESH_MS_DOC = "Minimum interval in milliseconds between reloads of the enrichment lookup.";
 
     public static final String ENRICHMENT_QUERY_TIMEOUT_MS_CONFIG = "enrichment.query.timeout.ms";
-    private static final String ENRICHMENT_QUERY_TIMEOUT_MS_DOC = "How long one enrichment lookup load may take before it is abandoned. A load blocks the task, so keep this well under the consumer's max.poll.interval.ms.";
+    private static final String ENRICHMENT_QUERY_TIMEOUT_MS_DOC = "How long one enrichment lookup query may take before it is abandoned. Unless the client configuration string sets them, it also caps connecting (connect_timeout) and the WebSocket upgrade (auth_timeout_ms) for each address. A load blocks the task, up to roughly (2 x addresses + 1) times this value plus the client's query_close_timeout_ms, so keep it well under the consumer's max.poll.interval.ms.";
 
     private static final String DEFAULT_TIMESTAMP_FORMAT = "yyyy-MM-ddTHH:mm:ss.SSSUUUZ";
 

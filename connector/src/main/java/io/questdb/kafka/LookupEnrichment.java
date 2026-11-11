@@ -8,6 +8,9 @@ import io.questdb.client.cutlass.qwp.client.QwpColumnBatchHandler;
 import io.questdb.client.cutlass.qwp.client.QwpServerInfo;
 import io.questdb.client.cutlass.qwp.client.WebSocketResponse;
 import io.questdb.client.cutlass.qwp.protocol.QwpConstants;
+import io.questdb.client.impl.ConfStringParser;
+import io.questdb.client.std.Chars;
+import io.questdb.client.std.str.StringSink;
 import org.apache.kafka.connect.errors.ConnectException;
 
 import java.util.HashMap;
@@ -25,7 +28,7 @@ final class LookupEnrichment {
     private QuestDB db;
 
     LookupEnrichment(String confString, String sql, long queryTimeoutMs) {
-        this.confString = confString;
+        this.confString = withQueryTimeouts(confString, queryTimeoutMs);
         this.sql = sql;
         this.queryTimeoutMs = queryTimeoutMs;
     }
@@ -42,6 +45,53 @@ final class LookupEnrichment {
         }
         byte status = ((QueryException) failure).getStatus();
         return status == 0 || status == WebSocketResponse.STATUS_INTERNAL_ERROR;
+    }
+
+    /**
+     * The task's conf string plus connect_timeout and auth_timeout_ms of {@code timeoutMs}
+     * where it does not set them. The query client connects when a query is borrowed, before
+     * the query timeout starts: without these, a host that drops packets blocks put() for the
+     * OS connect timeout (over two minutes on Linux) and an unanswered WebSocket upgrade for
+     * the client's 15 s default. The string is rebuilt rather than appended to, because a
+     * trailing ';;' is an escaped semicolon inside the last value.
+     */
+    static String withQueryTimeouts(String confString, long timeoutMs) {
+        StringSink token = new StringSink();
+        int pos = ConfStringParser.of(confString, token);
+        if (pos < 0) {
+            return confString; // malformed: the client reports it
+        }
+        StringBuilder rebuilt = new StringBuilder(confString.length() + 64).append(token).append("::");
+        boolean hasConnectTimeout = false;
+        boolean hasAuthTimeout = false;
+        while (ConfStringParser.hasNext(confString, pos)) {
+            pos = ConfStringParser.nextKey(confString, pos, token);
+            if (pos < 0) {
+                return confString;
+            }
+            hasConnectTimeout |= Chars.equals(token, "connect_timeout");
+            hasAuthTimeout |= Chars.equals(token, "auth_timeout_ms");
+            rebuilt.append(token).append('=');
+            pos = ConfStringParser.value(confString, pos, token);
+            if (pos < 0) {
+                return confString;
+            }
+            for (int i = 0, n = token.length(); i < n; i++) {
+                char c = token.charAt(i);
+                rebuilt.append(c);
+                if (c == ';') {
+                    rebuilt.append(';');
+                }
+            }
+            rebuilt.append(';');
+        }
+        if (!hasConnectTimeout) {
+            rebuilt.append("connect_timeout=").append(Math.min(timeoutMs, Integer.MAX_VALUE)).append(';');
+        }
+        if (!hasAuthTimeout) {
+            rebuilt.append("auth_timeout_ms=").append(timeoutMs).append(';');
+        }
+        return rebuilt.toString();
     }
 
     void close() {
