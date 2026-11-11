@@ -110,11 +110,24 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String QWP_DLQ_TERMINAL_CATEGORIES_CONFIG = "qwp.dlq.terminal.categories";
     private static final String QWP_DLQ_TERMINAL_CATEGORIES_DOC = "QWP terminal categories eligible for quarantine and DLQ handling. SCHEMA_MISMATCH is the safe default.";
 
+    public static final String ENRICHMENT_SQL_CONFIG = "enrichment.sql";
+    private static final String ENRICHMENT_SQL_DOC = "QWP only. SQL query returning exactly two columns, lookup key then value. The value is written to each row as a symbol column named after the second result column.";
+
+    public static final String ENRICHMENT_KEY_FIELD_CONFIG = "enrichment.key.field";
+    private static final String ENRICHMENT_KEY_FIELD_DOC = "Record field whose value is looked up in the result of '" + ENRICHMENT_SQL_CONFIG + "'.";
+
+    public static final String ENRICHMENT_REFRESH_MS_CONFIG = "enrichment.refresh.ms";
+    private static final String ENRICHMENT_REFRESH_MS_DOC = "Minimum interval in milliseconds between reloads of the enrichment lookup.";
+
+    public static final String ENRICHMENT_QUERY_TIMEOUT_MS_CONFIG = "enrichment.query.timeout.ms";
+    private static final String ENRICHMENT_QUERY_TIMEOUT_MS_DOC = "How long one enrichment lookup load may take before it is abandoned. A load blocks the task, so keep this well under the consumer's max.poll.interval.ms.";
+
     private static final String DEFAULT_TIMESTAMP_FORMAT = "yyyy-MM-ddTHH:mm:ss.SSSUUUZ";
 
     public QuestDBSinkConnectorConfig(ConfigDef config, Map<String, String> parsedConfig) {
         super(config, parsedConfig);
         validateTimestampOptions(getDesignatedTimestampColumnName(), isDesignatedTimestampKafkaNative(), getString(VALUE_FORMAT_CONFIG));
+        validateEnrichment(getEnrichmentSql(), getEnrichmentKeyField(), false);
     }
 
     public QuestDBSinkConnectorConfig(Map<String, String> parsedConfig) {
@@ -150,7 +163,11 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(QWP_MAX_INFLIGHT_ROWS_CONFIG, Type.INT, 150_000, ConfigDef.Range.atLeast(1), Importance.MEDIUM, QWP_MAX_INFLIGHT_ROWS_DOC)
                 .define(QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG, Type.LONG, 500L, ConfigDef.Range.atLeast(0L), Importance.LOW, QWP_COMMIT_ACK_TIMEOUT_MS_DOC)
                 .define(QWP_QUARANTINE_ACK_TIMEOUT_MS_CONFIG, Type.LONG, 1_000L, ConfigDef.Range.atLeast(1L), Importance.LOW, QWP_QUARANTINE_ACK_TIMEOUT_MS_DOC)
-                .define(QWP_DLQ_TERMINAL_CATEGORIES_CONFIG, Type.LIST, "SCHEMA_MISMATCH", (name, value) -> parseDlqEligibleCategories((List<?>) value), Importance.LOW, QWP_DLQ_TERMINAL_CATEGORIES_DOC);
+                .define(QWP_DLQ_TERMINAL_CATEGORIES_CONFIG, Type.LIST, "SCHEMA_MISMATCH", (name, value) -> parseDlqEligibleCategories((List<?>) value), Importance.LOW, QWP_DLQ_TERMINAL_CATEGORIES_DOC)
+                .define(ENRICHMENT_SQL_CONFIG, Type.STRING, null, Importance.LOW, ENRICHMENT_SQL_DOC)
+                .define(ENRICHMENT_KEY_FIELD_CONFIG, Type.STRING, null, Importance.LOW, ENRICHMENT_KEY_FIELD_DOC)
+                .define(ENRICHMENT_REFRESH_MS_CONFIG, Type.LONG, 5_000L, ConfigDef.Range.atLeast(1L), Importance.LOW, ENRICHMENT_REFRESH_MS_DOC)
+                .define(ENRICHMENT_QUERY_TIMEOUT_MS_CONFIG, Type.LONG, 10_000L, ConfigDef.Range.atLeast(1L), Importance.LOW, ENRICHMENT_QUERY_TIMEOUT_MS_DOC);
     }
 
     static String[] parseComposedTimestampFields(String value) {
@@ -179,6 +196,21 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
         if (fields != null && fields.contains(",") && ("json".equals(format) || "json_envelope".equals(format))) {
             throw new ConfigException("value.format=" + format + " does not support composed timestamps ("
                     + DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG + " naming several fields)");
+        }
+    }
+
+    /**
+     * @param knownNonQwp the transport is known not to be ws:: / wss::. The connector cannot
+     *                    always tell (QDB_CLIENT_CONF is worker-local); the task always can.
+     */
+    static void validateEnrichment(String sql, String keyField, boolean knownNonQwp) {
+        boolean hasSql = sql != null && !sql.trim().isEmpty();
+        boolean hasKeyField = keyField != null && !keyField.trim().isEmpty();
+        if (hasSql != hasKeyField) {
+            throw new ConfigException("'" + ENRICHMENT_SQL_CONFIG + "' and '" + ENRICHMENT_KEY_FIELD_CONFIG + "' must be set together");
+        }
+        if (hasSql && knownNonQwp) {
+            throw new ConfigException("'" + ENRICHMENT_SQL_CONFIG + "' requires the QWP transport (a ws:: or wss:: client configuration string)");
         }
     }
 
@@ -326,6 +358,25 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public long getQwpQuarantineAckTimeoutMs() {
         return getLong(QWP_QUARANTINE_ACK_TIMEOUT_MS_CONFIG);
+    }
+
+    /** Null when enrichment is not configured. */
+    public String getEnrichmentSql() {
+        String sql = getString(ENRICHMENT_SQL_CONFIG);
+        return sql == null || sql.trim().isEmpty() ? null : sql;
+    }
+
+    public String getEnrichmentKeyField() {
+        String field = getString(ENRICHMENT_KEY_FIELD_CONFIG);
+        return field == null || field.trim().isEmpty() ? null : field.trim();
+    }
+
+    public long getEnrichmentRefreshMs() {
+        return getLong(ENRICHMENT_REFRESH_MS_CONFIG);
+    }
+
+    public long getEnrichmentQueryTimeoutMs() {
+        return getLong(ENRICHMENT_QUERY_TIMEOUT_MS_CONFIG);
     }
 
     public List<String> getQwpDlqTerminalCategories() {

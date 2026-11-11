@@ -47,6 +47,13 @@ final class RecordToRowHandler {
     private final String[] composedTimestampValues;
     private final MultiPartCharSequence composedBuffer;
     private long timestampColumnValue = Long.MIN_VALUE;
+    // Lookup enrichment (QWP only). The key text is captured while the record is traversed and
+    // resolved against the map once the row's own columns are written.
+    private final String enrichmentKeyField;
+    private String enrichmentColumn;
+    private String enrichmentKey;
+    private Map<String, String> enrichmentMap = Collections.emptyMap();
+    private long enrichmentMisses;
     private static final com.fasterxml.jackson.core.JsonFactory JSON_FACTORY = new com.fasterxml.jackson.core.JsonFactory();
     // Jackson 2.13 (what Connect provides here) predates StreamReadConstraints, so nesting is
     // unbounded. Without a cap a deeply nested payload is a StackOverflowError - an Error, which
@@ -83,6 +90,7 @@ final class RecordToRowHandler {
         this.nameLimits = nameLimits;
         this.rawJson = config.isRawJsonFormat();
         this.rawJsonEnvelope = config.isRawJsonEnvelope();
+        this.enrichmentKeyField = config.getEnrichmentKeyField();
 
         String symbolColumnsConfig = routeSymbolsDirectly ? config.getSymbolColumns() : null;
         if (symbolColumnsConfig == null) {
@@ -146,6 +154,7 @@ final class RecordToRowHandler {
      */
     boolean handleRawJson(SinkRecord record, byte[] payload) {
         assert timestampColumnValue == Long.MIN_VALUE;
+        enrichmentKey = null;
         if (payload == null) {
             return false; // tombstone
         }
@@ -179,9 +188,11 @@ final class RecordToRowHandler {
             } catch (java.io.IOException e) {
                 throw new InvalidDataException("Cannot parse JSON payload", e);
             }
+            stampEnrichment();
         } catch (InvalidDataException | LineSenderException ex) {
             // a half-written row must not leak its timestamp into the next record
             timestampColumnValue = Long.MIN_VALUE;
+            enrichmentKey = null;
             if (cancelPartialRow && partialRecord) {
                 sender.cancelRow();
             }
@@ -350,6 +361,9 @@ final class RecordToRowHandler {
             timestampColumnValue = parseToMicros(value);
             return;
         }
+        if (name.equals(enrichmentKeyField)) {
+            enrichmentKey = value;
+        }
         String actualName = sanitizeName(name);
         if (symbolColumns.contains(actualName)) {
             sender.symbol(actualName, value);
@@ -364,6 +378,9 @@ final class RecordToRowHandler {
         if (isDesignatedRawField(name)) {
             timestampColumnValue = TimestampHelper.getTimestampUnits(timestampUnits, value).toMicros(value);
             return;
+        }
+        if (name.equals(enrichmentKeyField)) {
+            enrichmentKey = String.valueOf(value);
         }
         String actualName = sanitizeName(name);
         if (symbolColumns.contains(actualName)) {
@@ -397,6 +414,33 @@ final class RecordToRowHandler {
         this.sender = sender;
     }
 
+    /** Replaces the lookup used from the next record on. A null column means nothing to stamp. */
+    void setEnrichment(String column, Map<String, String> map) {
+        enrichmentColumn = column == null ? null : sanitizeName(column);
+        enrichmentMap = column == null ? Collections.emptyMap() : map;
+    }
+
+    /** Records whose key had no mapping since the last call. */
+    long takeEnrichmentMisses() {
+        long misses = enrichmentMisses;
+        enrichmentMisses = 0;
+        return misses;
+    }
+
+    private void stampEnrichment() {
+        if (enrichmentKey == null) {
+            return;
+        }
+        String value = enrichmentMap.get(enrichmentKey);
+        enrichmentKey = null;
+        if (value == null) {
+            enrichmentMisses++;
+        } else {
+            // QWP accepts a symbol after other columns of the row
+            sender.symbol(enrichmentColumn, value);
+        }
+    }
+
     boolean handle(SinkRecord record) {
         if (rawJson) {
             Object value = record.value();
@@ -410,6 +454,7 @@ final class RecordToRowHandler {
             return handleRawJson(record, (byte[]) value);
         }
         assert timestampColumnValue == Long.MIN_VALUE;
+        enrichmentKey = null;
 
         // Clear composed timestamp values from any previous failed record
         if (composedTimestampValues != null) {
@@ -453,10 +498,12 @@ final class RecordToRowHandler {
                             + " with the configured format '" + config.getTimestampFormat() + "'", e);
                 }
             }
+            stampEnrichment();
         } catch (InvalidDataException | LineSenderException ex) {
             // the handler is reused for every record: a row that failed after its
             // designated timestamp was parsed must not hand it to the next record
             timestampColumnValue = Long.MIN_VALUE;
+            enrichmentKey = null;
             if (cancelPartialRow && partialRecord) {
                 sender.cancelRow();
             }
@@ -577,6 +624,11 @@ final class RecordToRowHandler {
         }
         if (value == null) {
             return;
+        }
+        if (name.equals(enrichmentKeyField)) {
+            // capturing does not consume the field: it is still written as a column below
+            CharSequence keyText = symbolText(schema, value);
+            enrichmentKey = keyText == null ? null : keyText.toString();
         }
         if (!symbolColumns.isEmpty()) {
             String symbolName = (name.isEmpty() ? fallbackName : name).replace('.', '_');

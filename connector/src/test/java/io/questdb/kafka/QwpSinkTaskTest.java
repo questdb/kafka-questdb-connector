@@ -1,6 +1,7 @@
 package io.questdb.kafka;
 
 import io.questdb.client.LineSenderServerException;
+import io.questdb.client.QueryException;
 import io.questdb.client.Sender;
 import io.questdb.client.SenderError;
 import io.questdb.client.cutlass.http.client.HttpClientException;
@@ -861,6 +862,124 @@ class QwpSinkTaskTest {
     }
 
     @Test
+    void enrichmentInitialTransientFailureRetriesWithoutTouchingTheSender() {
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(sender, 10, ENRICHMENT, true);
+        task.enrichmentResults.add(new QueryException((byte) 0, "failed to create query client"));
+        task.enrichmentResults.add(lookup("7", "A"));
+
+        assertThrows(RetriableException.class, () -> task.put(Collections.singletonList(keyed(0, 7))));
+        assertEquals(Collections.singletonList(3_000L), task.fakeContext.timeouts);
+        assertEquals(0, sender.rows);
+
+        task.put(Collections.singletonList(keyed(0, 7)));
+        assertEquals(Collections.singletonList("A"), sender.symbols);
+        assertEquals(1, task.buildCalls);
+        assertEquals(0, sender.closeCalls);
+        assertTrue(task.fakeContext.rewinds.isEmpty());
+    }
+
+    @Test
+    void enrichmentInitialFailureOutlastingProgressTimeoutFailsTheTask() {
+        Map<String, String> props = new HashMap<>(ENRICHMENT);
+        props.put(QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "10");
+        TestTask task = startTask(new FakeSender(), 10, props, true);
+        for (int i = 0; i < 3; i++) {
+            task.enrichmentResults.add(new QueryException((byte) 0, "enrichment query timed out"));
+        }
+
+        assertThrows(RetriableException.class, () -> task.put(Collections.singletonList(keyed(0, 7))));
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(9);
+        assertThrows(RetriableException.class, () -> task.put(Collections.singletonList(keyed(0, 7))));
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(10);
+        ConnectException failure = assertThrows(ConnectException.class,
+                () -> task.put(Collections.singletonList(keyed(0, 7))));
+        assertFalse(failure instanceof RetriableException);
+    }
+
+    @Test
+    void enrichmentInitialServerRejectionFailsTheTask() {
+        TestTask task = startTask(new FakeSender(), 10, ENRICHMENT, true);
+        task.enrichmentResults.add(new QueryException((byte) 5, "table does not exist [table=sec_list]"));
+
+        ConnectException failure = assertThrows(ConnectException.class,
+                () -> task.put(Collections.singletonList(keyed(0, 7))));
+
+        assertFalse(failure instanceof RetriableException);
+        assertTrue(failure.getMessage().contains("table does not exist"));
+        assertTrue(task.fakeContext.timeouts.isEmpty());
+    }
+
+    @Test
+    void enrichmentFailedRefreshKeepsOldMappingAndDueRefreshReplacesIt() {
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(sender, 10, ENRICHMENT, true);
+        task.enrichmentResults.add(lookup("7", "A"));
+        task.enrichmentResults.add(new QueryException((byte) 6, "peer disconnect"));
+        task.enrichmentResults.add(lookup("7", "B"));
+
+        task.put(Collections.singletonList(keyed(0, 7)));
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(4_999);
+        task.put(Collections.singletonList(keyed(1, 7)));
+        assertEquals(1, task.loadCalls); // not due yet
+
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(5_000);
+        task.put(Collections.singletonList(keyed(2, 7))); // refresh fails
+        assertEquals(2, task.loadCalls);
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(9_999);
+        task.put(Collections.singletonList(keyed(3, 7))); // the failed attempt restarted the interval
+        assertEquals(2, task.loadCalls);
+        assertEquals(List.of("A", "A", "A", "A"), sender.symbols);
+
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(10_000);
+        task.put(Collections.singletonList(keyed(4, 7)));
+        assertEquals(List.of("A", "A", "A", "A", "B"), sender.symbols);
+
+        // a query failure is never a sender failure
+        assertEquals(1, task.buildCalls);
+        assertEquals(0, sender.closeCalls);
+        assertTrue(task.fakeContext.rewinds.isEmpty());
+    }
+
+    @Test
+    void enrichmentIsNotLoadedByAnEmptyPut() {
+        TestTask task = startTask(new FakeSender(), 10, ENRICHMENT, true);
+
+        task.put(Collections.emptyList());
+
+        assertEquals(0, task.loadCalls);
+    }
+
+    @Test
+    void enrichmentRefreshesOnTheQuarantinePathToo() {
+        FakeSender initial = new FakeSender();
+        FakeSender quarantine = new FakeSender();
+        TestTask task = startTask(List.of(initial, quarantine), 1, ENRICHMENT, true);
+        task.enrichmentResults.add(lookup("7", "A"));
+        task.enrichmentResults.add(lookup("7", "B"));
+        task.put(Collections.singletonList(keyed(0, 7)));
+        initial.awaitFailure = schemaMismatch(0);
+        task.put(Collections.emptyList());
+
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(5_000);
+        task.put(Collections.singletonList(keyed(0, 7)));
+
+        assertEquals(Collections.singletonList("B"), quarantine.symbols);
+    }
+
+    private static final Map<String, String> ENRICHMENT = Map.of(
+            QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG, "select id, ticker from sec_list",
+            QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG, "id");
+
+    private static SinkRecord keyed(long offset, long id) {
+        return recordValue(offset, Collections.singletonMap("id", id));
+    }
+
+    private static LookupEnrichment.Lookup lookup(String key, String value) {
+        return new LookupEnrichment.Lookup("ticker", Collections.singletonMap(key, value));
+    }
+
+    @Test
     void invalidCategoryFailsAtStart() {
         Map<String, String> props = Collections.singletonMap(
                 QuestDBSinkConnectorConfig.QWP_DLQ_TERMINAL_CATEGORIES_CONFIG, "NOT_A_CATEGORY");
@@ -1000,7 +1119,9 @@ class QwpSinkTaskTest {
         private final List<FakeSender> senders;
         private RuntimeException buildFailure;
         private int buildCalls;
+        private final ArrayDeque<Object> enrichmentResults = new ArrayDeque<>();
         private FakeContext fakeContext;
+        private int loadCalls;
         private long nowNanos;
 
         private TestTask(List<FakeSender> senders) {
@@ -1018,6 +1139,16 @@ class QwpSinkTaskTest {
                 throw new AssertionError("Unexpected sender build " + buildCalls);
             }
             return senders.get(index).proxy();
+        }
+
+        @Override
+        LookupEnrichment.Lookup loadEnrichment() {
+            loadCalls++;
+            Object next = enrichmentResults.removeFirst();
+            if (next instanceof RuntimeException) {
+                throw (RuntimeException) next;
+            }
+            return (LookupEnrichment.Lookup) next;
         }
 
         @Override
@@ -1046,6 +1177,7 @@ class QwpSinkTaskTest {
         private RuntimeException rowFailure;
         private int rows;
         private RuntimeException setterFailure;
+        private final List<String> symbols = new ArrayList<>();
         private boolean zeroDrainSucceeds = true;
         private final List<Long> writtenValues = new ArrayList<>();
         private List<Long> lastFlushed = Collections.emptyList();
@@ -1080,6 +1212,9 @@ class QwpSinkTaskTest {
                                     throw setterFailure;
                                 }
                                 currentValue = ((Number) args[1]).longValue();
+                                return proxy;
+                            case "symbol":
+                                symbols.add(String.valueOf(args[1]));
                                 return proxy;
                             case "flushAndGetSequence":
                                 if (flushFailure != null && (flushFailureAt < 0 || flushes == flushFailureAt)) {

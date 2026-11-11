@@ -216,6 +216,32 @@ public class QuestDBSinkConnectorConfigTest {
                 .findFirst().orElseThrow().errorMessages();
     }
 
+    @Test
+    public void testEnrichmentKeysMustBeSetTogether() {
+        for (String key : Arrays.asList(QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG, QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG)) {
+            Map<String, String> props = baseConnectorProps();
+            props.put("client.conf.string", "ws::addr=localhost:9000;");
+            props.put(key, "sec_id");
+            assertFalse(fieldErrors(new QuestDBSinkConnector(), props, QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG).isEmpty(), key);
+            assertThrows(ConfigException.class, () -> new QuestDBSinkConnectorConfig(props), key);
+        }
+    }
+
+    @Test
+    public void testEnrichmentRequiresQwpTransport() {
+        Map<String, String> props = baseConnectorProps();
+        props.put(QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG, "select sec_id, symbol from sec_list");
+        props.put(QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG, "sec_id");
+
+        props.put("client.conf.string", "ws::addr=localhost:9000;");
+        assertTrue(fieldErrors(new QuestDBSinkConnector(), props, QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG).isEmpty());
+
+        props.put("client.conf.string", "http::addr=localhost:9000;");
+        assertFalse(fieldErrors(new QuestDBSinkConnector(), props, QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG).isEmpty());
+        // the task is the only place that can check a conf string supplied through QDB_CLIENT_CONF
+        assertThrows(ConfigException.class, () -> new QuestDBSinkTask().start(props));
+    }
+
     private void assertValidateRejectsConfString(String confStr, String expectedMessage) {
         Map<String, String> config = baseConnectorProps();
         config.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, confStr);

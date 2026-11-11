@@ -74,6 +74,14 @@ public final class QuestDBSinkConnector extends SinkConnector {
         }
         // Environment-only configuration is resolved on the worker running the task.
         String confString = connectorConfigs.get(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG);
+        ConfigValue enrichmentSql = configValue(result, QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG);
+        try {
+            QuestDBSinkConnectorConfig.validateEnrichment((String) enrichmentSql.value(),
+                    (String) configValue(result, QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG).value(),
+                    isKnownNonQwp(confString));
+        } catch (ConfigException e) {
+            enrichmentSql.addErrorMessage(e.getMessage());
+        }
         if (confString != null) {
             try {
                 ClientConfUtils.validateConfString(confString.trim(), connectorConfigs);
@@ -82,6 +90,17 @@ public final class QuestDBSinkConnector extends SinkConnector {
             }
         }
         return result;
+    }
+
+    private static boolean isKnownNonQwp(String confString) {
+        if (blankToNull(confString) == null) {
+            return false; // QDB_CLIENT_CONF or the deprecated host option: the task decides
+        }
+        try {
+            return !ClientConfUtils.isQwp(ConfStringEnvInterpolator.expand(confString.trim()));
+        } catch (ConfigException e) {
+            return false; // not expandable on this worker; reported above or left to the task
+        }
     }
 
     private static String blankToNull(String value) {

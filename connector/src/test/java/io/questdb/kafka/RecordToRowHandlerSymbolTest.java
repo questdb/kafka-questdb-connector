@@ -7,8 +7,11 @@ import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -105,6 +108,82 @@ class RecordToRowHandlerSymbolTest {
         // which would make every record its own symbol value.
         assertThrows(InvalidDataException.class,
                 () -> handler.handle(new SinkRecord("tab", 0, null, null, schema, struct, 0L)));
+    }
+
+    /**
+     * Lookup enrichment: the key is read from the record, the looked-up value is stamped as a
+     * symbol after the row's own columns, and a record without a mapping is written as is.
+     */
+    @ParameterizedTest
+    @EnumSource(Shape.class)
+    void enrichmentStampsLookedUpValueAfterTheRowsOwnColumns(Shape shape) {
+        Recorder recorder = new Recorder();
+        Map<String, String> props = new HashMap<>();
+        props.put("client.conf.string", "ws::addr=localhost:9000;");
+        props.put("table", "tab");
+        props.put("include.key", "false");
+        props.put("enrichment.sql", "select sec_id, ticker from sec_list");
+        props.put("enrichment.key.field", "sec_id");
+        if (shape == Shape.RAW_JSON) {
+            props.put("value.format", "json");
+        }
+        RecordToRowHandler handler = new RecordToRowHandler(new QuestDBSinkConnectorConfig(props), recorder.proxy(), true, false, true);
+        Map<String, String> lookup = new HashMap<>();
+        lookup.put("42", "AAPL");
+        lookup.put("abc", "MSFT");
+        handler.setEnrichment("ticker", lookup);
+
+        handler.handle(shape.record(42L)); // numeric key: rendered as plain decimal on both sides
+        assertEquals(List.of("table(tab)", "longColumn(sec_id,42)", "doubleColumn(px,1.5)", "symbol(ticker,AAPL)", "atNow()"),
+                recorder.calls);
+
+        recorder.calls.clear();
+        handler.handle(shape.record("abc"));
+        assertEquals(List.of("table(tab)", "stringColumn(sec_id,abc)", "doubleColumn(px,1.5)", "symbol(ticker,MSFT)", "atNow()"),
+                recorder.calls);
+
+        recorder.calls.clear();
+        handler.handle(shape.record(7L)); // no mapping: the row is written, the column stays null
+        assertEquals(List.of("table(tab)", "longColumn(sec_id,7)", "doubleColumn(px,1.5)", "atNow()"), recorder.calls);
+
+        recorder.calls.clear();
+        handler.handle(shape.record(null)); // key field absent: neither a hit nor a miss
+        assertEquals(List.of("table(tab)", "doubleColumn(px,1.5)", "atNow()"), recorder.calls);
+
+        assertEquals(1, handler.takeEnrichmentMisses());
+        assertEquals(0, handler.takeEnrichmentMisses());
+    }
+
+    private enum Shape {
+        STRUCT, MAP, RAW_JSON;
+
+        /** A record {sec_id, px}; a null id leaves the field out. */
+        private SinkRecord record(Object id) {
+            switch (this) {
+                case STRUCT:
+                    SchemaBuilder builder = SchemaBuilder.struct();
+                    if (id != null) {
+                        builder.field("sec_id", id instanceof Long ? Schema.INT64_SCHEMA : Schema.STRING_SCHEMA);
+                    }
+                    Schema schema = builder.field("px", Schema.FLOAT64_SCHEMA).build();
+                    Struct struct = new Struct(schema).put("px", 1.5d);
+                    if (id != null) {
+                        struct.put("sec_id", id);
+                    }
+                    return new SinkRecord("tab", 0, null, null, schema, struct, 0L);
+                case MAP:
+                    Map<String, Object> value = new LinkedHashMap<>();
+                    if (id != null) {
+                        value.put("sec_id", id);
+                    }
+                    value.put("px", 1.5d);
+                    return new SinkRecord("tab", 0, null, null, null, value, 0L);
+                default:
+                    String idJson = id == null ? "" : "\"sec_id\":" + (id instanceof Long ? id.toString() : "\"" + id + "\"") + ",";
+                    return new SinkRecord("tab", 0, null, null, null,
+                            ("{" + idJson + "\"px\":1.5}").getBytes(StandardCharsets.UTF_8), 0L);
+            }
+        }
     }
 
     private static RecordToRowHandler newHandler(Recorder recorder, boolean routeSymbolsDirectly) {

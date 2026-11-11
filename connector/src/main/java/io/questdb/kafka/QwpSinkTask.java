@@ -61,6 +61,13 @@ class QwpSinkTask extends SinkTask {
     private Throwable deferredFailure;
     private EnumSet<SenderError.Category> dlqEligibleCategories;
     private boolean dlqUsable;
+    // Lookup enrichment; null when not configured. Its clocks are deliberately separate from
+    // lastProgressNanos: a lookup that does not load says nothing about acknowledgements.
+    private LookupEnrichment enrichment;
+    private long enrichmentFirstFailureNanos;
+    private boolean enrichmentInitialLoadFailing;
+    private long enrichmentLastRefreshNanos;
+    private boolean enrichmentLoaded;
     // Rows written to the sender since the last checkpoint, one mutable range per partition so
     // the per-row path allocates nothing after a partition's first row.
     private Map<TopicPartition, Range> buffered = new HashMap<>();
@@ -117,6 +124,10 @@ class QwpSinkTask extends SinkTask {
                 true,
                 RecordToRowHandler.NameLimits.QWP
         );
+        if (config.getEnrichmentSql() != null) {
+            // Unpatched string: the query client ignores the sender-only keys.
+            enrichment = new LookupEnrichment(confString, config.getEnrichmentSql(), config.getEnrichmentQueryTimeoutMs());
+        }
         lastProgressNanos = nanoTime();
     }
 
@@ -145,9 +156,16 @@ class QwpSinkTask extends SinkTask {
                 // settled or rejected chunk. Without the check here a server that stops
                 // answering mid-quarantine would be retried forever.
                 detectStall();
+                // After the stall check, not before it: a slow reload must not be counted
+                // against qwp.progress.timeout.ms before the drain below can observe the
+                // acknowledgement that arrived meanwhile.
+                refreshEnrichment(batch);
                 deliverInQuarantine(batch);
                 return;
             }
+            // Pipelined: probe() below observes acknowledgements before detectStall() runs, so
+            // the time a reload takes is never mistaken for a stalled server.
+            refreshEnrichment(batch);
 
             if (batch.isEmpty()) {
                 // An idle put is the task tick that can release a backpressure pause. Publish
@@ -270,12 +288,23 @@ class QwpSinkTask extends SinkTask {
     @Override
     public void stop() {
         closeSenderBounded(null);
+        if (enrichment != null) {
+            try {
+                enrichment.close();
+            } catch (RuntimeException e) {
+                log.warn("Failed to close the enrichment query client", e);
+            }
+        }
     }
 
     Sender buildSender(String confString) {
         return Sender.builder(confString)
                 .errorHandler(this::onSenderError)
                 .build();
+    }
+
+    LookupEnrichment.Lookup loadEnrichment() {
+        return enrichment.load();
     }
 
     long nanoTime() {
@@ -739,6 +768,54 @@ class QwpSinkTask extends SinkTask {
             mode = Mode.QUARANTINE;
             log.warn("Entering QWP quarantine [until={}]", quarantineUntil);
         }
+    }
+
+    /**
+     * Reloads the lookup synchronously when it is due. Nothing the query client throws may
+     * leave this method as is: the catch blocks of put() would read it as a failure of the
+     * Sender and retire it.
+     */
+    private void refreshEnrichment(List<SinkRecord> batch) {
+        if (enrichment == null || batch.isEmpty()) {
+            return;
+        }
+        if (enrichmentLoaded
+                && nanoTime() - enrichmentLastRefreshNanos < TimeUnit.MILLISECONDS.toNanos(config.getEnrichmentRefreshMs())) {
+            return;
+        }
+        long misses = recordHandler.takeEnrichmentMisses();
+        if (misses > 0) {
+            log.info("Enrichment lookup had no mapping for {} record(s) since the previous refresh", misses);
+        }
+        try {
+            LookupEnrichment.Lookup lookup = loadEnrichment();
+            recordHandler.setEnrichment(lookup.column, lookup.map);
+            enrichmentLoaded = true;
+        } catch (RuntimeException e) {
+            if (!enrichmentLoaded) {
+                throw initialEnrichmentFailure(e);
+            }
+            log.warn("Enrichment lookup refresh failed; keeping the previous mapping", e);
+        }
+        // Stamped after the load, also when it failed, so the next attempt waits a full interval.
+        enrichmentLastRefreshNanos = nanoTime();
+    }
+
+    /** The first load is mandatory: without it a restarted task would write a batch of nulls. */
+    private ConnectException initialEnrichmentFailure(RuntimeException failure) {
+        if (!LookupEnrichment.isTransient(failure)) {
+            return new ConnectException("Enrichment lookup failed: " + failure.getMessage(), failure);
+        }
+        long now = nanoTime();
+        if (!enrichmentInitialLoadFailing) {
+            enrichmentInitialLoadFailing = true;
+            enrichmentFirstFailureNanos = now;
+        } else if (now - enrichmentFirstFailureNanos >= TimeUnit.MILLISECONDS.toNanos(config.getQwpProgressTimeoutMs())) {
+            return new ConnectException("Enrichment lookup could not be loaded for "
+                    + config.getQwpProgressTimeoutMs() + " ms", failure);
+        }
+        context.timeout(config.getRetryBackoffMs());
+        return new RetriableException("Enrichment lookup is not available yet; will retry", failure);
     }
 
     private void reportRecordFailure(SinkRecord record, InvalidDataException failure) {
