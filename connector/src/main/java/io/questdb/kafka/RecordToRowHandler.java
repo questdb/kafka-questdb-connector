@@ -393,6 +393,9 @@ final class RecordToRowHandler {
     }
 
     private void writeJsonDouble(String name, double value) {
+        if (name.equals(enrichmentKeyField)) {
+            enrichmentKey = String.valueOf(value);
+        }
         String actualName = sanitizeName(name);
         if (symbolColumns.contains(actualName)) {
             sender.symbol(actualName, String.valueOf(value));
@@ -402,6 +405,9 @@ final class RecordToRowHandler {
     }
 
     private void writeJsonBool(String name, boolean value) {
+        if (name.equals(enrichmentKeyField)) {
+            enrichmentKey = String.valueOf(value);
+        }
         String actualName = sanitizeName(name);
         if (symbolColumns.contains(actualName)) {
             sender.symbol(actualName, String.valueOf(value));

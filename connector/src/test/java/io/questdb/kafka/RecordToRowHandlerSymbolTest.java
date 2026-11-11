@@ -131,6 +131,8 @@ class RecordToRowHandlerSymbolTest {
         Map<String, String> lookup = new HashMap<>();
         lookup.put("42", "AAPL");
         lookup.put("abc", "MSFT");
+        lookup.put("42.5", "IBM");
+        lookup.put("true", "ORCL");
         handler.setEnrichment("ticker", lookup);
 
         handler.handle(shape.record(42L)); // numeric key: rendered as plain decimal on both sides
@@ -140,6 +142,16 @@ class RecordToRowHandlerSymbolTest {
         recorder.calls.clear();
         handler.handle(shape.record("abc"));
         assertEquals(List.of("table(tab)", "stringColumn(sec_id,abc)", "doubleColumn(px,1.5)", "symbol(ticker,MSFT)", "atNow()"),
+                recorder.calls);
+
+        // every scalar key is captured as its text on every path, so the miss count agrees too
+        recorder.calls.clear();
+        handler.handle(shape.record(42.5d));
+        assertEquals(List.of("table(tab)", "doubleColumn(sec_id,42.5)", "doubleColumn(px,1.5)", "symbol(ticker,IBM)", "atNow()"),
+                recorder.calls);
+        recorder.calls.clear();
+        handler.handle(shape.record(true));
+        assertEquals(List.of("table(tab)", "boolColumn(sec_id,true)", "doubleColumn(px,1.5)", "symbol(ticker,ORCL)", "atNow()"),
                 recorder.calls);
 
         recorder.calls.clear();
@@ -163,7 +175,10 @@ class RecordToRowHandlerSymbolTest {
                 case STRUCT:
                     SchemaBuilder builder = SchemaBuilder.struct();
                     if (id != null) {
-                        builder.field("sec_id", id instanceof Long ? Schema.INT64_SCHEMA : Schema.STRING_SCHEMA);
+                        builder.field("sec_id", id instanceof Long ? Schema.INT64_SCHEMA
+                                : id instanceof Double ? Schema.FLOAT64_SCHEMA
+                                : id instanceof Boolean ? Schema.BOOLEAN_SCHEMA
+                                : Schema.STRING_SCHEMA);
                     }
                     Schema schema = builder.field("px", Schema.FLOAT64_SCHEMA).build();
                     Struct struct = new Struct(schema).put("px", 1.5d);
@@ -179,7 +194,7 @@ class RecordToRowHandlerSymbolTest {
                     value.put("px", 1.5d);
                     return new SinkRecord("tab", 0, null, null, null, value, 0L);
                 default:
-                    String idJson = id == null ? "" : "\"sec_id\":" + (id instanceof Long ? id.toString() : "\"" + id + "\"") + ",";
+                    String idJson = id == null ? "" : "\"sec_id\":" + (id instanceof String ? "\"" + id + "\"" : id.toString()) + ",";
                     return new SinkRecord("tab", 0, null, null, null,
                             ("{" + idJson + "\"px\":1.5}").getBytes(StandardCharsets.UTF_8), 0L);
             }
