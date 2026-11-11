@@ -81,7 +81,9 @@ class LookupEnrichmentContainerTest {
     @CsvSource(delimiter = '|', value = {
             "select k, v, ts from %s | must return exactly two columns",
             "select k, 1.5 v from %s | value column 'v' must be VARCHAR, STRING or SYMBOL",
-            "select ts, v from %s | key column 'ts' must be VARCHAR, STRING, SYMBOL or an integer type"
+            "select ts, v from %s | key column 'ts' must be VARCHAR, STRING, SYMBOL or an integer type",
+            // runs once, then the load fails rather than running it again on every refresh
+            "create table if not exists %s_created (a int) | must be a query"
     })
     void rejectsAResultItCannotUse(String sqlTemplate, String expectedMessage) {
         String table = createTable("k LONG, v SYMBOL, ts TIMESTAMP");

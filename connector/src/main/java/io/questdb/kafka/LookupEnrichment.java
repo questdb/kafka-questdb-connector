@@ -225,6 +225,12 @@ final class LookupEnrichment {
         }
 
         @Override
+        public void onExecDone(short opType, long rowsAffected) {
+            // The statement has run once; failing the load keeps it from running on every refresh.
+            error = "enrichment.sql must be a query returning (lookup key, value), not a statement";
+        }
+
+        @Override
         public void onError(byte status, String message) {
             // await() rethrows it as QueryException
         }
