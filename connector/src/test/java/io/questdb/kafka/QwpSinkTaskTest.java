@@ -24,6 +24,7 @@ import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTaskContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -965,6 +966,53 @@ class QwpSinkTaskTest {
         task.put(Collections.singletonList(keyed(0, 7)));
 
         assertEquals(Collections.singletonList("B"), quarantine.symbols);
+    }
+
+    /**
+     * A value column the row already uses would fail or lose the enrichment of every record that
+     * has a mapping. The names the configuration reveals are rejected when the lookup loads.
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "ID        |                              | enrichment.key.field",
+            "ticker    | symbols=ticker               | symbols",
+            "px        | doubles=px                   | doubles",
+            "seen      | timestamp.string.fields=seen | timestamp.string.fields",
+            "Timestamp |                              | designated timestamp",
+            "ts        | timestamp.field.name=ts      | designated timestamp"
+    })
+    void enrichmentRejectsAValueColumnTheRowAlreadyUses(String column, String setting, String reason) {
+        Map<String, String> props = new HashMap<>(ENRICHMENT);
+        if (setting != null) {
+            String[] keyValue = setting.split("=");
+            props.put(keyValue[0], keyValue[1]);
+        }
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(sender, 10, props, true);
+        task.enrichmentResults.add(new LookupEnrichment.Lookup(column, Collections.singletonMap("7", "A")));
+
+        ConnectException failure = assertThrows(ConnectException.class,
+                () -> task.put(Collections.singletonList(keyed(0, 7))));
+
+        assertFalse(failure instanceof RetriableException);
+        assertTrue(failure.getMessage().contains("'" + column + "'"), failure.getMessage());
+        assertTrue(failure.getMessage().contains(reason), failure.getMessage());
+        assertEquals(0, sender.rows);
+    }
+
+    @Test
+    void enrichmentRefreshWithAClashingValueColumnKeepsThePreviousMapping() {
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(sender, 10, ENRICHMENT, true);
+        task.enrichmentResults.add(lookup("7", "A"));
+        task.enrichmentResults.add(new LookupEnrichment.Lookup("id", Collections.singletonMap("7", "B")));
+
+        task.put(Collections.singletonList(keyed(0, 7)));
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(5_000);
+        task.put(Collections.singletonList(keyed(1, 7)));
+
+        assertEquals(2, task.loadCalls);
+        assertEquals(List.of("A", "A"), sender.symbols);
     }
 
     private static final Map<String, String> ENRICHMENT = Map.of(

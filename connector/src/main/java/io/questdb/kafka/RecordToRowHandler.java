@@ -11,6 +11,7 @@ import io.questdb.kafka.compat.datetime.DateFormat;
 import io.questdb.kafka.compat.datetime.DateLocaleFactory;
 import io.questdb.kafka.compat.datetime.microtime.Micros;
 import org.apache.kafka.connect.data.*;
+import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -420,10 +421,61 @@ final class RecordToRowHandler {
         this.sender = sender;
     }
 
-    /** Replaces the lookup used from the next record on. A null column means nothing to stamp. */
+    /**
+     * Replaces the lookup used from the next record on. A null column means nothing to stamp.
+     * Throws, leaving the previous lookup in place, when the value column has a name the row
+     * is known to use for something else.
+     */
     void setEnrichment(String column, Map<String, String> map) {
-        enrichmentColumn = column == null ? null : sanitizeName(column);
-        enrichmentMap = column == null ? Collections.emptyMap() : map;
+        if (column == null) {
+            enrichmentColumn = null;
+            enrichmentMap = Collections.emptyMap();
+            return;
+        }
+        String sanitized = sanitizeName(column);
+        String clash = enrichmentColumnClash(sanitized);
+        if (clash != null) {
+            throw new ConnectException("enrichment.sql value column '" + sanitized + "' " + clash
+                    + "; rename it in the SQL with an alias (... AS another_name)");
+        }
+        enrichmentColumn = sanitized;
+        enrichmentMap = map;
+    }
+
+    /**
+     * Why the enriched column cannot have this name, or null. Checks only what the configuration
+     * reveals; a record field that is not named anywhere in it is caught when the row is built.
+     * QuestDB column names are case-insensitive, and so is the client that buffers the row.
+     */
+    private String enrichmentColumnClash(String column) {
+        if (enrichmentKeyField != null && column.equalsIgnoreCase(enrichmentKeyField.replace('.', '_'))) {
+            return "has the name of " + QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG
+                    + ", which is written as a column too";
+        }
+        String listedIn = containsIgnoreCase(symbolColumns, column) ? QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG
+                : containsIgnoreCase(doubleColumns, column) ? QuestDBSinkConnectorConfig.DOUBLE_COLUMNS_CONFIG
+                : containsIgnoreCase(stringTimestampColumns, column) ? QuestDBSinkConnectorConfig.TIMESTAMP_STRING_FIELDS
+                : null;
+        if (listedIn != null) {
+            return "is listed in '" + listedIn + "' as a record field";
+        }
+        // A text value under the designated timestamp's name fails on the server (QuestDB 10.0
+        // and 10.1 cast it to a timestamp), and the task cannot get past the rejected batch.
+        // 'timestamp' is the name the server gives the designated column of a table it creates.
+        if (column.equalsIgnoreCase("timestamp") || column.equalsIgnoreCase(timestampColumnName)) {
+            return "has the name of a designated timestamp column ('timestamp' in a table the server"
+                    + " creates, or " + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG + ')';
+        }
+        return null;
+    }
+
+    private static boolean containsIgnoreCase(Set<? extends CharSequence> names, String name) {
+        for (CharSequence candidate : names) {
+            if (name.equalsIgnoreCase(candidate.toString())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Records whose key had no mapping since the last call. */
