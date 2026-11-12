@@ -3,8 +3,11 @@ package io.questdb.kafka;
 import io.questdb.client.QueryException;
 import io.questdb.client.Sender;
 import io.questdb.client.cutlass.qwp.protocol.QwpConstants;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.sink.SinkRecord;
+import org.apache.kafka.connect.sink.SinkTaskContext;
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -17,9 +20,12 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Proxy;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.time.Duration;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -117,12 +123,60 @@ class LookupEnrichmentContainerTest {
      */
     @Test
     void aServerQueryTimeoutIsTransient() {
-        // a valid (key, value) shape whose filter passes nothing, so it runs until it is stopped
-        QueryException failure = assertThrows(QueryException.class,
-                () -> load("select x, rnd_str(5,5,0) v from long_sequence(100000000000) where rnd_double() > 2"));
+        QueryException failure = assertThrows(QueryException.class, () -> load(NEVER_ENDING));
 
         assertEquals(QwpConstants.STATUS_LIMIT_EXCEEDED, failure.getStatus(), failure.getMessage());
         assertTrue(LookupEnrichment.isTransient(failure), failure.getMessage());
+    }
+
+    /**
+     * A query the client abandons is a failed load, not a short result: a refresh would otherwise
+     * replace the lookup with whatever had arrived. The client gives up here before the server does.
+     */
+    @Test
+    void aQueryOutlastingTheClientTimeoutFailsTheLoad() {
+        LookupEnrichment enrichment = new LookupEnrichment(confString(), NEVER_ENDING, 1_000L);
+        try {
+            QueryException failure = assertThrows(QueryException.class, enrichment::load);
+
+            assertEquals(0, failure.getStatus(), failure.getMessage());
+            assertTrue(failure.getMessage().contains("timed out after 1000 ms"), failure.getMessage());
+            assertTrue(LookupEnrichment.isTransient(failure));
+        } finally {
+            enrichment.close();
+        }
+    }
+
+    /**
+     * The task keeps its query client between reloads, so stop() must close it. Observed at a
+     * proxy, where the task's sender and its query client each hold one connection.
+     */
+    @Test
+    void stoppingTheTaskClosesItsQueryConnection() throws IOException {
+        String lookup = createTable("k LONG, v SYMBOL");
+        insert(lookup, "7, 'ACME'");
+        String table = ConnectTestUtils.newTableName();
+        try (TcpProxy proxy = new TcpProxy(QUESTDB.getHost(), httpPort())) {
+            QwpSinkTask task = new QwpSinkTask();
+            task.initialize((SinkTaskContext) Proxy.newProxyInstance(SinkTaskContext.class.getClassLoader(),
+                    new Class<?>[]{SinkTaskContext.class}, (self, method, args) -> null)); // no DLQ, no-op callbacks
+            Map<String, String> props = new HashMap<>();
+            props.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG,
+                    "ws::addr=127.0.0.1:" + proxy.port() + ";auto_flush_rows=1;");
+            props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, table);
+            props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+            props.put(QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG, "select k, v from " + lookup);
+            props.put(QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG, "sec_id");
+            task.start(props);
+            task.open(Collections.singleton(new TopicPartition("topic", 0)));
+
+            task.put(Collections.singletonList(new SinkRecord("topic", 0, null, null, null, Map.of("sec_id", 7L), 0L)));
+            assertEquals(2, proxy.openConnections());
+            task.stop();
+
+            Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> proxy.openConnections() == 0);
+        }
+        QuestDBUtils.assertSqlEventually("\"sec_id\",\"v\"\r\n7,\"ACME\"\r\n", "select sec_id, v from " + table, httpPort());
     }
 
     /**
@@ -194,6 +248,10 @@ class LookupEnrichmentContainerTest {
         return new SinkRecord(table, 0, null, null, null, value, 0L);
     }
 
+    /** A valid (key, value) shape whose filter passes nothing, so it runs until it is stopped. */
+    private static final String NEVER_ENDING =
+            "select x, rnd_str(5,5,0) v from long_sequence(100000000000) where rnd_double() > 2";
+
     private static String confString() {
         return "ws::addr=" + QUESTDB.getHost() + ':' + QUESTDB.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT) + ';';
     }
@@ -226,6 +284,7 @@ class LookupEnrichmentContainerTest {
 
     /** Forwards TCP connections to the server and can drop all of them at once. */
     private static final class TcpProxy implements Closeable {
+        private final List<Socket> clients = new CopyOnWriteArrayList<>();
         private final ServerSocket listener;
         private final List<Socket> sockets = new CopyOnWriteArrayList<>();
         private final String upstreamHost;
@@ -242,6 +301,17 @@ class LookupEnrichmentContainerTest {
 
         int port() {
             return listener.getLocalPort();
+        }
+
+        /** Client connections not yet closed; a pump closes both ends once the client closes its own. */
+        int openConnections() {
+            int open = 0;
+            for (Socket client : clients) {
+                if (!client.isClosed()) {
+                    open++;
+                }
+            }
+            return open;
         }
 
         void severAll() {
@@ -262,6 +332,7 @@ class LookupEnrichmentContainerTest {
                 while (true) {
                     Socket client = listener.accept();
                     Socket upstream = new Socket(upstreamHost, upstreamPort);
+                    clients.add(client);
                     sockets.add(client);
                     sockets.add(upstream);
                     pump(client, upstream);

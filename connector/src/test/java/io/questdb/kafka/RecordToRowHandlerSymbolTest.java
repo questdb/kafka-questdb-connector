@@ -243,6 +243,41 @@ class RecordToRowHandlerSymbolTest {
         }
     }
 
+    /** A record that fails after its key was captured must not hand the key to the next record. */
+    @ParameterizedTest
+    @EnumSource(Shape.class)
+    void aFailedRecordDoesNotLendItsKeyToTheNext(Shape shape) {
+        Recorder recorder = new Recorder();
+        RecordToRowHandler handler = enrichedHandler(recorder, "sec_id", shape.props());
+        handler.setEnrichment("ticker", Map.of("42", "AAPL"));
+
+        // sec_id is captured, then a later field is rejected
+        assertThrows(InvalidDataException.class, () -> handler.handle(shape.failingAfterKey(42L)));
+        recorder.calls.clear();
+        handler.handle(shape.record(null)); // no key field
+
+        assertEquals(List.of("table(tab)", "doubleColumn(px,1.5)", "atNow()"), recorder.calls);
+    }
+
+    /** The symbols branch writes the column and returns, so the key must be captured before it. */
+    @ParameterizedTest
+    @EnumSource(Shape.class)
+    void aKeyFieldListedInSymbolsIsStillLookedUp(Shape shape) {
+        Recorder recorder = new Recorder();
+        Map<String, String> props = new HashMap<>(shape.props());
+        props.put("symbols", "sec_id");
+        RecordToRowHandler handler = enrichedHandler(recorder, "sec_id", props);
+        handler.setEnrichment("ticker", Map.of("42", "AAPL", "abc", "MSFT"));
+
+        handler.handle(shape.record("abc"));
+        handler.handle(shape.record(42L));
+
+        assertEquals(List.of(
+                "table(tab)", "symbol(sec_id,abc)", "doubleColumn(px,1.5)", "symbol(ticker,MSFT)", "atNow()",
+                "table(tab)", "symbol(sec_id,42)", "doubleColumn(px,1.5)", "symbol(ticker,AAPL)", "atNow()"),
+                recorder.calls);
+    }
+
     private static RecordToRowHandler enrichedHandler(Recorder recorder, String keyField, Map<String, String> extra) {
         Map<String, String> props = new HashMap<>();
         props.put("client.conf.string", "ws::addr=localhost:9000;");
@@ -259,6 +294,31 @@ class RecordToRowHandlerSymbolTest {
 
     private enum Shape {
         STRUCT, MAP, RAW_JSON;
+
+        private Map<String, String> props() {
+            return this == RAW_JSON ? Map.of("value.format", "json") : Map.of();
+        }
+
+        /** A record {sec_id, px} whose px is of a type the connector rejects. */
+        private SinkRecord failingAfterKey(long id) {
+            switch (this) {
+                case STRUCT:
+                    Schema schema = SchemaBuilder.struct()
+                            .field("sec_id", Schema.INT64_SCHEMA)
+                            .field("px", Schema.BYTES_SCHEMA)
+                            .build();
+                    Struct struct = new Struct(schema).put("sec_id", id).put("px", new byte[]{1});
+                    return new SinkRecord("tab", 0, null, null, schema, struct, 0L);
+                case MAP:
+                    Map<String, Object> value = new LinkedHashMap<>();
+                    value.put("sec_id", id);
+                    value.put("px", new byte[]{1});
+                    return new SinkRecord("tab", 0, null, null, null, value, 0L);
+                default:
+                    return new SinkRecord("tab", 0, null, null, null,
+                            ("{\"sec_id\":" + id + ",\"px\":[1,\"a\"]}").getBytes(StandardCharsets.UTF_8), 0L);
+            }
+        }
 
         /** A record {sec_id, px}; a null id leaves the field out. */
         private SinkRecord record(Object id) {

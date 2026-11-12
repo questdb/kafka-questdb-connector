@@ -156,6 +156,7 @@ final class RecordToRowHandler {
      */
     boolean handleRawJson(SinkRecord record, byte[] payload) {
         assert timestampColumnValue == Long.MIN_VALUE;
+        // A failed record can leave its key captured, so every record starts by clearing it.
         enrichmentKey = null;
         if (payload == null) {
             return false; // tombstone
@@ -194,7 +195,6 @@ final class RecordToRowHandler {
         } catch (InvalidDataException | LineSenderException ex) {
             // a half-written row must not leak its timestamp into the next record
             timestampColumnValue = Long.MIN_VALUE;
-            enrichmentKey = null;
             if (cancelPartialRow && partialRecord) {
                 sender.cancelRow();
             }
@@ -534,6 +534,7 @@ final class RecordToRowHandler {
             return handleRawJson(record, (byte[]) value);
         }
         assert timestampColumnValue == Long.MIN_VALUE;
+        // A failed record can leave its key captured, so every record starts by clearing it.
         enrichmentKey = null;
 
         // Clear composed timestamp values from any previous failed record
@@ -583,7 +584,6 @@ final class RecordToRowHandler {
             // the handler is reused for every record: a row that failed after its
             // designated timestamp was parsed must not hand it to the next record
             timestampColumnValue = Long.MIN_VALUE;
-            enrichmentKey = null;
             if (cancelPartialRow && partialRecord) {
                 sender.cancelRow();
             }

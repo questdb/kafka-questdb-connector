@@ -1076,6 +1076,63 @@ class QwpSinkTaskTest {
         }
     }
 
+    /**
+     * A reload blocks put(), and the server may acknowledge meanwhile. Pipelined, the probe must
+     * observe that acknowledgement before the stall check runs, or the time the reload took is
+     * read as qwp.progress.timeout.ms without progress.
+     */
+    @Test
+    void aSlowReloadIsNotMistakenForAStalledServer() {
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(sender, 1, SLOW_RELOAD, true);
+        task.enrichmentResults.add(lookup("7", "A"));
+        task.enrichmentResults.add(lookup("7", "B"));
+        task.put(Collections.singletonList(keyed(0, 7))); // published, not yet acknowledged
+
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(5);
+        task.duringLoad = () -> {
+            task.nowNanos += TimeUnit.MILLISECONDS.toNanos(20);
+            sender.ackedFsn = 0L;
+        };
+        assertDoesNotThrow(() -> task.put(Collections.singletonList(keyed(1, 7))));
+
+        assertEquals(2, task.loadCalls);
+        assertEquals(List.of("A", "B"), sender.symbols);
+    }
+
+    /** In quarantine the drain observes acknowledgements, so the reload must follow the stall check. */
+    @Test
+    void aSlowReloadDuringQuarantineIsNotMistakenForAStalledServer() {
+        FakeSender initial = new FakeSender();
+        FakeSender quarantine = new FakeSender();
+        quarantine.drainSucceeds = false;
+        TestTask task = startTask(List.of(initial, quarantine), 1, SLOW_RELOAD, true);
+        task.enrichmentResults.add(lookup("7", "A"));
+        task.enrichmentResults.add(lookup("7", "B"));
+        List<SinkRecord> batch = Collections.singletonList(keyed(0, 7));
+        task.put(batch);
+        initial.awaitFailure = schemaMismatch(0);
+        task.put(Collections.emptyList());
+        assertThrows(RetriableException.class, () -> task.put(batch)); // written, not yet acknowledged
+
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(5);
+        task.duringLoad = () -> {
+            task.nowNanos += TimeUnit.MILLISECONDS.toNanos(20);
+            quarantine.drainSucceeds = true;
+        };
+        assertDoesNotThrow(() -> task.put(batch));
+
+        assertEquals(2, task.loadCalls);
+        assertEquals("PIPELINED", field(task, "mode").toString());
+    }
+
+    /** Reloads whenever records arrive; a reload taking 20 ms outlasts the progress timeout. */
+    private static final Map<String, String> SLOW_RELOAD = Map.of(
+            QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG, "select id, ticker from sec_list",
+            QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG, "id",
+            QuestDBSinkConnectorConfig.ENRICHMENT_REFRESH_MS_CONFIG, "1",
+            QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "10");
+
     private static void putAfterRefresh(TestTask task, int interval, SinkRecord record) {
         task.nowNanos = TimeUnit.MILLISECONDS.toNanos(5_000L * interval);
         task.put(Collections.singletonList(record));
@@ -1233,6 +1290,8 @@ class QwpSinkTaskTest {
         private final List<FakeSender> senders;
         private RuntimeException buildFailure;
         private int buildCalls;
+        /** Runs inside each load: what happens while the task is blocked on the query. */
+        private Runnable duringLoad = () -> { };
         private final ArrayDeque<Object> enrichmentResults = new ArrayDeque<>();
         private FakeContext fakeContext;
         private int loadCalls;
@@ -1258,6 +1317,7 @@ class QwpSinkTaskTest {
         @Override
         LookupEnrichment.Lookup loadEnrichment() {
             loadCalls++;
+            duringLoad.run();
             Object next = enrichmentResults.removeFirst();
             if (next instanceof RuntimeException) {
                 throw (RuntimeException) next;
