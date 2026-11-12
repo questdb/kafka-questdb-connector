@@ -34,17 +34,24 @@ final class LookupEnrichment {
     }
 
     /**
-     * True for failures that say nothing about the query itself. The client reports its own
-     * failures (connect, pool, timeout) with status 0, and a connection lost mid-query with
-     * STATUS_INTERNAL_ERROR - which a server-side internal error shares, so that one is
-     * retried too. Everything else is the server rejecting the SQL.
+     * True for failures that say nothing about the query itself, which the first load retries.
+     * The client reports its own failures (connect, pool, timeout) with status 0, and a
+     * connection lost mid-query with STATUS_INTERNAL_ERROR - which a server-side internal error
+     * shares, so that one is retried too. The server reports its query timeout, circuit breaker
+     * and memory limit as STATUS_LIMIT_EXCEEDED, and a query cancelled there as STATUS_CANCELLED;
+     * both can pass on a later attempt. The one limit that cannot, a single row larger than the
+     * send buffer, is then retried until qwp.progress.timeout.ms. Everything else is the server
+     * rejecting the SQL.
      */
     static boolean isTransient(Throwable failure) {
         if (!(failure instanceof QueryException)) {
             return false;
         }
         byte status = ((QueryException) failure).getStatus();
-        return status == 0 || status == WebSocketResponse.STATUS_INTERNAL_ERROR;
+        return status == 0
+                || status == WebSocketResponse.STATUS_INTERNAL_ERROR
+                || status == QwpConstants.STATUS_LIMIT_EXCEEDED
+                || status == QwpConstants.STATUS_CANCELLED;
     }
 
     /**

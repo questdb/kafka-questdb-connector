@@ -862,11 +862,13 @@ class QwpSinkTaskTest {
         }
     }
 
-    @Test
-    void enrichmentInitialTransientFailureRetriesWithoutTouchingTheSender() {
+    /** Client failures (0), a lost connection (6), a server-side cancel (10) or limit (11). */
+    @ParameterizedTest
+    @ValueSource(bytes = {0x00, 0x06, 0x0A, 0x0B})
+    void enrichmentInitialTransientFailureRetriesWithoutTouchingTheSender(byte status) {
         FakeSender sender = new FakeSender();
         TestTask task = startTask(sender, 10, ENRICHMENT, true);
-        task.enrichmentResults.add(new QueryException((byte) 0, "failed to create query client"));
+        task.enrichmentResults.add(new QueryException(status, "failed to create query client"));
         task.enrichmentResults.add(lookup("7", "A"));
 
         assertThrows(RetriableException.class, () -> task.put(Collections.singletonList(keyed(0, 7))));
@@ -898,10 +900,12 @@ class QwpSinkTaskTest {
         assertFalse(failure instanceof RetriableException);
     }
 
-    @Test
-    void enrichmentInitialServerRejectionFailsTheTask() {
+    /** The server rejecting the SQL (5) or the user's permissions (8). */
+    @ParameterizedTest
+    @ValueSource(bytes = {0x05, 0x08})
+    void enrichmentInitialServerRejectionFailsTheTask(byte status) {
         TestTask task = startTask(new FakeSender(), 10, ENRICHMENT, true);
-        task.enrichmentResults.add(new QueryException((byte) 5, "table does not exist [table=sec_list]"));
+        task.enrichmentResults.add(new QueryException(status, "table does not exist [table=sec_list]"));
 
         ConnectException failure = assertThrows(ConnectException.class,
                 () -> task.put(Collections.singletonList(keyed(0, 7))));

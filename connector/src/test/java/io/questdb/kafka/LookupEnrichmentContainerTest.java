@@ -2,6 +2,7 @@ package io.questdb.kafka;
 
 import io.questdb.client.QueryException;
 import io.questdb.client.Sender;
+import io.questdb.client.cutlass.qwp.protocol.QwpConstants;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.junit.jupiter.api.Test;
@@ -38,7 +39,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class LookupEnrichmentContainerTest {
     @Container
     private static final GenericContainer<?> QUESTDB = new GenericContainer<>(DockerImageName.parse("questdb/questdb:10.0.0"))
-            .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT);
+            .withExposedPorts(QuestDBUtils.QUESTDB_HTTP_PORT)
+            // well above what the other tests' queries take; lets one test hit the server's limit
+            .withEnv("QDB_QUERY_TIMEOUT", "2000ms");
 
     /** Both sides render the key as text: an integer key is plain decimal, as the record side writes it. */
     @ParameterizedTest
@@ -106,6 +109,20 @@ class LookupEnrichmentContainerTest {
         QueryException failure = assertThrows(QueryException.class, () -> load("select k, v from does_not_exist"));
 
         assertFalse(LookupEnrichment.isTransient(failure), failure.getStatus() + ": " + failure.getMessage());
+    }
+
+    /**
+     * The server's own query timeout, below enrichment.query.timeout.ms here, arrives as a limit
+     * rather than as a rejection of the SQL: the first load retries it.
+     */
+    @Test
+    void aServerQueryTimeoutIsTransient() {
+        // a valid (key, value) shape whose filter passes nothing, so it runs until it is stopped
+        QueryException failure = assertThrows(QueryException.class,
+                () -> load("select x, rnd_str(5,5,0) v from long_sequence(100000000000) where rnd_double() > 2"));
+
+        assertEquals(QwpConstants.STATUS_LIMIT_EXCEEDED, failure.getStatus(), failure.getMessage());
+        assertTrue(LookupEnrichment.isTransient(failure), failure.getMessage());
     }
 
     /**
