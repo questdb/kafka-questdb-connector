@@ -1,7 +1,9 @@
 package io.questdb.kafka;
 
 import io.questdb.client.QueryException;
+import io.questdb.client.Sender;
 import org.apache.kafka.connect.errors.ConnectException;
+import org.apache.kafka.connect.sink.SinkRecord;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -18,6 +20,7 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -27,7 +30,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** {@link LookupEnrichment#load()} against a real server: what it accepts, rejects and recovers from. */
+/**
+ * Lookup enrichment against a real server: what {@link LookupEnrichment#load()} accepts, rejects
+ * and recovers from, and how a real Sender takes the enriched column.
+ */
 @Testcontainers(disabledWithoutDocker = true)
 class LookupEnrichmentContainerTest {
     @Container
@@ -127,9 +133,56 @@ class LookupEnrichmentContainerTest {
         }
     }
 
+    /**
+     * The client fixes a column's type for a table once a row has written it, so a record field
+     * named like the enriched column defeats the enrichment of its own row and of every later
+     * row of the table. The failure must name the column; records without a mapping still land.
+     */
+    @Test
+    void aRecordFieldNamedLikeTheEnrichedColumnFailsNamingTheColumn() {
+        String table = ConnectTestUtils.newTableName();
+        Map<String, String> props = new HashMap<>();
+        props.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, confString());
+        props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, table);
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put(QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG, "select k, v from unused");
+        props.put(QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG, "sec_id");
+        try (Sender sender = Sender.builder(confString()).build()) {
+            RecordToRowHandler handler = new RecordToRowHandler(new QuestDBSinkConnectorConfig(props), sender, true,
+                    RecordToRowHandler.SenderErrorPolicy.PROBE, true, RecordToRowHandler.NameLimits.QWP);
+            handler.setEnrichment("ticker", Map.of("42", "ACME"));
+
+            // the record's own 'ticker' is a VARCHAR in the same row
+            InvalidDataException sameRow = assertThrows(InvalidDataException.class,
+                    () -> handler.handle(record(table, 42, "own")));
+            assertTrue(sameRow.getMessage().contains("enrichment column 'ticker'"), sameRow.getMessage());
+
+            // no mapping: written, and from now on 'ticker' is a VARCHAR of this table
+            handler.handle(record(table, 7, "own"));
+            InvalidDataException laterRow = assertThrows(InvalidDataException.class,
+                    () -> handler.handle(record(table, 42, null)));
+            assertTrue(laterRow.getMessage().contains("enrichment column 'ticker'"), laterRow.getMessage());
+            sender.flush();
+        }
+        QuestDBUtils.assertSqlEventually("\"sec_id\",\"ticker\"\r\n7,\"own\"\r\n",
+                "select sec_id, ticker from " + table, httpPort());
+    }
+
+    private static SinkRecord record(String table, long secId, String ticker) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("sec_id", secId);
+        if (ticker != null) {
+            value.put("ticker", ticker);
+        }
+        return new SinkRecord(table, 0, null, null, null, value, 0L);
+    }
+
+    private static String confString() {
+        return "ws::addr=" + QUESTDB.getHost() + ':' + QUESTDB.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT) + ';';
+    }
+
     private static LookupEnrichment.Lookup load(String sql) {
-        LookupEnrichment enrichment = new LookupEnrichment(
-                "ws::addr=" + QUESTDB.getHost() + ':' + QUESTDB.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT) + ';', sql, 10_000L);
+        LookupEnrichment enrichment = new LookupEnrichment(confString(), sql, 10_000L);
         try {
             return enrichment.load();
         } finally {

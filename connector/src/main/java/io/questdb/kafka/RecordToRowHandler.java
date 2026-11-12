@@ -493,9 +493,21 @@ final class RecordToRowHandler {
         enrichmentKey = null;
         if (value == null) {
             enrichmentMisses++;
-        } else {
+            return;
+        }
+        try {
             // QWP accepts a symbol after other columns of the row
             sender.symbol(enrichmentColumn, value);
+        } catch (LineSenderException e) {
+            // For a name the configuration does not reveal, a record field in this row or an
+            // earlier one: the client fixes a column's type for the table once a row has written it.
+            RuntimeException classified = classifyRowConstructionFailure(e);
+            if (!(classified instanceof InvalidDataException)) {
+                throw classified; // a sender failure, not this record's
+            }
+            throw new InvalidDataException("Cannot write enrichment column '" + enrichmentColumn + "': " + e.getMessage()
+                    + ". If this record or an earlier row of the table has a field of that name, rename the value"
+                    + " column in " + QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG + " with an alias", e);
         }
     }
 
