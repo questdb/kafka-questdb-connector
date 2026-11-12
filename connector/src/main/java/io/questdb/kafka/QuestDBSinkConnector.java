@@ -78,7 +78,7 @@ public final class QuestDBSinkConnector extends SinkConnector {
         try {
             QuestDBSinkConnectorConfig.validateEnrichment((String) enrichmentSql.value(),
                     (String) configValue(result, QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG).value(),
-                    isKnownNonQwp(confString));
+                    isKnownNonQwp(confString, connectorConfigs.get(QuestDBSinkConnectorConfig.HOST_CONFIG), env));
         } catch (ConfigException e) {
             enrichmentSql.addErrorMessage(e.getMessage());
         }
@@ -92,12 +92,19 @@ public final class QuestDBSinkConnector extends SinkConnector {
         return result;
     }
 
-    private static boolean isKnownNonQwp(String confString) {
+    /**
+     * Whether the task will use a legacy transport, as far as this worker can tell. Like the rest
+     * of validate(), it takes this worker's environment to be the task's: with neither
+     * client.conf.string nor QDB_CLIENT_CONF set, the task uses the deprecated host option. The
+     * content of QDB_CLIENT_CONF is left to the task, as its validation is.
+     */
+    private static boolean isKnownNonQwp(String confString, String host, Function<String, String> env) {
         if (blankToNull(confString) == null) {
-            return false; // QDB_CLIENT_CONF or the deprecated host option: the task decides
+            // no connection at all is reported as such by validateClientConfiguration
+            return blankToNull(host) != null && blankToNull(env.apply("QDB_CLIENT_CONF")) == null;
         }
         try {
-            return !ClientConfUtils.isQwp(ConfStringEnvInterpolator.expand(confString.trim()));
+            return !ClientConfUtils.isQwp(ConfStringEnvInterpolator.expand(confString.trim(), env));
         } catch (ConfigException e) {
             return false; // not expandable on this worker; reported above or left to the task
         }
