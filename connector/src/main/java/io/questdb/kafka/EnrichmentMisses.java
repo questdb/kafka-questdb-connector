@@ -22,6 +22,7 @@ final class EnrichmentMisses {
     private static final int MAX_LOGGED_KEYS = 20;
     private static final Logger log = LoggerFactory.getLogger(EnrichmentMisses.class);
 
+    private final String keyField;
     private final Set<String> unmapped = new HashSet<>();
     // the first new keys since the previous report, for the DEBUG line
     private final List<String> newKeys = new ArrayList<>();
@@ -29,6 +30,12 @@ final class EnrichmentMisses {
     private boolean overflowed;
     private boolean overflowReported;
     private int resolved;
+    private long unusable;
+    private boolean unusableReported;
+
+    EnrichmentMisses(String keyField) {
+        this.keyField = keyField;
+    }
 
     /**
      * Called for every record whose key has no mapping. Costs one hash probe: the key is the
@@ -45,6 +52,14 @@ final class EnrichmentMisses {
         } else if (!overflowed && !unmapped.contains(key)) {
             overflowed = true;
         }
+    }
+
+    /**
+     * Called for every record whose key field holds a value no lookup key can match: a struct,
+     * map, array, bytes or a decimal. Such a record is neither a hit nor a miss.
+     */
+    void unusable() {
+        unusable++;
     }
 
     /** Forgets the keys a freshly loaded mapping covers. */
@@ -68,16 +83,29 @@ final class EnrichmentMisses {
                             + " Check {}: a field unique per record, such as an event id, causes this",
                     MAX_TRACKED_KEYS, QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG);
         }
-        if (added == 0 && resolved == 0) {
-            return;
+        if (added > 0 || resolved > 0) {
+            log.info("Enrichment lookup: {} key(s) have no mapping ({} new, {} mapped since the previous report)",
+                    unmapped.size(), added, resolved);
+            if (!newKeys.isEmpty()) {
+                log.debug("Enrichment keys newly without a mapping (at most {} shown): {}", MAX_LOGGED_KEYS, newKeys);
+            }
+            added = 0;
+            resolved = 0;
+            newKeys.clear();
         }
-        log.info("Enrichment lookup: {} key(s) have no mapping ({} new, {} mapped since the previous report)",
-                unmapped.size(), added, resolved);
-        if (!newKeys.isEmpty()) {
-            log.debug("Enrichment keys newly without a mapping (at most {} shown): {}", MAX_LOGGED_KEYS, newKeys);
+        if (unusable > 0) {
+            // The cause is usually the configuration, which does not change while the task runs.
+            if (!unusableReported) {
+                unusableReported = true;
+                log.warn("{} record(s) had a value in {} '{}' that cannot be a lookup key; only text, integers,"
+                                + " floating-point numbers and booleans can. Those records are not enriched;"
+                                + " later ones are logged at DEBUG",
+                        unusable, QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG, keyField);
+            } else {
+                log.debug("{} more record(s) had a value in {} '{}' that cannot be a lookup key",
+                        unusable, QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG, keyField);
+            }
+            unusable = 0;
         }
-        added = 0;
-        resolved = 0;
-        newKeys.clear();
     }
 }

@@ -54,7 +54,7 @@ final class RecordToRowHandler {
     private String enrichmentColumn;
     private String enrichmentKey;
     private Map<String, String> enrichmentMap = Collections.emptyMap();
-    private final EnrichmentMisses enrichmentMisses = new EnrichmentMisses();
+    private final EnrichmentMisses enrichmentMisses;
     private static final com.fasterxml.jackson.core.JsonFactory JSON_FACTORY = new com.fasterxml.jackson.core.JsonFactory();
     // Jackson 2.13 (what Connect provides here) predates StreamReadConstraints, so nesting is
     // unbounded. Without a cap a deeply nested payload is a StackOverflowError - an Error, which
@@ -92,6 +92,7 @@ final class RecordToRowHandler {
         this.rawJson = config.isRawJsonFormat();
         this.rawJsonEnvelope = config.isRawJsonEnvelope();
         this.enrichmentKeyField = config.getEnrichmentKeyField();
+        this.enrichmentMisses = new EnrichmentMisses(enrichmentKeyField);
 
         String symbolColumnsConfig = routeSymbolsDirectly ? config.getSymbolColumns() : null;
         if (symbolColumnsConfig == null) {
@@ -230,9 +231,11 @@ final class RecordToRowHandler {
                 case VALUE_NULL:
                     break;
                 case START_OBJECT:
+                    noteUnusableJsonKey(name);
                     writeJsonObject(parser, name, depth + 1);
                     break;
                 case START_ARRAY:
+                    noteUnusableJsonKey(name);
                     // Arrays are rare, and their validation (jagged rows, null elements,
                     // element types, skip.unsupported.types) is intricate. Materialise the
                     // array in the same shape the converter produces and reuse that code
@@ -350,6 +353,13 @@ final class RecordToRowHandler {
                 throw new InvalidDataException("Timestamp column value cannot be null");
             default:
                 throw new InvalidDataException("Unsupported timestamp column type: " + token);
+        }
+    }
+
+    private void noteUnusableJsonKey(String name) {
+        if (name.equals(enrichmentKeyField)) {
+            enrichmentKey = null;
+            enrichmentMisses.unusable();
         }
     }
 
@@ -698,7 +708,12 @@ final class RecordToRowHandler {
         if (name.equals(enrichmentKeyField)) {
             // capturing does not consume the field: it is still written as a column below
             CharSequence keyText = symbolText(schema, value);
-            enrichmentKey = keyText == null ? null : keyText.toString();
+            if (keyText == null) {
+                enrichmentKey = null;
+                enrichmentMisses.unusable();
+            } else {
+                enrichmentKey = keyText.toString();
+            }
         }
         if (!symbolColumns.isEmpty()) {
             String symbolName = (name.isEmpty() ? fallbackName : name).replace('.', '_');

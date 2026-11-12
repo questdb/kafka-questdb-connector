@@ -162,14 +162,24 @@ class RecordToRowHandlerSymbolTest {
         handler.handle(shape.record(null)); // key field absent: neither a hit nor a miss
         assertEquals(List.of("table(tab)", "doubleColumn(px,1.5)", "atNow()"), recorder.calls);
 
+        recorder.calls.clear();
+        handler.handle(shape.record(NESTED)); // not a scalar: written as usual, reported as unusable
+        assertEquals(List.of("table(tab)", "longColumn(sec_id_a,1)", "doubleColumn(px,1.5)", "atNow()"), recorder.calls);
+
         try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
             handler.reportEnrichmentMisses();
             handler.reportEnrichmentMisses(); // nothing changed since the first report
             assertEquals(List.of(
                     "INFO Enrichment lookup: 1 key(s) have no mapping (1 new, 0 mapped since the previous report)",
-                    "DEBUG Enrichment keys newly without a mapping (at most 20 shown): [7]"), logs.lines);
+                    "DEBUG Enrichment keys newly without a mapping (at most 20 shown): [7]",
+                    "WARN 1 record(s) had a value in enrichment.key.field 'sec_id' that cannot be a lookup key;"
+                            + " only text, integers, floating-point numbers and booleans can. Those records are not"
+                            + " enriched; later ones are logged at DEBUG"), logs.lines);
         }
     }
+
+    /** Stands for a key field holding an object, {"a": 1}. */
+    private static final Map<String, Object> NESTED = Map.of("a", 1L);
 
     private enum Shape {
         STRUCT, MAP, RAW_JSON;
@@ -179,16 +189,18 @@ class RecordToRowHandlerSymbolTest {
             switch (this) {
                 case STRUCT:
                     SchemaBuilder builder = SchemaBuilder.struct();
+                    Schema nested = SchemaBuilder.struct().field("a", Schema.INT64_SCHEMA).build();
                     if (id != null) {
                         builder.field("sec_id", id instanceof Long ? Schema.INT64_SCHEMA
                                 : id instanceof Double ? Schema.FLOAT64_SCHEMA
                                 : id instanceof Boolean ? Schema.BOOLEAN_SCHEMA
+                                : id == NESTED ? nested
                                 : Schema.STRING_SCHEMA);
                     }
                     Schema schema = builder.field("px", Schema.FLOAT64_SCHEMA).build();
                     Struct struct = new Struct(schema).put("px", 1.5d);
                     if (id != null) {
-                        struct.put("sec_id", id);
+                        struct.put("sec_id", id == NESTED ? new Struct(nested).put("a", 1L) : id);
                     }
                     return new SinkRecord("tab", 0, null, null, schema, struct, 0L);
                 case MAP:
@@ -199,7 +211,8 @@ class RecordToRowHandlerSymbolTest {
                     value.put("px", 1.5d);
                     return new SinkRecord("tab", 0, null, null, null, value, 0L);
                 default:
-                    String idJson = id == null ? "" : "\"sec_id\":" + (id instanceof String ? "\"" + id + "\"" : id.toString()) + ",";
+                    String idJson = id == null ? ""
+                            : "\"sec_id\":" + (id instanceof String ? "\"" + id + "\"" : id == NESTED ? "{\"a\":1}" : id.toString()) + ",";
                     return new SinkRecord("tab", 0, null, null, null,
                             ("{" + idJson + "\"px\":1.5}").getBytes(StandardCharsets.UTF_8), 0L);
             }
