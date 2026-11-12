@@ -111,16 +111,24 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     private static final String QWP_DLQ_TERMINAL_CATEGORIES_DOC = "QWP terminal categories eligible for quarantine and DLQ handling. SCHEMA_MISMATCH is the safe default.";
 
     public static final String ENRICHMENT_SQL_CONFIG = "enrichment.sql";
-    private static final String ENRICHMENT_SQL_DOC = "QWP only. SQL query returning exactly two columns, lookup key then value. The value is written to each row as a symbol column named after the second result column.";
+    private static final String ENRICHMENT_SQL_DOC = "QWP only. SQL query returning exactly two columns, lookup key then value. "
+            + "The value is written to each row as a symbol column named after the second result column; an existing VARCHAR or STRING column of that name keeps its type. "
+            + "Alias it in the SQL if records carry a field of that name or the target table has such a column of another type; otherwise those rows are rejected. "
+            + "The query must succeed when a task starts, so the table must exist, though it may be empty. A statement such as INSERT is run once by each task before it is rejected.";
 
     public static final String ENRICHMENT_KEY_FIELD_CONFIG = "enrichment.key.field";
-    private static final String ENRICHMENT_KEY_FIELD_DOC = "Record field whose value is looked up in the result of '" + ENRICHMENT_SQL_CONFIG + "'.";
+    private static final String ENRICHMENT_KEY_FIELD_DOC = "Record field whose value is looked up in the result of '" + ENRICHMENT_SQL_CONFIG + "', named as the field is flattened (with the value prefix, and '_' between nested names). "
+            + "Keys are compared as text: text, integers, floating-point numbers and booleans work, but 42.0 does not match the integer key 42.";
 
     public static final String ENRICHMENT_REFRESH_MS_CONFIG = "enrichment.refresh.ms";
-    private static final String ENRICHMENT_REFRESH_MS_DOC = "Minimum interval in milliseconds between reloads of the enrichment lookup.";
+    private static final String ENRICHMENT_REFRESH_MS_DOC = "Minimum interval in milliseconds between reloads of the enrichment lookup. A task reloads only when records arrive.";
 
     public static final String ENRICHMENT_QUERY_TIMEOUT_MS_CONFIG = "enrichment.query.timeout.ms";
-    private static final String ENRICHMENT_QUERY_TIMEOUT_MS_DOC = "How long one enrichment lookup query may take before it is abandoned. Unless the client configuration string sets them, it also caps connecting (connect_timeout) and the WebSocket upgrade (auth_timeout_ms) for each address. A load blocks the task, up to roughly (2 x addresses + 1) times this value plus the client's query_close_timeout_ms, so keep it well under the consumer's max.poll.interval.ms.";
+    private static final String ENRICHMENT_QUERY_TIMEOUT_MS_DOC = "How long one enrichment lookup query may take before it is abandoned. "
+            + "Unless the client configuration string sets them, it also caps connecting (connect_timeout) and the WebSocket upgrade (auth_timeout_ms) for each address. "
+            + "A load blocks the task: each address tried can take those two plus a fixed 5 s wait for the server's handshake, the query this value once more, "
+            + "an abandoned query up to the client's query_close_timeout_ms to cancel, and closing the client after a failure up to about 7 s more. "
+            + "Keep it well under the consumer's max.poll.interval.ms.";
 
     private static final String DEFAULT_TIMESTAMP_FORMAT = "yyyy-MM-ddTHH:mm:ss.SSSUUUZ";
 
