@@ -162,8 +162,13 @@ class RecordToRowHandlerSymbolTest {
         handler.handle(shape.record(null)); // key field absent: neither a hit nor a miss
         assertEquals(List.of("table(tab)", "doubleColumn(px,1.5)", "atNow()"), recorder.calls);
 
-        assertEquals(1, handler.takeEnrichmentMisses());
-        assertEquals(0, handler.takeEnrichmentMisses());
+        try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
+            handler.reportEnrichmentMisses();
+            handler.reportEnrichmentMisses(); // nothing changed since the first report
+            assertEquals(List.of(
+                    "INFO Enrichment lookup: 1 key(s) have no mapping (1 new, 0 mapped since the previous report)",
+                    "DEBUG Enrichment keys newly without a mapping (at most 20 shown): [7]"), logs.lines);
+        }
     }
 
     private enum Shape {

@@ -783,10 +783,6 @@ class QwpSinkTask extends SinkTask {
                 && nanoTime() - enrichmentLastRefreshNanos < TimeUnit.MILLISECONDS.toNanos(config.getEnrichmentRefreshMs())) {
             return;
         }
-        long misses = recordHandler.takeEnrichmentMisses();
-        if (misses > 0) {
-            log.info("Enrichment lookup had no mapping for {} record(s) since the previous refresh", misses);
-        }
         try {
             LookupEnrichment.Lookup lookup = loadEnrichment();
             recordHandler.setEnrichment(lookup.column, lookup.map);
@@ -797,6 +793,8 @@ class QwpSinkTask extends SinkTask {
             }
             log.warn("Enrichment lookup refresh failed; keeping the previous mapping", e);
         }
+        // After the load, so that a key the new mapping covers is not reported as missing.
+        recordHandler.reportEnrichmentMisses();
         // Stamped after the load, also when it failed, so the next attempt waits a full interval.
         enrichmentLastRefreshNanos = nanoTime();
     }

@@ -1015,6 +1015,68 @@ class QwpSinkTaskTest {
         assertEquals(List.of("A", "A"), sender.symbols);
     }
 
+    /** A key set that stays partial is reported once; a new key, or a newly mapped one, again. */
+    @Test
+    void enrichmentLogsUnmappedKeysOnlyWhenTheyChange() {
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(sender, 10, ENRICHMENT, true);
+        for (int i = 0; i < 5; i++) {
+            task.enrichmentResults.add(lookup("7", "A"));
+        }
+        Map<String, String> both = new HashMap<>();
+        both.put("7", "A");
+        both.put("9", "C");
+        task.enrichmentResults.add(new LookupEnrichment.Lookup("ticker", both));
+
+        try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
+            task.put(List.of(keyed(0, 9), keyed(1, 9)));
+            assertEquals(List.of(), logs.lines); // reported at the next refresh
+            putAfterRefresh(task, 1, keyed(2, 9));
+            putAfterRefresh(task, 2, keyed(3, 9)); // still only 9: nothing to report
+            putAfterRefresh(task, 3, keyed(4, 8));
+            putAfterRefresh(task, 4, keyed(5, 7)); // reports 8
+            putAfterRefresh(task, 5, keyed(6, 9)); // the new mapping covers 9
+
+            assertEquals(List.of(
+                    "INFO Enrichment lookup: 1 key(s) have no mapping (1 new, 0 mapped since the previous report)",
+                    "DEBUG Enrichment keys newly without a mapping (at most 20 shown): [9]",
+                    "INFO Enrichment lookup: 2 key(s) have no mapping (1 new, 0 mapped since the previous report)",
+                    "DEBUG Enrichment keys newly without a mapping (at most 20 shown): [8]",
+                    "INFO Enrichment lookup: 1 key(s) have no mapping (0 new, 1 mapped since the previous report)"),
+                    logs.lines);
+        }
+        assertEquals(List.of("A", "C"), sender.symbols);
+    }
+
+    @Test
+    void enrichmentWarnsOnceWhenTooManyKeysHaveNoMapping() {
+        TestTask task = startTask(new FakeSender(), 1_000, ENRICHMENT, true);
+        for (int i = 0; i < 3; i++) {
+            task.enrichmentResults.add(lookup("7", "A"));
+        }
+        List<SinkRecord> batch = new ArrayList<>();
+        for (int i = 0; i <= EnrichmentMisses.MAX_TRACKED_KEYS; i++) {
+            batch.add(keyed(i, 1_000_000 + i));
+        }
+
+        try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
+            task.put(batch);
+            putAfterRefresh(task, 1, keyed(batch.size(), 5)); // over the cap: not tracked
+            putAfterRefresh(task, 2, keyed(batch.size() + 1, 6));
+
+            assertEquals(3, logs.lines.size(), logs.lines.toString());
+            assertTrue(logs.lines.get(0).startsWith("WARN More than 10000 distinct enrichment keys"), logs.lines.get(0));
+            assertEquals("INFO Enrichment lookup: 10000 key(s) have no mapping (10000 new, 0 mapped since the previous report)",
+                    logs.lines.get(1));
+            assertTrue(logs.lines.get(2).startsWith("DEBUG"), logs.lines.get(2));
+        }
+    }
+
+    private static void putAfterRefresh(TestTask task, int interval, SinkRecord record) {
+        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(5_000L * interval);
+        task.put(Collections.singletonList(record));
+    }
+
     private static final Map<String, String> ENRICHMENT = Map.of(
             QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG, "select id, ticker from sec_list",
             QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG, "id");

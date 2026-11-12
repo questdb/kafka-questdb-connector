@@ -54,7 +54,7 @@ final class RecordToRowHandler {
     private String enrichmentColumn;
     private String enrichmentKey;
     private Map<String, String> enrichmentMap = Collections.emptyMap();
-    private long enrichmentMisses;
+    private final EnrichmentMisses enrichmentMisses = new EnrichmentMisses();
     private static final com.fasterxml.jackson.core.JsonFactory JSON_FACTORY = new com.fasterxml.jackson.core.JsonFactory();
     // Jackson 2.13 (what Connect provides here) predates StreamReadConstraints, so nesting is
     // unbounded. Without a cap a deeply nested payload is a StackOverflowError - an Error, which
@@ -440,6 +440,7 @@ final class RecordToRowHandler {
         }
         enrichmentColumn = sanitized;
         enrichmentMap = map;
+        enrichmentMisses.resolve(map);
     }
 
     /**
@@ -478,21 +479,20 @@ final class RecordToRowHandler {
         return false;
     }
 
-    /** Records whose key had no mapping since the last call. */
-    long takeEnrichmentMisses() {
-        long misses = enrichmentMisses;
-        enrichmentMisses = 0;
-        return misses;
+    /** Logs the keys without a mapping, if they changed since the previous call. */
+    void reportEnrichmentMisses() {
+        enrichmentMisses.report();
     }
 
     private void stampEnrichment() {
-        if (enrichmentKey == null) {
+        String key = enrichmentKey;
+        if (key == null) {
             return;
         }
-        String value = enrichmentMap.get(enrichmentKey);
         enrichmentKey = null;
+        String value = enrichmentMap.get(key);
         if (value == null) {
-            enrichmentMisses++;
+            enrichmentMisses.miss(key);
             return;
         }
         try {
