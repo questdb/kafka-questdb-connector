@@ -705,7 +705,7 @@ final class RecordToRowHandler {
         if (value == null) {
             return;
         }
-        if (name.equals(enrichmentKeyField)) {
+        if (isEnrichmentKeyField(name, schema, value, fallbackName)) {
             // capturing does not consume the field: it is still written as a column below
             CharSequence keyText = symbolText(schema, value);
             if (keyText == null) {
@@ -735,6 +735,17 @@ final class RecordToRowHandler {
             return;
         }
         writePhysicalTypeWithoutSchema(name, value, fallbackName);
+    }
+
+    /** True when the value is written as the column enrichment.key.field names, or would be if its type were supported. */
+    private boolean isEnrichmentKeyField(String name, Schema schema, Object value, String fallbackName) {
+        if (!name.isEmpty()) {
+            return name.equals(enrichmentKeyField);
+        }
+        // A key or value under an empty prefix is written as the column 'key' or 'value', unless
+        // it is flattened: then its fields are the columns and the fallback names none of them.
+        return fallbackName.equals(enrichmentKeyField)
+                && !(schema == null ? value instanceof Map : schema.type() == Schema.Type.STRUCT);
     }
 
     private long resolveDesignatedTimestampColumnValue(Object value, Schema schema) {

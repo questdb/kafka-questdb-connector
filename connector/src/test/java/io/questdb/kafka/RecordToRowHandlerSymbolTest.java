@@ -178,6 +178,82 @@ class RecordToRowHandlerSymbolTest {
         }
     }
 
+    /**
+     * A primitive key or value under an empty prefix is written to a column named 'key' or
+     * 'value', and the key field names it the same way. Matching only the traversal name, which
+     * is empty there, meant such records were never enriched and never counted as a miss.
+     */
+    @Test
+    void enrichmentKeyFieldMatchesThePrimitiveKeyOrValueByItsColumnName() {
+        Map<String, String> lookup = new HashMap<>();
+        lookup.put("42", "AAPL");
+        lookup.put("abc", "MSFT");
+
+        Recorder recorder = new Recorder();
+        RecordToRowHandler byValue = enrichedHandler(recorder, "value", Map.of()); // value.prefix defaults to ""
+        byValue.setEnrichment("ticker", lookup);
+        byValue.handle(new SinkRecord("tab", 0, null, null, Schema.INT64_SCHEMA, 42L, 0L));
+        assertEquals(List.of("table(tab)", "longColumn(value,42)", "symbol(ticker,AAPL)", "atNow()"), recorder.calls);
+
+        recorder.calls.clear();
+        byValue.handle(new SinkRecord("tab", 0, null, null, null, "abc", 0L)); // schemaless
+        assertEquals(List.of("table(tab)", "stringColumn(value,abc)", "symbol(ticker,MSFT)", "atNow()"), recorder.calls);
+
+        recorder.calls.clear();
+        byValue.handle(new SinkRecord("tab", 0, null, null, Schema.INT64_SCHEMA, 7L, 0L));
+        assertEquals(List.of("table(tab)", "longColumn(value,7)", "atNow()"), recorder.calls);
+        try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
+            byValue.reportEnrichmentMisses();
+            assertEquals(List.of(
+                    "INFO Enrichment lookup: 1 key(s) have no mapping (1 new, 0 mapped since the previous report)",
+                    "DEBUG Enrichment keys newly without a mapping (at most 20 shown): [7]"), logs.lines);
+        }
+
+        // A struct or map value is flattened: no column is named 'value', so the key field is
+        // absent - neither a hit nor a miss, and not a key that cannot be looked up either.
+        Schema schema = SchemaBuilder.struct().field("px", Schema.FLOAT64_SCHEMA).build();
+        recorder.calls.clear();
+        byValue.handle(new SinkRecord("tab", 0, null, null, schema, new Struct(schema).put("px", 1.5d), 0L));
+        byValue.handle(new SinkRecord("tab", 0, null, null, null, Map.of("px", 1.5d), 0L));
+        // a field that is named 'value' is still the key
+        byValue.handle(new SinkRecord("tab", 0, null, null, null, Map.of("value", "abc"), 0L));
+        assertEquals(List.of("table(tab)", "doubleColumn(px,1.5)", "atNow()",
+                "table(tab)", "doubleColumn(px,1.5)", "atNow()",
+                "table(tab)", "stringColumn(value,abc)", "symbol(ticker,MSFT)", "atNow()"), recorder.calls);
+        try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
+            byValue.reportEnrichmentMisses();
+            assertEquals(List.of(), logs.lines, "nothing changed since the previous report");
+        }
+
+        // the key path takes the same fallback when key.prefix is emptied, on both value paths
+        for (boolean rawJson : new boolean[]{false, true}) {
+            recorder.calls.clear();
+            Map<String, String> props = new HashMap<>();
+            props.put("include.key", "true");
+            props.put("key.prefix", "");
+            if (rawJson) {
+                props.put("value.format", "json");
+            }
+            RecordToRowHandler byKey = enrichedHandler(recorder, "key", props);
+            byKey.setEnrichment("ticker", lookup);
+            Object value = rawJson ? "{\"px\":1.5}".getBytes(StandardCharsets.UTF_8) : Map.of("px", 1.5d);
+            byKey.handle(new SinkRecord("tab", 0, Schema.STRING_SCHEMA, "abc", null, value, 0L));
+            assertEquals(List.of("table(tab)", "stringColumn(key,abc)", "doubleColumn(px,1.5)", "symbol(ticker,MSFT)", "atNow()"),
+                    recorder.calls, rawJson ? "raw JSON" : "converted");
+        }
+    }
+
+    private static RecordToRowHandler enrichedHandler(Recorder recorder, String keyField, Map<String, String> extra) {
+        Map<String, String> props = new HashMap<>();
+        props.put("client.conf.string", "ws::addr=localhost:9000;");
+        props.put("table", "tab");
+        props.put("include.key", "false");
+        props.put("enrichment.sql", "select sec_id, ticker from sec_list");
+        props.put("enrichment.key.field", keyField);
+        props.putAll(extra);
+        return new RecordToRowHandler(new QuestDBSinkConnectorConfig(props), recorder.proxy(), true, false, true);
+    }
+
     /** Stands for a key field holding an object, {"a": 1}. */
     private static final Map<String, Object> NESTED = Map.of("a", 1L);
 
