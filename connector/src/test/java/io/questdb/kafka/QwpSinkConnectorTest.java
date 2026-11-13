@@ -125,7 +125,7 @@ class QwpSinkConnectorTest {
                 "insert into " + lookup + " values (" + sqlKey(2, textKey) + ", 'MSFT', now())",
                 httpPort, QuestDBUtils.Endpoint.EXEC);
         QuestDBUtils.assertSqlEventually("\"count()\"\r\n2\r\n", "select count() from " + lookup, httpPort);
-        Thread.sleep(600); // past enrichment.refresh.ms: the next batch reloads before it is converted
+        Thread.sleep(1_000); // two enrichment.refresh.ms: the refresher has reloaded before the next batch
         connect.kafka().produce(topic, "key", "{\"sec_id\":" + jsonKey(2, textKey) + ",\"px\":3.5}");
 
         // the new mapping applies from now on; the row written without it stays null

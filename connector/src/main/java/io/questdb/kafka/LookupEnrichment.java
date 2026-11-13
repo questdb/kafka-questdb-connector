@@ -19,7 +19,8 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Runs the user's lookup query over the QWP query API and returns its result as a map.
- * Owned and called by one task thread; holds no lookup state of its own.
+ * Called by one thread at a time: the task thread for the first load, then the task's
+ * refresher. Holds no lookup state of its own.
  */
 final class LookupEnrichment {
     private final String confString;
@@ -57,7 +58,7 @@ final class LookupEnrichment {
     /**
      * The task's conf string plus connect_timeout and auth_timeout_ms of {@code timeoutMs}
      * where it does not set them. The query client connects when a query is borrowed, before
-     * the query timeout starts: without these, a host that drops packets blocks put() for the
+     * the query timeout starts: without these, a host that drops packets blocks a load for the
      * OS connect timeout (over two minutes on Linux) and an unanswered WebSocket upgrade for
      * the client's 15 s default. The string is rebuilt rather than appended to, because a
      * trailing ';;' is an escaped semicolon inside the last value.
@@ -168,7 +169,7 @@ final class LookupEnrichment {
     }
 
     /**
-     * Runs on a client worker thread. The task thread reads it only after await() returned
+     * Runs on a client worker thread. The loading thread reads it only after await() returned
      * true, which the client signals under a lock, so the fields need no synchronisation.
      */
     private static final class Loader implements QwpColumnBatchHandler {

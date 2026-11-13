@@ -23,6 +23,7 @@ import org.apache.kafka.connect.sink.ErrantRecordReporter;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTaskContext;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -38,10 +39,14 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -916,7 +921,7 @@ class QwpSinkTaskTest {
     }
 
     @Test
-    void enrichmentFailedRefreshKeepsOldMappingAndDueRefreshReplacesIt() {
+    void enrichmentFailedReloadKeepsOldMappingAndTheNextPutAppliesAFinishedOne() {
         FakeSender sender = new FakeSender();
         TestTask task = startTask(sender, 10, ENRICHMENT, true);
         task.enrichmentResults.add(lookup("7", "A"));
@@ -924,26 +929,43 @@ class QwpSinkTaskTest {
         task.enrichmentResults.add(lookup("7", "B"));
 
         task.put(Collections.singletonList(keyed(0, 7)));
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(4_999);
         task.put(Collections.singletonList(keyed(1, 7)));
-        assertEquals(1, task.loadCalls); // not due yet
+        assertEquals(1, task.loadCalls.get()); // only the first load runs in put()
 
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(5_000);
-        task.put(Collections.singletonList(keyed(2, 7))); // refresh fails
-        assertEquals(2, task.loadCalls);
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(9_999);
-        task.put(Collections.singletonList(keyed(3, 7))); // the failed attempt restarted the interval
-        assertEquals(2, task.loadCalls);
-        assertEquals(List.of("A", "A", "A", "A"), sender.symbols);
+        try (LogCapture logs = new LogCapture(QwpSinkTask.class)) {
+            task.reloadEnrichment();
+            assertEquals(List.of("WARN Enrichment lookup refresh failed; keeping the previous mapping"), logs.lines);
+        }
+        task.put(Collections.singletonList(keyed(2, 7)));
+        assertEquals(List.of("A", "A", "A"), sender.symbols);
 
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(10_000);
-        task.put(Collections.singletonList(keyed(4, 7)));
-        assertEquals(List.of("A", "A", "A", "A", "B"), sender.symbols);
+        task.reloadEnrichment();
+        task.put(Collections.singletonList(keyed(3, 7)));
+        assertEquals(3, task.loadCalls.get());
+        assertEquals(List.of("A", "A", "A", "B"), sender.symbols);
 
         // a query failure is never a sender failure
         assertEquals(1, task.buildCalls);
         assertEquals(0, sender.closeCalls);
         assertTrue(task.fakeContext.rewinds.isEmpty());
+    }
+
+    /** A failed reload does not discard a finished one the task has not applied yet. */
+    @Test
+    void enrichmentFailedReloadKeepsAnUnappliedFinishedOne() {
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(sender, 10, ENRICHMENT, true);
+        task.enrichmentResults.add(lookup("7", "A"));
+        task.enrichmentResults.add(lookup("7", "B"));
+        task.enrichmentResults.add(new QueryException((byte) 6, "peer disconnect"));
+        task.put(Collections.singletonList(keyed(0, 7)));
+
+        task.reloadEnrichment();
+        task.reloadEnrichment();
+        task.put(Collections.singletonList(keyed(1, 7)));
+
+        assertEquals(3, task.loadCalls.get());
+        assertEquals(List.of("A", "B"), sender.symbols);
     }
 
     @Test
@@ -952,7 +974,7 @@ class QwpSinkTaskTest {
 
         task.put(Collections.emptyList());
 
-        assertEquals(0, task.loadCalls);
+        assertEquals(0, task.loadCalls.get());
     }
 
     @Test
@@ -966,7 +988,7 @@ class QwpSinkTaskTest {
         initial.awaitFailure = schemaMismatch(0);
         task.put(Collections.emptyList());
 
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(5_000);
+        task.reloadEnrichment();
         task.put(Collections.singletonList(keyed(0, 7)));
 
         assertEquals(Collections.singletonList("B"), quarantine.symbols);
@@ -1012,10 +1034,13 @@ class QwpSinkTaskTest {
         task.enrichmentResults.add(new LookupEnrichment.Lookup("id", Collections.singletonMap("7", "B")));
 
         task.put(Collections.singletonList(keyed(0, 7)));
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(5_000);
-        task.put(Collections.singletonList(keyed(1, 7)));
+        task.reloadEnrichment();
+        try (LogCapture logs = new LogCapture(QwpSinkTask.class)) {
+            task.put(Collections.singletonList(keyed(1, 7)));
+            assertEquals(List.of("WARN Enrichment lookup refresh failed; keeping the previous mapping"), logs.lines);
+        }
 
-        assertEquals(2, task.loadCalls);
+        assertEquals(2, task.loadCalls.get());
         assertEquals(List.of("A", "A"), sender.symbols);
     }
 
@@ -1035,11 +1060,11 @@ class QwpSinkTaskTest {
         try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
             task.put(List.of(keyed(0, 9), keyed(1, 9)));
             assertEquals(List.of(), logs.lines); // reported at the next refresh
-            putAfterRefresh(task, 1, keyed(2, 9));
-            putAfterRefresh(task, 2, keyed(3, 9)); // still only 9: nothing to report
-            putAfterRefresh(task, 3, keyed(4, 8));
-            putAfterRefresh(task, 4, keyed(5, 7)); // reports 8
-            putAfterRefresh(task, 5, keyed(6, 9)); // the new mapping covers 9
+            putAfterRefresh(task, keyed(2, 9));
+            putAfterRefresh(task, keyed(3, 9)); // still only 9: nothing to report
+            putAfterRefresh(task, keyed(4, 8));
+            putAfterRefresh(task, keyed(5, 7)); // reports 8
+            putAfterRefresh(task, keyed(6, 9)); // the new mapping covers 9
 
             assertEquals(List.of(
                     "INFO Enrichment lookup: 1 key(s) have no mapping (1 new, 0 mapped since the previous report)",
@@ -1065,8 +1090,8 @@ class QwpSinkTaskTest {
 
         try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
             task.put(batch);
-            putAfterRefresh(task, 1, keyed(batch.size(), 5)); // over the cap: not tracked
-            putAfterRefresh(task, 2, keyed(batch.size() + 1, 6));
+            putAfterRefresh(task, keyed(batch.size(), 5)); // over the cap: not tracked
+            putAfterRefresh(task, keyed(batch.size() + 1, 6));
 
             assertEquals(3, logs.lines.size(), logs.lines.toString());
             assertTrue(logs.lines.get(0).startsWith("WARN More than 10000 distinct enrichment keys"), logs.lines.get(0));
@@ -1076,65 +1101,72 @@ class QwpSinkTaskTest {
         }
     }
 
-    /**
-     * A reload blocks put(), and the server may acknowledge meanwhile. Pipelined, the probe must
-     * observe that acknowledgement before the stall check runs, or the time the reload took is
-     * read as qwp.progress.timeout.ms without progress.
-     */
+    /** A reload the server does not answer holds up nothing: put() goes on with the mapping it has. */
     @Test
-    void aSlowReloadIsNotMistakenForAStalledServer() {
+    @Timeout(10)
+    void putDoesNotWaitForABlockedReload() throws InterruptedException {
         FakeSender sender = new FakeSender();
-        TestTask task = startTask(sender, 1, SLOW_RELOAD, true);
+        TestTask task = startTask(sender, 10, QUICK_REFRESH, true);
+        task.realRefresher = true;
+        CountDownLatch reloading = new CountDownLatch(1);
         task.enrichmentResults.add(lookup("7", "A"));
-        task.enrichmentResults.add(lookup("7", "B"));
-        task.put(Collections.singletonList(keyed(0, 7))); // published, not yet acknowledged
+        task.enrichmentResults.add(blockedLoad(reloading));
+        try {
+            task.put(Collections.singletonList(keyed(0, 7)));
+            reloading.await();
 
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(5);
-        task.duringLoad = () -> {
-            task.nowNanos += TimeUnit.MILLISECONDS.toNanos(20);
-            sender.ackedFsn = 0L;
-        };
-        assertDoesNotThrow(() -> task.put(Collections.singletonList(keyed(1, 7))));
+            task.put(Collections.singletonList(keyed(1, 7)));
 
-        assertEquals(2, task.loadCalls);
-        assertEquals(List.of("A", "B"), sender.symbols);
+            assertEquals(2, task.loadCalls.get());
+            assertEquals(List.of("A", "A"), sender.symbols);
+        } finally {
+            task.stop();
+        }
     }
 
-    /** In quarantine the drain observes acknowledgements, so the reload must follow the stall check. */
+    /** stop() does not wait for a reload: the refresher ends on the interrupt and closes the handle. */
     @Test
-    void aSlowReloadDuringQuarantineIsNotMistakenForAStalledServer() {
-        FakeSender initial = new FakeSender();
-        FakeSender quarantine = new FakeSender();
-        quarantine.drainSucceeds = false;
-        TestTask task = startTask(List.of(initial, quarantine), 1, SLOW_RELOAD, true);
+    @Timeout(10)
+    void stopDuringABlockedReloadEndsTheRefresherWithoutReportingAFailure() throws InterruptedException {
+        TestTask task = startTask(new FakeSender(), 10, QUICK_REFRESH, true);
+        task.realRefresher = true;
+        CountDownLatch reloading = new CountDownLatch(1);
         task.enrichmentResults.add(lookup("7", "A"));
-        task.enrichmentResults.add(lookup("7", "B"));
-        List<SinkRecord> batch = Collections.singletonList(keyed(0, 7));
-        task.put(batch);
-        initial.awaitFailure = schemaMismatch(0);
-        task.put(Collections.emptyList());
-        assertThrows(RetriableException.class, () -> task.put(batch)); // written, not yet acknowledged
+        task.enrichmentResults.add(blockedLoad(reloading));
+        task.put(Collections.singletonList(keyed(0, 7)));
+        Thread refresher = (Thread) field(task, "enrichmentRefresher");
+        reloading.await();
 
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(5);
-        task.duringLoad = () -> {
-            task.nowNanos += TimeUnit.MILLISECONDS.toNanos(20);
-            quarantine.drainSucceeds = true;
-        };
-        assertDoesNotThrow(() -> task.put(batch));
+        try (LogCapture logs = new LogCapture(QwpSinkTask.class)) {
+            task.stop();
+            refresher.join();
 
-        assertEquals(2, task.loadCalls);
-        assertEquals("PIPELINED", field(task, "mode").toString());
+            assertEquals(List.of(refresher), new ArrayList<>(task.enrichmentClosers));
+            assertEquals(List.of(), logs.lines);
+        }
     }
 
-    /** Reloads whenever records arrive; a reload taking 20 ms outlasts the progress timeout. */
-    private static final Map<String, String> SLOW_RELOAD = Map.of(
+    private static final Map<String, String> QUICK_REFRESH = Map.of(
             QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG, "select id, ticker from sec_list",
             QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG, "id",
-            QuestDBSinkConnectorConfig.ENRICHMENT_REFRESH_MS_CONFIG, "1",
-            QuestDBSinkConnectorConfig.QWP_PROGRESS_TIMEOUT_MS_CONFIG, "10");
+            QuestDBSinkConnectorConfig.ENRICHMENT_REFRESH_MS_CONFIG, "100");
 
-    private static void putAfterRefresh(TestTask task, int interval, SinkRecord record) {
-        task.nowNanos = TimeUnit.MILLISECONDS.toNanos(5_000L * interval);
+    /** Blocks as LookupEnrichment.load() does on a query the server never answers, until interrupted. */
+    private static Supplier<LookupEnrichment.Lookup> blockedLoad(CountDownLatch entered) {
+        return () -> {
+            entered.countDown();
+            try {
+                new CountDownLatch(1).await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new QueryException((byte) 0, "interrupted while loading the enrichment lookup", e);
+            }
+            throw new AssertionError("a blocked load ends only by an interrupt");
+        };
+    }
+
+    private static void putAfterRefresh(TestTask task, SinkRecord record) {
+        task.reloadEnrichment();
         task.put(Collections.singletonList(record));
     }
 
@@ -1290,12 +1322,13 @@ class QwpSinkTaskTest {
         private final List<FakeSender> senders;
         private RuntimeException buildFailure;
         private int buildCalls;
-        /** Runs inside each load: what happens while the task is blocked on the query. */
-        private Runnable duringLoad = () -> { };
-        private final ArrayDeque<Object> enrichmentResults = new ArrayDeque<>();
+        private final Queue<Thread> enrichmentClosers = new ConcurrentLinkedQueue<>();
+        // Lookups, failures to throw, or a Supplier of either; the refresher thread takes them too.
+        private final Queue<Object> enrichmentResults = new ConcurrentLinkedQueue<>();
         private FakeContext fakeContext;
-        private int loadCalls;
+        private final AtomicInteger loadCalls = new AtomicInteger();
         private long nowNanos;
+        private boolean realRefresher;
 
         private TestTask(List<FakeSender> senders) {
             this.senders = senders;
@@ -1316,13 +1349,29 @@ class QwpSinkTaskTest {
 
         @Override
         LookupEnrichment.Lookup loadEnrichment() {
-            loadCalls++;
-            duringLoad.run();
-            Object next = enrichmentResults.removeFirst();
+            loadCalls.incrementAndGet();
+            Object next = enrichmentResults.remove();
+            if (next instanceof Supplier) {
+                next = ((Supplier<?>) next).get();
+            }
             if (next instanceof RuntimeException) {
                 throw (RuntimeException) next;
             }
             return (LookupEnrichment.Lookup) next;
+        }
+
+        @Override
+        void closeEnrichment() {
+            enrichmentClosers.add(Thread.currentThread());
+            super.closeEnrichment();
+        }
+
+        /** Tests drive reloadEnrichment() themselves unless they ask for the real thread. */
+        @Override
+        void startEnrichmentRefresher() {
+            if (realRefresher) {
+                super.startEnrichmentRefresher();
+            }
         }
 
         @Override

@@ -122,12 +122,12 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
             + "Keys are compared as text: text, integers, floating-point numbers and booleans work, but 42.0 does not match the integer key 42.";
 
     public static final String ENRICHMENT_REFRESH_MS_CONFIG = "enrichment.refresh.ms";
-    private static final String ENRICHMENT_REFRESH_MS_DOC = "Minimum interval in milliseconds between reloads of the enrichment lookup. A task reloads only when records arrive.";
+    private static final String ENRICHMENT_REFRESH_MS_DOC = "Interval in milliseconds between reloads of the enrichment lookup. Each task reloads in the background, also while no records arrive.";
 
     public static final String ENRICHMENT_QUERY_TIMEOUT_MS_CONFIG = "enrichment.query.timeout.ms";
     private static final String ENRICHMENT_QUERY_TIMEOUT_MS_DOC = "How long one enrichment lookup query may take before it is abandoned. "
             + "Unless the client configuration string sets them, it also caps connecting (connect_timeout) and the WebSocket upgrade (auth_timeout_ms) for each address. "
-            + "A load blocks the task: each address tried can take those two plus a fixed 5 s wait for the server's handshake, the query this value once more, "
+            + "The first load blocks the task; later reloads run in the background. Each address tried can take those two plus a fixed 5 s wait for the server's handshake, the query this value once more, "
             + "an abandoned query up to the client's query_close_timeout_ms to cancel, and closing the client after a failure up to about 7 s more. "
             + "Keep it well under the consumer's max.poll.interval.ms.";
 
@@ -175,7 +175,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(QWP_DLQ_TERMINAL_CATEGORIES_CONFIG, Type.LIST, "SCHEMA_MISMATCH", (name, value) -> parseDlqEligibleCategories((List<?>) value), Importance.LOW, QWP_DLQ_TERMINAL_CATEGORIES_DOC)
                 .define(ENRICHMENT_SQL_CONFIG, Type.STRING, null, Importance.LOW, ENRICHMENT_SQL_DOC)
                 .define(ENRICHMENT_KEY_FIELD_CONFIG, Type.STRING, null, Importance.LOW, ENRICHMENT_KEY_FIELD_DOC)
-                .define(ENRICHMENT_REFRESH_MS_CONFIG, Type.LONG, 5_000L, ConfigDef.Range.atLeast(1L), Importance.LOW, ENRICHMENT_REFRESH_MS_DOC)
+                .define(ENRICHMENT_REFRESH_MS_CONFIG, Type.LONG, 5_000L, ConfigDef.Range.atLeast(100L), Importance.LOW, ENRICHMENT_REFRESH_MS_DOC)
                 .define(ENRICHMENT_QUERY_TIMEOUT_MS_CONFIG, Type.LONG, 10_000L, ConfigDef.Range.atLeast(1L), Importance.LOW, ENRICHMENT_QUERY_TIMEOUT_MS_DOC);
     }
 
