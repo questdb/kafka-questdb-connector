@@ -53,6 +53,7 @@ final class RecordToRowHandler {
     private final String enrichmentKeyField;
     private String enrichmentColumn;
     private String enrichmentKey;
+    private boolean enrichmentKeyUnusable; // the key field held a value no lookup key can match
     private Map<String, String> enrichmentMap = Collections.emptyMap();
     private final EnrichmentMisses enrichmentMisses;
     private static final com.fasterxml.jackson.core.JsonFactory JSON_FACTORY = new com.fasterxml.jackson.core.JsonFactory();
@@ -158,6 +159,7 @@ final class RecordToRowHandler {
         assert timestampColumnValue == Long.MIN_VALUE;
         // A failed record can leave its key captured, so every record starts by clearing it.
         enrichmentKey = null;
+        enrichmentKeyUnusable = false;
         if (payload == null) {
             return false; // tombstone
         }
@@ -359,7 +361,7 @@ final class RecordToRowHandler {
     private void noteUnusableJsonKey(String name) {
         if (name.equals(enrichmentKeyField)) {
             enrichmentKey = null;
-            enrichmentMisses.unusable();
+            enrichmentKeyUnusable = true;
         }
     }
 
@@ -497,6 +499,11 @@ final class RecordToRowHandler {
     private void stampEnrichment() {
         String key = enrichmentKey;
         if (key == null) {
+            if (enrichmentKeyUnusable) {
+                enrichmentMisses.unusable();
+            } else if (enrichmentKeyField != null) {
+                enrichmentMisses.absent();
+            }
             return;
         }
         enrichmentKey = null;
@@ -536,6 +543,7 @@ final class RecordToRowHandler {
         assert timestampColumnValue == Long.MIN_VALUE;
         // A failed record can leave its key captured, so every record starts by clearing it.
         enrichmentKey = null;
+        enrichmentKeyUnusable = false;
 
         // Clear composed timestamp values from any previous failed record
         if (composedTimestampValues != null) {
@@ -710,7 +718,7 @@ final class RecordToRowHandler {
             CharSequence keyText = symbolText(schema, value);
             if (keyText == null) {
                 enrichmentKey = null;
-                enrichmentMisses.unusable();
+                enrichmentKeyUnusable = true;
             } else {
                 enrichmentKey = keyText.toString();
             }

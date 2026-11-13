@@ -32,6 +32,8 @@ final class EnrichmentMisses {
     private int resolved;
     private long unusable;
     private boolean unusableReported;
+    private long absent;
+    private boolean absentReported;
 
     EnrichmentMisses(String keyField) {
         this.keyField = keyField;
@@ -60,6 +62,14 @@ final class EnrichmentMisses {
      */
     void unusable() {
         unusable++;
+    }
+
+    /**
+     * Called for every record with no value in the key field: the field is missing or null.
+     * When every record is, the key field is most likely misnamed.
+     */
+    void absent() {
+        absent++;
     }
 
     /** Forgets the keys a freshly loaded mapping covers. */
@@ -106,6 +116,19 @@ final class EnrichmentMisses {
                         unusable, QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG, keyField);
             }
             unusable = 0;
+        }
+        if (absent > 0) {
+            if (!absentReported) {
+                absentReported = true;
+                log.warn("{} record(s) had no value in {} '{}'; those records are not enriched. If every record"
+                                + " has that field, check the name: nested names are joined with '_' and start with"
+                                + " the value or key prefix. Later ones are logged at DEBUG",
+                        absent, QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG, keyField);
+            } else {
+                log.debug("{} more record(s) had no value in {} '{}'",
+                        absent, QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG, keyField);
+            }
+            absent = 0;
         }
     }
 }

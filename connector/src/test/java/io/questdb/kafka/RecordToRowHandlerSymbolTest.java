@@ -159,12 +159,14 @@ class RecordToRowHandlerSymbolTest {
         assertEquals(List.of("table(tab)", "longColumn(sec_id,7)", "doubleColumn(px,1.5)", "atNow()"), recorder.calls);
 
         recorder.calls.clear();
-        handler.handle(shape.record(null)); // key field absent: neither a hit nor a miss
+        handler.handle(shape.record(null)); // key field absent: neither a hit nor a miss, counted as absent
         assertEquals(List.of("table(tab)", "doubleColumn(px,1.5)", "atNow()"), recorder.calls);
 
         recorder.calls.clear();
         handler.handle(shape.record(NESTED)); // not a scalar: written as usual, reported as unusable
         assertEquals(List.of("table(tab)", "longColumn(sec_id_a,1)", "doubleColumn(px,1.5)", "atNow()"), recorder.calls);
+
+        handler.handle(shape.record(null)); // absent again: the unusable key before it does not carry over
 
         try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
             handler.reportEnrichmentMisses();
@@ -174,7 +176,15 @@ class RecordToRowHandlerSymbolTest {
                     "DEBUG Enrichment keys newly without a mapping (at most 20 shown): [7]",
                     "WARN 1 record(s) had a value in enrichment.key.field 'sec_id' that cannot be a lookup key;"
                             + " only text, integers, floating-point numbers and booleans can. Those records are not"
-                            + " enriched; later ones are logged at DEBUG"), logs.lines);
+                            + " enriched; later ones are logged at DEBUG",
+                    "WARN 2 record(s) had no value in enrichment.key.field 'sec_id'; those records are not enriched."
+                            + " If every record has that field, check the name: nested names are joined with '_' and"
+                            + " start with the value or key prefix. Later ones are logged at DEBUG"), logs.lines);
+        }
+        handler.handle(shape.record(null));
+        try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
+            handler.reportEnrichmentMisses();
+            assertEquals(List.of("DEBUG 1 more record(s) had no value in enrichment.key.field 'sec_id'"), logs.lines);
         }
     }
 
@@ -222,7 +232,9 @@ class RecordToRowHandlerSymbolTest {
                 "table(tab)", "stringColumn(value,abc)", "symbol(ticker,MSFT)", "atNow()"), recorder.calls);
         try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
             byValue.reportEnrichmentMisses();
-            assertEquals(List.of(), logs.lines, "nothing changed since the previous report");
+            assertEquals(List.of("WARN 2 record(s) had no value in enrichment.key.field 'value'; those records are"
+                    + " not enriched. If every record has that field, check the name: nested names are joined with '_'"
+                    + " and start with the value or key prefix. Later ones are logged at DEBUG"), logs.lines);
         }
 
         // the key path takes the same fallback when key.prefix is emptied, on both value paths
