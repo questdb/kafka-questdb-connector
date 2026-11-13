@@ -119,7 +119,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String ENRICHMENT_KEY_FIELD_CONFIG = "enrichment.key.field";
     private static final String ENRICHMENT_KEY_FIELD_DOC = "Record field whose value is looked up in the result of '" + ENRICHMENT_SQL_CONFIG + "', named as the field is flattened (with the value prefix, and '_' between nested names). "
             + "A primitive key or value is named as its column: the key or value prefix, or 'key' or 'value' when that prefix is empty. "
-            + "Keys are compared as text: text, integers, floating-point numbers and booleans work, but 42.0 does not match the integer key 42.";
+            + "The field can hold text, an integer, a floating-point number or a boolean, and matches by value whatever its type: 42 and \"42\" both match the integer key 42, but 42.0 and \"042\" do not.";
 
     public static final String ENRICHMENT_REFRESH_MS_CONFIG = "enrichment.refresh.ms";
     private static final String ENRICHMENT_REFRESH_MS_DOC = "Interval in milliseconds between reloads of the enrichment lookup. Each task reloads in the background, also while no records arrive.";
