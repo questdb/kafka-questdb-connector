@@ -31,6 +31,12 @@ Keep `sf_append_deadline_millis` below the worker consumer's
 `max.poll.interval.ms`; set `consumer.override.max.poll.interval.ms` if you want
 the connector to check that relationship for you.
 
+QWP only: `enrichment.sql` and `enrichment.key.field` (with `enrichment.refresh.ms`
+and `enrichment.query.timeout.ms`) add a symbol column to each row, looked up in
+an in-memory map the task reloads from a two-column query (key, value). The query
+must succeed when a task starts, and the value column must not share a name with a
+record field; alias it in the SQL otherwise.
+
 The QuestDB.com documentation covers the rest: the `qwp.*` settings, how
 `auto_flush_rows` and `auto_flush_interval` set checkpoint boundaries, and how
 outages, rejections and shutdown are handled.
