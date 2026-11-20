@@ -110,11 +110,33 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String QWP_DLQ_TERMINAL_CATEGORIES_CONFIG = "qwp.dlq.terminal.categories";
     private static final String QWP_DLQ_TERMINAL_CATEGORIES_DOC = "QWP terminal categories eligible for quarantine and DLQ handling. SCHEMA_MISMATCH is the safe default.";
 
+    public static final String ENRICHMENT_SQL_CONFIG = "enrichment.sql";
+    private static final String ENRICHMENT_SQL_DOC = "QWP only. SQL query returning exactly two columns, lookup key then value. "
+            + "The value is written to each row as a symbol column named after the second result column; an existing VARCHAR or STRING column of that name keeps its type. "
+            + "Alias it in the SQL if records carry a field of that name or the target table has such a column of another type; otherwise those rows are rejected. "
+            + "The query must succeed when a task starts, so the table must exist, though it may be empty. A statement such as INSERT is run once by each task before it is rejected.";
+
+    public static final String ENRICHMENT_KEY_FIELD_CONFIG = "enrichment.key.field";
+    private static final String ENRICHMENT_KEY_FIELD_DOC = "Record field whose value is looked up in the result of '" + ENRICHMENT_SQL_CONFIG + "', named as the field is flattened (with the value prefix, and '_' between nested names). "
+            + "A primitive key or value is named as its column: the key or value prefix, or 'key' or 'value' when that prefix is empty. "
+            + "The field can hold text, an integer, a floating-point number or a boolean, and matches by value whatever its type: 42 and \"42\" both match the integer key 42, but 42.0 and \"042\" do not.";
+
+    public static final String ENRICHMENT_REFRESH_MS_CONFIG = "enrichment.refresh.ms";
+    private static final String ENRICHMENT_REFRESH_MS_DOC = "Interval in milliseconds between reloads of the enrichment lookup. Each task reloads in the background, also while no records arrive.";
+
+    public static final String ENRICHMENT_QUERY_TIMEOUT_MS_CONFIG = "enrichment.query.timeout.ms";
+    private static final String ENRICHMENT_QUERY_TIMEOUT_MS_DOC = "How long one enrichment lookup query may take before it is abandoned. "
+            + "Unless the client configuration string sets them, it also caps connecting (connect_timeout) and the WebSocket upgrade (auth_timeout_ms) for each address. "
+            + "The first load blocks the task; later reloads run in the background. Each address tried can take those two plus a fixed 5 s wait for the server's handshake, the query this value once more, "
+            + "an abandoned query up to the client's query_close_timeout_ms to cancel, and closing the client after a failure up to about 7 s more. "
+            + "Keep it well under the consumer's max.poll.interval.ms.";
+
     private static final String DEFAULT_TIMESTAMP_FORMAT = "yyyy-MM-ddTHH:mm:ss.SSSUUUZ";
 
     public QuestDBSinkConnectorConfig(ConfigDef config, Map<String, String> parsedConfig) {
         super(config, parsedConfig);
         validateTimestampOptions(getDesignatedTimestampColumnName(), isDesignatedTimestampKafkaNative(), getString(VALUE_FORMAT_CONFIG));
+        validateEnrichment(getEnrichmentSql(), getEnrichmentKeyField(), false);
     }
 
     public QuestDBSinkConnectorConfig(Map<String, String> parsedConfig) {
@@ -150,7 +172,11 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
                 .define(QWP_MAX_INFLIGHT_ROWS_CONFIG, Type.INT, 150_000, ConfigDef.Range.atLeast(1), Importance.MEDIUM, QWP_MAX_INFLIGHT_ROWS_DOC)
                 .define(QWP_COMMIT_ACK_TIMEOUT_MS_CONFIG, Type.LONG, 500L, ConfigDef.Range.atLeast(0L), Importance.LOW, QWP_COMMIT_ACK_TIMEOUT_MS_DOC)
                 .define(QWP_QUARANTINE_ACK_TIMEOUT_MS_CONFIG, Type.LONG, 1_000L, ConfigDef.Range.atLeast(1L), Importance.LOW, QWP_QUARANTINE_ACK_TIMEOUT_MS_DOC)
-                .define(QWP_DLQ_TERMINAL_CATEGORIES_CONFIG, Type.LIST, "SCHEMA_MISMATCH", (name, value) -> parseDlqEligibleCategories((List<?>) value), Importance.LOW, QWP_DLQ_TERMINAL_CATEGORIES_DOC);
+                .define(QWP_DLQ_TERMINAL_CATEGORIES_CONFIG, Type.LIST, "SCHEMA_MISMATCH", (name, value) -> parseDlqEligibleCategories((List<?>) value), Importance.LOW, QWP_DLQ_TERMINAL_CATEGORIES_DOC)
+                .define(ENRICHMENT_SQL_CONFIG, Type.STRING, null, Importance.LOW, ENRICHMENT_SQL_DOC)
+                .define(ENRICHMENT_KEY_FIELD_CONFIG, Type.STRING, null, Importance.LOW, ENRICHMENT_KEY_FIELD_DOC)
+                .define(ENRICHMENT_REFRESH_MS_CONFIG, Type.LONG, 5_000L, ConfigDef.Range.atLeast(100L), Importance.LOW, ENRICHMENT_REFRESH_MS_DOC)
+                .define(ENRICHMENT_QUERY_TIMEOUT_MS_CONFIG, Type.LONG, 10_000L, ConfigDef.Range.atLeast(1L), Importance.LOW, ENRICHMENT_QUERY_TIMEOUT_MS_DOC);
     }
 
     static String[] parseComposedTimestampFields(String value) {
@@ -179,6 +205,21 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
         if (fields != null && fields.contains(",") && ("json".equals(format) || "json_envelope".equals(format))) {
             throw new ConfigException("value.format=" + format + " does not support composed timestamps ("
                     + DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG + " naming several fields)");
+        }
+    }
+
+    /**
+     * @param knownNonQwp the transport is known not to be ws:: / wss::. The connector cannot
+     *                    always tell (QDB_CLIENT_CONF is worker-local); the task always can.
+     */
+    static void validateEnrichment(String sql, String keyField, boolean knownNonQwp) {
+        boolean hasSql = sql != null && !sql.trim().isEmpty();
+        boolean hasKeyField = keyField != null && !keyField.trim().isEmpty();
+        if (hasSql != hasKeyField) {
+            throw new ConfigException("'" + ENRICHMENT_SQL_CONFIG + "' and '" + ENRICHMENT_KEY_FIELD_CONFIG + "' must be set together");
+        }
+        if (hasSql && knownNonQwp) {
+            throw new ConfigException("'" + ENRICHMENT_SQL_CONFIG + "' requires the QWP transport (a ws:: or wss:: client configuration string)");
         }
     }
 
@@ -326,6 +367,25 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public long getQwpQuarantineAckTimeoutMs() {
         return getLong(QWP_QUARANTINE_ACK_TIMEOUT_MS_CONFIG);
+    }
+
+    /** Null when enrichment is not configured. */
+    public String getEnrichmentSql() {
+        String sql = getString(ENRICHMENT_SQL_CONFIG);
+        return sql == null || sql.trim().isEmpty() ? null : sql;
+    }
+
+    public String getEnrichmentKeyField() {
+        String field = getString(ENRICHMENT_KEY_FIELD_CONFIG);
+        return field == null || field.trim().isEmpty() ? null : field.trim();
+    }
+
+    public long getEnrichmentRefreshMs() {
+        return getLong(ENRICHMENT_REFRESH_MS_CONFIG);
+    }
+
+    public long getEnrichmentQueryTimeoutMs() {
+        return getLong(ENRICHMENT_QUERY_TIMEOUT_MS_CONFIG);
     }
 
     public List<String> getQwpDlqTerminalCategories() {
