@@ -22,6 +22,14 @@
             <version>0.2.0</version>
             <scope>test</scope>
         </dependency>
+        <!-- kafka-smt-jsonpath-tools brings connect-transforms 2.8.0, whose Flatten rejects arrays;
+             test against the built-in transforms of the Kafka version the connector builds with. -->
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>connect-transforms</artifactId>
+            <version>${kafka.version}</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.apache.kafka</groupId>
             <artifactId>kafka-clients</artifactId>

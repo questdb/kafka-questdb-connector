@@ -10,7 +10,9 @@ import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.transforms.Transformation;
 
+import java.util.AbstractList;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -214,8 +216,9 @@ public abstract class OrderBookToArray<R extends ConnectRecord<R>> implements Tr
             }
             if (entries.isEmpty()) {
                 // Without a schema, [[], []] could be 2D or 3D, so the sink rejects it.
-                // A double[][] says 2D; the sink writes it as shape (structFields, 0).
-                result.put(mapping.targetField, new double[mapping.structFields.length][0]);
+                // EmptyRows is still a List for transforms further down the chain, and tells
+                // the sink it is 2D.
+                result.put(mapping.targetField, new EmptyRows(mapping.structFields.length));
                 continue;
             }
             List<List<Double>> transposed = new ArrayList<>(mapping.structFields.length);
@@ -241,6 +244,33 @@ public abstract class OrderBookToArray<R extends ConnectRecord<R>> implements Tr
     @Override
     public void close() {
         schemaCache.clear();
+    }
+
+    /**
+     * An empty 2D array of {@code rows} empty rows, emitted for an empty source array in
+     * schemaless mode. The type carries the dimensionality that {@code [[], []]} alone does
+     * not. Immutable, so a transform further down the chain cannot turn it into something
+     * else while keeping the type.
+     */
+    static final class EmptyRows extends AbstractList<List<Double>> {
+        private final int rows;
+
+        EmptyRows(int rows) {
+            this.rows = rows;
+        }
+
+        @Override
+        public List<Double> get(int index) {
+            if (index < 0 || index >= rows) {
+                throw new IndexOutOfBoundsException("Index: " + index + ", size: " + rows);
+            }
+            return Collections.emptyList();
+        }
+
+        @Override
+        public int size() {
+            return rows;
+        }
     }
 
     private static final class FieldMapping {

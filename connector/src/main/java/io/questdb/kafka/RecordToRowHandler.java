@@ -661,12 +661,11 @@ final class RecordToRowHandler {
         } else if (value instanceof java.util.Date) {
             long epochMillis = ((java.util.Date) value).getTime();
             sender.timestampColumn(sanitizeName(actualName), TimeUnit.MILLISECONDS.toMicros(epochMillis), ChronoUnit.MICROS);
+        } else if (value instanceof OrderBookToArray.EmptyRows) {
+            // An empty order book side; unlike a plain [[], []], it is known to be 2D
+            sender.doubleArray(sanitizeName(actualName), new double[((List<?>) value).size()][0]);
         } else if (value instanceof List) {
             handleArrayWithoutSchema(actualName, (List<?>) value);
-        } else if (value instanceof double[][]) {
-            // Emitted by OrderBookToArray for an empty side with empty.as.array: a typed value
-            // keeps an empty 2D array apart from [[], []], which could equally be 3D.
-            sender.doubleArray(sanitizeName(actualName), (double[][]) value);
         } else {
             onUnsupportedType(actualName, value.getClass().getName());
         }

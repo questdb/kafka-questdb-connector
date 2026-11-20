@@ -582,8 +582,9 @@ public class OrderBookToArrayTest {
 
         @SuppressWarnings("unchecked")
         Map<String, Object> result = (Map<String, Object>) transformed.value();
-        // A typed double[][]: without a schema, [[], []] could be 2D or 3D
-        Assert.assertArrayEquals(new double[2][0], (double[][]) result.get("bids"));
+        // Marked as 2D: without a schema, a plain [[], []] could be 2D or 3D
+        Assert.assertTrue(result.get("bids") instanceof OrderBookToArray.EmptyRows);
+        Assert.assertEquals(Arrays.asList(Collections.emptyList(), Collections.emptyList()), result.get("bids"));
         Assert.assertEquals(Arrays.asList(Collections.singletonList(11.0), Collections.singletonList(500.0)), result.get("asks"));
 
         smt.close();
@@ -602,7 +603,8 @@ public class OrderBookToArrayTest {
         @SuppressWarnings("unchecked")
         Map<String, Object> result = (Map<String, Object>) transformed.value();
         // Shape (1, 0)
-        Assert.assertArrayEquals(new double[1][0], (double[][]) result.get("bid_prices"));
+        Assert.assertTrue(result.get("bid_prices") instanceof OrderBookToArray.EmptyRows);
+        Assert.assertEquals(Collections.singletonList(Collections.emptyList()), result.get("bid_prices"));
 
         smt.close();
     }

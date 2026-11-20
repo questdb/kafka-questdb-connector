@@ -2708,26 +2708,29 @@ public final class QuestDBSinkConnectorEmbeddedTest {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
         props.put("value.converter.schemas.enable", "false");
-        props.put("transforms", "orderbook");
+        // Flatten runs after the order book transform and must keep the empty sides intact
+        props.put("transforms", "orderbook,flatten");
         props.put("transforms.orderbook.type", "io.questdb.kafka.OrderBookToArray$Value");
         props.put("transforms.orderbook.mappings", "buy_entries:bids:px,size;sell_entries:asks:px,size");
         props.put("transforms.orderbook.empty.as.array", "true");
+        props.put("transforms.flatten.type", "org.apache.kafka.connect.transforms.Flatten$Value");
+        props.put("transforms.flatten.delimiter", "_");
 
         connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
         ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
 
         // The first record creates the table with an empty bids side
-        connect.kafka().produce(topicName, "{\"symbol\":\"AAPL\",\"buy_entries\":[],"
+        connect.kafka().produce(topicName, "{\"symbol\":\"AAPL\",\"meta\":{\"venue\":\"B3\"},\"buy_entries\":[],"
                 + "\"sell_entries\":[{\"px\":11.0,\"size\":500.0}]}");
-        connect.kafka().produce(topicName, "{\"symbol\":\"MSFT\","
+        connect.kafka().produce(topicName, "{\"symbol\":\"MSFT\",\"meta\":{\"venue\":\"B3\"},"
                 + "\"buy_entries\":[{\"px\":10.0,\"size\":1.0}],\"sell_entries\":[]}");
 
         // An empty side is stored as an empty array of shape (2, 0), not as null
         QuestDBUtils.assertSqlEventually(
-                "\"symbol\",\"bids\",\"bid_rows\",\"bid_cols\",\"asks\",\"ask_rows\",\"ask_cols\"\r\n" +
-                "\"AAPL\",\"[]\",2,0,\"[[11.0],[500.0]]\",2,1\r\n" +
-                "\"MSFT\",\"[[10.0],[1.0]]\",2,1,\"[]\",2,0\r\n",
-                "select symbol, bids, dim_length(bids, 1) bid_rows, dim_length(bids, 2) bid_cols, "
+                "\"symbol\",\"meta_venue\",\"bids\",\"bid_rows\",\"bid_cols\",\"asks\",\"ask_rows\",\"ask_cols\"\r\n" +
+                "\"AAPL\",\"B3\",\"[]\",2,0,\"[[11.0],[500.0]]\",2,1\r\n" +
+                "\"MSFT\",\"B3\",\"[[10.0],[1.0]]\",2,1,\"[]\",2,0\r\n",
+                "select symbol, meta_venue, bids, dim_length(bids, 1) bid_rows, dim_length(bids, 2) bid_cols, "
                         + "asks, dim_length(asks, 1) ask_rows, dim_length(asks, 2) ask_cols from " + topicName,
                 httpPort
         );
