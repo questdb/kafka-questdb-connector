@@ -4,7 +4,6 @@ import io.questdb.client.Sender;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.reflect.Proxy;
@@ -210,26 +209,37 @@ class RawJsonEquivalenceTest {
     }
 
     @ParameterizedTest
-    @CsvSource(delimiter = '|', value = {
-            "{\"arr\":[[],[]]} | doubleArray(arr,[[], []])",    // shape (2, 0), an empty order book side
-            "{\"arr\":[[]]}    | doubleArray(arr,[[]])",        // shape (1, 0)
-    })
-    void emptyRowsAreWrittenAsAnEmpty2DArrayOnBothPaths(String json, String expectedCall) {
-        Map<String, String> props = baseProps();
-        List<String> expected = List.of("table(tab)", expectedCall, "atNow()");
-        assertEquals(expected, callsForConverted(props, json));
-        assertEquals(expected, callsForRaw(props, json));
-    }
-
-    @ParameterizedTest
     @ValueSource(strings = {
+            "{\"arr\":[[],[]]}",                    // 2D shape (2, 0) or 3D shape (2, 0, n)
+            "{\"arr\":[[]]}",
             "{\"arr\":[[],[1.0]]}",
             "{\"arr\":[[1.0],[]]}",
     })
-    void emptyAndNonEmptyRowsAreRejectedAsJaggedOnBothPaths(String json) {
+    void emptyRowsWithoutASchemaAreRejectedOnBothPaths(String json) {
+        // Without a schema the dimensionality of an empty row is unknown; guessing it could
+        // auto-create the column with the wrong number of dimensions.
         Map<String, String> props = baseProps();
         assertEquals(InvalidDataException.class, failureOf(() -> callsForConverted(props, json)));
         assertEquals(InvalidDataException.class, failureOf(() -> callsForRaw(props, json)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"false", "true"})
+    void orderBookEmptySideIsWrittenAsAnEmpty2DArray(String skipUnsupportedTypes) {
+        Map<String, String> props = baseProps();
+        props.put("skip.unsupported.types", skipUnsupportedTypes);
+        OrderBookToArray<SinkRecord> smt = new OrderBookToArray.Value<>();
+        Map<String, Object> smtConfig = new HashMap<>();
+        smtConfig.put("mappings", "buy_entries:bids:px,size");
+        smtConfig.put("empty.as.array", "true");
+        smt.configure(smtConfig);
+
+        Object converted = JsonTestUtils.toConnectValue("{\"buy_entries\":[]}");
+        SinkRecord transformed = smt.apply(new SinkRecord("tab", 0, null, "k", null, converted, 0L));
+        Recorder recorder = new Recorder();
+        handler(props, recorder, false).handle(transformed);
+
+        assertEquals(List.of("table(tab)", "doubleArray(bids,[[], []])", "atNow()"), recorder.calls);
     }
 
     private static Class<? extends Throwable> failureOf(Runnable r) {

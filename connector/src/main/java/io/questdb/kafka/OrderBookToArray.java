@@ -212,6 +212,12 @@ public abstract class OrderBookToArray<R extends ConnectRecord<R>> implements Tr
             if (entries == null || (entries.isEmpty() && !emptyAsArray)) {
                 continue;
             }
+            if (entries.isEmpty()) {
+                // Without a schema, [[], []] could be 2D or 3D, so the sink rejects it.
+                // A double[][] says 2D; the sink writes it as shape (structFields, 0).
+                result.put(mapping.targetField, new double[mapping.structFields.length][0]);
+                continue;
+            }
             List<List<Double>> transposed = new ArrayList<>(mapping.structFields.length);
             for (String structField : mapping.structFields) {
                 List<Double> row = new ArrayList<>(entries.size());

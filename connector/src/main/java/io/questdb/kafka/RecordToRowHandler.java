@@ -663,6 +663,10 @@ final class RecordToRowHandler {
             sender.timestampColumn(sanitizeName(actualName), TimeUnit.MILLISECONDS.toMicros(epochMillis), ChronoUnit.MICROS);
         } else if (value instanceof List) {
             handleArrayWithoutSchema(actualName, (List<?>) value);
+        } else if (value instanceof double[][]) {
+            // Emitted by OrderBookToArray for an empty side with empty.as.array: a typed value
+            // keeps an empty 2D array apart from [[], []], which could equally be 3D.
+            sender.doubleArray(sanitizeName(actualName), (double[][]) value);
         } else {
             onUnsupportedType(actualName, value.getClass().getName());
         }
@@ -918,15 +922,15 @@ final class RecordToRowHandler {
             sender.doubleArray(sanitizeName(name), doubleArray);
         } else if (firstElement instanceof List) {
             List<?> firstList = (List<?>) firstElement;
-            // An empty first row is read as a 2D array: [[], []] becomes shape (2, 0). It could
-            // equally be a 3D array of empty matrices, but 2D is the shape OrderBookToArray emits
-            // for an empty side. The jagged-row check below then requires every row to be empty.
-            Object firstNestedElement = firstList.isEmpty() ? null : firstList.get(0);
-            if (!firstList.isEmpty() && firstNestedElement == null) {
+            if (firstList.isEmpty()) {
+                throw new InvalidDataException("QuestDB 2D array cannot contain empty rows");
+            }
+            Object firstNestedElement = firstList.get(0);
+            if (firstNestedElement == null) {
                 throw new InvalidDataException("QuestDB 2D array elements cannot be null");
             }
 
-            if (firstList.isEmpty() || firstNestedElement instanceof Number) {
+            if (firstNestedElement instanceof Number) {
                 // First, validate that all rows have the same length (no jagged arrays)
                 int expectedRowLength = firstList.size();
                 for (int i = 0; i < list.size(); i++) {
