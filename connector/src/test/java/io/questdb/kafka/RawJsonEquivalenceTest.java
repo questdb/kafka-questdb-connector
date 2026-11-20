@@ -208,6 +208,40 @@ class RawJsonEquivalenceTest {
         assertEquals(convertedFailure, rawFailure, "both paths must reject the same payloads");
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"arr\":[[],[]]}",                    // 2D shape (2, 0) or 3D shape (2, 0, n)
+            "{\"arr\":[[]]}",
+            "{\"arr\":[[],[1.0]]}",
+            "{\"arr\":[[1.0],[]]}",
+    })
+    void emptyRowsWithoutASchemaAreRejectedOnBothPaths(String json) {
+        // Without a schema the dimensionality of an empty row is unknown; guessing it could
+        // auto-create the column with the wrong number of dimensions.
+        Map<String, String> props = baseProps();
+        assertEquals(InvalidDataException.class, failureOf(() -> callsForConverted(props, json)));
+        assertEquals(InvalidDataException.class, failureOf(() -> callsForRaw(props, json)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"false", "true"})
+    void orderBookEmptySideIsWrittenAsAnEmpty2DArray(String skipUnsupportedTypes) {
+        Map<String, String> props = baseProps();
+        props.put("skip.unsupported.types", skipUnsupportedTypes);
+        OrderBookToArray<SinkRecord> smt = new OrderBookToArray.Value<>();
+        Map<String, Object> smtConfig = new HashMap<>();
+        smtConfig.put("mappings", "buy_entries:bids:px,size");
+        smtConfig.put("empty.as.array", "true");
+        smt.configure(smtConfig);
+
+        Object converted = JsonTestUtils.toConnectValue("{\"buy_entries\":[]}");
+        SinkRecord transformed = smt.apply(new SinkRecord("tab", 0, null, "k", null, converted, 0L));
+        Recorder recorder = new Recorder();
+        handler(props, recorder, false).handle(transformed);
+
+        assertEquals(List.of("table(tab)", "doubleArray(bids,[[], []])", "atNow()"), recorder.calls);
+    }
+
     private static Class<? extends Throwable> failureOf(Runnable r) {
         try {
             r.run();

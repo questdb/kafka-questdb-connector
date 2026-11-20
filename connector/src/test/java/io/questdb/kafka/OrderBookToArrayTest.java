@@ -499,6 +499,144 @@ public class OrderBookToArrayTest {
     }
 
     @Test
+    public void testWithSchema_emptySourceArray_emptyAsArray() {
+        OrderBookToArray<SinkRecord> smt = new OrderBookToArray.Value<>();
+        smt.configure(emptyAsArrayConfig("buy_entries:bids:px,size"));
+
+        Schema entrySchema = SchemaBuilder.struct()
+                .field("px", Schema.FLOAT64_SCHEMA)
+                .field("size", Schema.FLOAT64_SCHEMA)
+                .build();
+        Schema schema = SchemaBuilder.struct()
+                .field("symbol", Schema.STRING_SCHEMA)
+                .field("buy_entries", SchemaBuilder.array(entrySchema).build())
+                .build();
+
+        Struct struct = new Struct(schema)
+                .put("symbol", "AAPL")
+                .put("buy_entries", Collections.emptyList());
+
+        SinkRecord transformed = smt.apply(new SinkRecord("topic", 0, null, null, schema, struct, 0));
+
+        Struct result = (Struct) transformed.value();
+        // One empty row per struct field: shape (2, 0)
+        Assert.assertEquals(Arrays.asList(Collections.emptyList(), Collections.emptyList()), result.get("bids"));
+
+        smt.close();
+    }
+
+    @Test
+    public void testWithSchema_nullSourceArray_emptyAsArray() {
+        OrderBookToArray<SinkRecord> smt = new OrderBookToArray.Value<>();
+        smt.configure(emptyAsArrayConfig("buy_entries:bids:px,size"));
+
+        Schema entrySchema = SchemaBuilder.struct()
+                .field("px", Schema.FLOAT64_SCHEMA)
+                .field("size", Schema.FLOAT64_SCHEMA)
+                .build();
+        Schema schema = SchemaBuilder.struct()
+                .field("symbol", Schema.STRING_SCHEMA)
+                .field("buy_entries", SchemaBuilder.array(entrySchema).optional().build())
+                .build();
+
+        Struct struct = new Struct(schema).put("symbol", "AAPL");
+
+        SinkRecord transformed = smt.apply(new SinkRecord("topic", 0, null, null, schema, struct, 0));
+
+        // A null source is not an empty one: the target stays null
+        Assert.assertNull(((Struct) transformed.value()).get("bids"));
+
+        smt.close();
+    }
+
+    @Test
+    public void testSchemaless_emptySourceArray() {
+        OrderBookToArray<SinkRecord> smt = new OrderBookToArray.Value<>();
+        smt.configure(Collections.singletonMap("mappings", "buy_entries:bids:px,size"));
+
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("symbol", "AAPL");
+        value.put("buy_entries", Collections.emptyList());
+
+        SinkRecord transformed = smt.apply(new SinkRecord("topic", 0, null, null, null, value, 0));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result = (Map<String, Object>) transformed.value();
+        Assert.assertFalse(result.containsKey("buy_entries"));
+        Assert.assertFalse(result.containsKey("bids"));
+
+        smt.close();
+    }
+
+    @Test
+    public void testSchemaless_emptySourceArray_emptyAsArray() {
+        OrderBookToArray<SinkRecord> smt = new OrderBookToArray.Value<>();
+        smt.configure(emptyAsArrayConfig("buy_entries:bids:px,size;sell_entries:asks:px,size"));
+
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("symbol", "AAPL");
+        value.put("buy_entries", Collections.emptyList());
+        value.put("sell_entries", Collections.singletonList(mapOf("px", 11.0, "size", 500.0)));
+
+        SinkRecord transformed = smt.apply(new SinkRecord("topic", 0, null, null, null, value, 0));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result = (Map<String, Object>) transformed.value();
+        // Marked as 2D: without a schema, a plain [[], []] could be 2D or 3D
+        Assert.assertTrue(result.get("bids") instanceof OrderBookToArray.EmptyRows);
+        Assert.assertEquals(Arrays.asList(Collections.emptyList(), Collections.emptyList()), result.get("bids"));
+        Assert.assertEquals(Arrays.asList(Collections.singletonList(11.0), Collections.singletonList(500.0)), result.get("asks"));
+
+        smt.close();
+    }
+
+    @Test
+    public void testSchemaless_emptySourceArray_emptyAsArray_singleStructField() {
+        OrderBookToArray<SinkRecord> smt = new OrderBookToArray.Value<>();
+        smt.configure(emptyAsArrayConfig("buy_entries:bid_prices:px"));
+
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("buy_entries", Collections.emptyList());
+
+        SinkRecord transformed = smt.apply(new SinkRecord("topic", 0, null, null, null, value, 0));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result = (Map<String, Object>) transformed.value();
+        // Shape (1, 0)
+        Assert.assertTrue(result.get("bid_prices") instanceof OrderBookToArray.EmptyRows);
+        Assert.assertEquals(Collections.singletonList(Collections.emptyList()), result.get("bid_prices"));
+
+        smt.close();
+    }
+
+    @Test
+    public void testSchemaless_nullSourceArray_emptyAsArray() {
+        OrderBookToArray<SinkRecord> smt = new OrderBookToArray.Value<>();
+        smt.configure(emptyAsArrayConfig("buy_entries:bids:px,size"));
+
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("symbol", "AAPL");
+        value.put("buy_entries", null);
+
+        SinkRecord transformed = smt.apply(new SinkRecord("topic", 0, null, null, null, value, 0));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result = (Map<String, Object>) transformed.value();
+        Assert.assertFalse(result.containsKey("bids"));
+
+        smt.close();
+    }
+
+    @Test(expected = ConfigException.class)
+    public void testInvalidEmptyAsArrayConfig() {
+        OrderBookToArray<SinkRecord> smt = new OrderBookToArray.Value<>();
+        Map<String, Object> config = new HashMap<>();
+        config.put("mappings", "buy_entries:bids:px,size");
+        config.put("empty.as.array", "yes");
+        smt.configure(config);
+    }
+
+    @Test
     public void testWithSchema_schemaMetadataPreserved() {
         OrderBookToArray<SinkRecord> smt = new OrderBookToArray.Value<>();
         smt.configure(Collections.singletonMap("mappings", "buy_entries:bids:px,size"));
@@ -682,6 +820,13 @@ public class OrderBookToArrayTest {
         Assert.assertEquals(Arrays.asList(1123.0, 92.0), bids.get(1));
 
         smt.close();
+    }
+
+    private static Map<String, Object> emptyAsArrayConfig(String mappings) {
+        Map<String, Object> config = new HashMap<>();
+        config.put("mappings", mappings);
+        config.put("empty.as.array", "true");
+        return config;
     }
 
     private static Map<String, Object> mapOf(String k1, Object v1, String k2, Object v2) {
