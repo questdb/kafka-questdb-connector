@@ -2672,6 +2672,55 @@ public final class QuestDBSinkConnectorEmbeddedTest {
 
     @ParameterizedTest
     @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
+    public void testOrderBookToArraySMT_emptyAsArray(ConnectTestUtils.Transport transport) {
+        connect.kafka().createTopic(topicName, 1);
+        Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
+        props.put(VALUE_CONVERTER_CLASS_CONFIG, JsonConverter.class.getName());
+        props.put("transforms", "orderbook");
+        props.put("transforms.orderbook.type", "io.questdb.kafka.OrderBookToArray$Value");
+        props.put("transforms.orderbook.mappings", "buy_entries:bids:px,size;sell_entries:asks:px,size");
+        props.put("transforms.orderbook.empty.as.array", "true");
+
+        connect.configureConnector(ConnectTestUtils.CONNECTOR_NAME, props);
+        ConnectTestUtils.assertConnectorTaskRunningEventually(connect);
+
+        Schema entrySchema = SchemaBuilder.struct()
+                .field("px", Schema.FLOAT64_SCHEMA)
+                .field("size", Schema.FLOAT64_SCHEMA)
+                .build();
+        Schema entryArraySchema = SchemaBuilder.array(entrySchema).build();
+        Schema schema = SchemaBuilder.struct()
+                .name("com.example.OrderBook")
+                .field("symbol", Schema.STRING_SCHEMA)
+                .field("buy_entries", entryArraySchema)
+                .field("sell_entries", entryArraySchema)
+                .build();
+
+        // The first record creates the table with an empty bids side
+        Struct aapl = new Struct(schema)
+                .put("symbol", "AAPL")
+                .put("buy_entries", Collections.emptyList())
+                .put("sell_entries", Collections.singletonList(new Struct(entrySchema).put("px", 11.0).put("size", 500.0)));
+        Struct msft = new Struct(schema)
+                .put("symbol", "MSFT")
+                .put("buy_entries", Collections.singletonList(new Struct(entrySchema).put("px", 10.0).put("size", 1.0)))
+                .put("sell_entries", Collections.emptyList());
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, aapl)));
+        connect.kafka().produce(topicName, new String(converter.fromConnectData(topicName, schema, msft)));
+
+        // An empty side is stored as an empty array of shape (2, 0), not as null
+        QuestDBUtils.assertSqlEventually(
+                "\"symbol\",\"bids\",\"bid_rows\",\"bid_cols\",\"asks\",\"ask_rows\",\"ask_cols\"\r\n" +
+                "\"AAPL\",\"[]\",2,0,\"[[11.0],[500.0]]\",2,1\r\n" +
+                "\"MSFT\",\"[[10.0],[1.0]]\",2,1,\"[]\",2,0\r\n",
+                "select symbol, bids, dim_length(bids, 1) bid_rows, dim_length(bids, 2) bid_cols, "
+                        + "asks, dim_length(asks, 1) ask_rows, dim_length(asks, 2) ask_cols from " + topicName,
+                httpPort
+        );
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.questdb.kafka.ConnectTestUtils#defaultTransports")
     public void testOrderBookToArraySMT_schemaless(ConnectTestUtils.Transport transport) {
         connect.kafka().createTopic(topicName, 1);
         Map<String, String> props = ConnectTestUtils.baseConnectorProps(questDBContainer, topicName, transport);
