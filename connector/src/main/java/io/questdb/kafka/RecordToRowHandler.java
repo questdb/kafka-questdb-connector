@@ -918,15 +918,15 @@ final class RecordToRowHandler {
             sender.doubleArray(sanitizeName(name), doubleArray);
         } else if (firstElement instanceof List) {
             List<?> firstList = (List<?>) firstElement;
-            if (firstList.isEmpty()) {
-                throw new InvalidDataException("QuestDB 2D array cannot contain empty rows");
-            }
-            Object firstNestedElement = firstList.get(0);
-            if (firstNestedElement == null) {
+            // An empty first row is read as a 2D array: [[], []] becomes shape (2, 0). It could
+            // equally be a 3D array of empty matrices, but 2D is the shape OrderBookToArray emits
+            // for an empty side. The jagged-row check below then requires every row to be empty.
+            Object firstNestedElement = firstList.isEmpty() ? null : firstList.get(0);
+            if (!firstList.isEmpty() && firstNestedElement == null) {
                 throw new InvalidDataException("QuestDB 2D array elements cannot be null");
             }
 
-            if (firstNestedElement instanceof Number) {
+            if (firstList.isEmpty() || firstNestedElement instanceof Number) {
                 // First, validate that all rows have the same length (no jagged arrays)
                 int expectedRowLength = firstList.size();
                 for (int i = 0; i < list.size(); i++) {

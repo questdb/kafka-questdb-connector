@@ -4,6 +4,7 @@ import io.questdb.client.Sender;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.reflect.Proxy;
@@ -206,6 +207,29 @@ class RawJsonEquivalenceTest {
         Class<? extends Throwable> convertedFailure = failureOf(() -> callsForConverted(props, json));
         Class<? extends Throwable> rawFailure = failureOf(() -> callsForRaw(props, json));
         assertEquals(convertedFailure, rawFailure, "both paths must reject the same payloads");
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "{\"arr\":[[],[]]} | doubleArray(arr,[[], []])",    // shape (2, 0), an empty order book side
+            "{\"arr\":[[]]}    | doubleArray(arr,[[]])",        // shape (1, 0)
+    })
+    void emptyRowsAreWrittenAsAnEmpty2DArrayOnBothPaths(String json, String expectedCall) {
+        Map<String, String> props = baseProps();
+        List<String> expected = List.of("table(tab)", expectedCall, "atNow()");
+        assertEquals(expected, callsForConverted(props, json));
+        assertEquals(expected, callsForRaw(props, json));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"arr\":[[],[1.0]]}",
+            "{\"arr\":[[1.0],[]]}",
+    })
+    void emptyAndNonEmptyRowsAreRejectedAsJaggedOnBothPaths(String json) {
+        Map<String, String> props = baseProps();
+        assertEquals(InvalidDataException.class, failureOf(() -> callsForConverted(props, json)));
+        assertEquals(InvalidDataException.class, failureOf(() -> callsForRaw(props, json)));
     }
 
     private static Class<? extends Throwable> failureOf(Runnable r) {

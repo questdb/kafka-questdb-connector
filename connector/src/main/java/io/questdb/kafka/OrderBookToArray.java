@@ -20,13 +20,19 @@ import java.util.Map;
 import java.util.Set;
 
 public abstract class OrderBookToArray<R extends ConnectRecord<R>> implements Transformation<R> {
+    public static final String EMPTY_AS_ARRAY_CONFIG = "empty.as.array";
     public static final String MAPPINGS_CONFIG = "mappings";
 
     private static final ConfigDef CONFIG_DEF = new ConfigDef()
             .define(MAPPINGS_CONFIG, ConfigDef.Type.STRING, ConfigDef.NO_DEFAULT_VALUE,
                     ConfigDef.Importance.HIGH,
-                    "Semicolon-separated mappings: sourceField:targetField:structField1,structField2");
+                    "Semicolon-separated mappings: sourceField:targetField:structField1,structField2")
+            .define(EMPTY_AS_ARRAY_CONFIG, ConfigDef.Type.BOOLEAN, false,
+                    ConfigDef.Importance.MEDIUM,
+                    "When true, an empty source array becomes an empty array with one empty row per struct field, "
+                            + "for example [[],[]] for two struct fields. When false, the target is left null.");
 
+    private boolean emptyAsArray;
     private List<FieldMapping> mappings;
     private Map<String, FieldMapping> sourceFieldMap;
     private Set<String> targetFieldNames;
@@ -42,6 +48,9 @@ public abstract class OrderBookToArray<R extends ConnectRecord<R>> implements Tr
         if (raw == null || raw.trim().isEmpty()) {
             throw new ConfigException(MAPPINGS_CONFIG, raw, "At least one mapping is required");
         }
+        Object emptyAsArrayValue = configs.get(EMPTY_AS_ARRAY_CONFIG);
+        emptyAsArray = emptyAsArrayValue != null
+                && (Boolean) ConfigDef.parseType(EMPTY_AS_ARRAY_CONFIG, emptyAsArrayValue, ConfigDef.Type.BOOLEAN);
         mappings = new ArrayList<>();
         sourceFieldMap = new HashMap<>();
         targetFieldNames = new HashSet<>();
@@ -102,7 +111,7 @@ public abstract class OrderBookToArray<R extends ConnectRecord<R>> implements Tr
                 continue;
             }
             List<Struct> entries = originalStruct.getArray(mapping.sourceField);
-            if (entries == null || entries.isEmpty()) {
+            if (entries == null || (entries.isEmpty() && !emptyAsArray)) {
                 continue;
             }
             List<List<Double>> transposed = transpose(entries, mapping.structFields, mapping.sourceField);
@@ -145,8 +154,8 @@ public abstract class OrderBookToArray<R extends ConnectRecord<R>> implements Tr
         }
 
         // Add target fields as optional ARRAY(ARRAY(FLOAT64)), only if source field exists.
-        // Target is always optional: null/empty source arrays are skipped at runtime
-        // (QuestDB does not support zero-length arrays).
+        // Target is always optional: a null source array is skipped at runtime, and so is an
+        // empty one unless empty.as.array is set.
         Schema targetArraySchema = SchemaBuilder.array(
                 SchemaBuilder.array(Schema.FLOAT64_SCHEMA).build()
         ).optional().build();
@@ -200,7 +209,7 @@ public abstract class OrderBookToArray<R extends ConnectRecord<R>> implements Tr
 
         for (FieldMapping mapping : mappings) {
             List<Map<String, Object>> entries = (List<Map<String, Object>>) result.remove(mapping.sourceField);
-            if (entries == null || entries.isEmpty()) {
+            if (entries == null || (entries.isEmpty() && !emptyAsArray)) {
                 continue;
             }
             List<List<Double>> transposed = new ArrayList<>(mapping.structFields.length);
