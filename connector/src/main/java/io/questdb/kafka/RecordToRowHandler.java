@@ -51,10 +51,10 @@ final class RecordToRowHandler {
     // Lookup enrichment (QWP only). The key text is captured while the record is traversed and
     // resolved against the map once the row's own columns are written.
     private final String enrichmentKeyField;
-    private String enrichmentColumn;
+    private String[] enrichmentColumns;
     private String enrichmentKey;
     private boolean enrichmentKeyUnusable; // the key field held a value no lookup key can match
-    private Map<String, String> enrichmentMap = Collections.emptyMap();
+    private Map<String, String[]> enrichmentMap = Collections.emptyMap();
     private final EnrichmentMisses enrichmentMisses;
     private static final com.fasterxml.jackson.core.JsonFactory JSON_FACTORY = new com.fasterxml.jackson.core.JsonFactory();
     // Jackson 2.13 (what Connect provides here) predates StreamReadConstraints, so nesting is
@@ -434,29 +434,41 @@ final class RecordToRowHandler {
     }
 
     /**
-     * Replaces the lookup used from the next record on. A null column means nothing to stamp.
-     * Throws, leaving the previous lookup in place, when the value column has a name the row
-     * is known to use for something else.
+     * Replaces the lookup used from the next record on. Null columns mean nothing to stamp.
+     * Throws, leaving the previous lookup in place, when a value column has a name the row is
+     * known to use for something else, or names the same column as another value column.
      */
-    void setEnrichment(String column, Map<String, String> map) {
-        if (column == null) {
-            enrichmentColumn = null;
+    void setEnrichment(String[] columns, Map<String, String[]> map) {
+        if (columns == null) {
+            enrichmentColumns = null;
             enrichmentMap = Collections.emptyMap();
             return;
         }
-        String sanitized = sanitizeName(column);
-        String clash = enrichmentColumnClash(sanitized);
-        if (clash != null) {
-            throw new ConnectException("enrichment.sql value column '" + sanitized + "' " + clash
-                    + "; rename it in the SQL with an alias (... AS another_name)");
+        String[] sanitized = new String[columns.length];
+        for (int i = 0; i < columns.length; i++) {
+            String column = sanitizeName(columns[i]);
+            String clash = enrichmentColumnClash(column);
+            if (clash == null) {
+                for (int j = 0; j < i; j++) {
+                    if (column.equalsIgnoreCase(sanitized[j])) {
+                        clash = "names the same column as value column '" + sanitized[j] + "'";
+                        break;
+                    }
+                }
+            }
+            if (clash != null) {
+                throw new ConnectException("enrichment.sql value column '" + column + "' " + clash
+                        + "; rename it in the SQL with an alias (... AS another_name)");
+            }
+            sanitized[i] = column;
         }
-        enrichmentColumn = sanitized;
+        enrichmentColumns = sanitized;
         enrichmentMap = map;
         enrichmentMisses.resolve(map);
     }
 
     /**
-     * Why the enriched column cannot have this name, or null. Checks only what the configuration
+     * Why an enriched column cannot have this name, or null. Checks only what the configuration
      * reveals; a record field that is not named anywhere in it is caught when the row is built.
      * QuestDB column names are case-insensitive, and so is the client that buffers the row.
      */
@@ -507,14 +519,20 @@ final class RecordToRowHandler {
             return;
         }
         enrichmentKey = null;
-        String value = enrichmentMap.get(key);
-        if (value == null) {
+        String[] values = enrichmentMap.get(key);
+        if (values == null) {
             enrichmentMisses.miss(key);
             return;
         }
+        String column = null;
         try {
-            // QWP accepts a symbol after other columns of the row
-            sender.symbol(enrichmentColumn, value);
+            // QWP accepts symbols after other columns of the row
+            for (int i = 0; i < enrichmentColumns.length; i++) {
+                if (values[i] != null) {
+                    column = enrichmentColumns[i];
+                    sender.symbol(column, values[i]);
+                }
+            }
         } catch (LineSenderException e) {
             // For a name the configuration does not reveal, a record field in this row or an
             // earlier one: the client fixes a column's type for the table once a row has written it.
@@ -522,7 +540,7 @@ final class RecordToRowHandler {
             if (!(classified instanceof InvalidDataException)) {
                 throw classified; // a sender failure, not this record's
             }
-            throw new InvalidDataException("Cannot write enrichment column '" + enrichmentColumn + "': " + e.getMessage()
+            throw new InvalidDataException("Cannot write enrichment column '" + column + "': " + e.getMessage()
                     + ". If this record or an earlier row of the table has a field of that name, rename the value"
                     + " column in " + QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG + " with an alias", e);
         }

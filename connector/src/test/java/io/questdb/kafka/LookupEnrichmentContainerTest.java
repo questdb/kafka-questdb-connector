@@ -25,6 +25,7 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -32,6 +33,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -39,7 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Lookup enrichment against a real server: what {@link LookupEnrichment#load()} accepts, rejects
- * and recovers from, and how a real Sender takes the enriched column.
+ * and recovers from, and how a real Sender takes the enriched columns.
  */
 @Testcontainers(disabledWithoutDocker = true)
 class LookupEnrichmentContainerTest {
@@ -64,11 +66,11 @@ class LookupEnrichmentContainerTest {
 
         LookupEnrichment.Lookup lookup = load("select k, v from " + table);
 
-        assertEquals("v", lookup.column);
-        Map<String, String> expected = new HashMap<>();
-        expected.put("-5", "neg");
-        expected.put("42", "pos");
-        assertEquals(expected, lookup.map);
+        assertArrayEquals(new String[]{"v"}, lookup.columns);
+        Map<String, List<String>> expected = new HashMap<>();
+        expected.put("-5", List.of("neg"));
+        expected.put("42", List.of("pos"));
+        assertEquals(expected, rows(lookup));
     }
 
     @Test
@@ -79,7 +81,28 @@ class LookupEnrichmentContainerTest {
         insert(table, "null, 'no key'");
         insert(table, "2, null");
 
-        assertEquals(Map.of("1", "last"), load("select k, v from " + table).map);
+        assertEquals(Map.of("1", List.of("last")), rows(load("select k, v from " + table)));
+    }
+
+    /** The last row for a key wins whole, its null values included; one with no value at all unmaps the key. */
+    @Test
+    void loadsEveryValueColumn() {
+        String table = createTable("k LONG, a SYMBOL, b VARCHAR");
+        insert(table, "1, 'a1', 'b1'");
+        insert(table, "1, 'a2', null");
+        insert(table, "2, null, 'b2'");
+        insert(table, "3, null, null");
+        insert(table, "4, 'a4', 'b4'");
+        insert(table, "4, null, null");
+        insert(table, "null, 'a', 'b'");
+
+        LookupEnrichment.Lookup lookup = load("select k, a, b from " + table);
+
+        assertArrayEquals(new String[]{"a", "b"}, lookup.columns);
+        Map<String, List<String>> expected = new HashMap<>();
+        expected.put("1", Arrays.asList("a2", null));
+        expected.put("2", Arrays.asList(null, "b2"));
+        assertEquals(expected, rows(lookup));
     }
 
     @Test
@@ -88,13 +111,14 @@ class LookupEnrichmentContainerTest {
 
         LookupEnrichment.Lookup lookup = load("select k, v from " + table);
 
-        assertEquals("v", lookup.column);
+        assertArrayEquals(new String[]{"v"}, lookup.columns);
         assertTrue(lookup.map.isEmpty());
     }
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {
-            "select k, v, ts from %s | must return exactly two columns",
+            "select k from %s | must return the lookup key and at least one value column",
+            "select k, v, ts from %s | value column 'ts' must be VARCHAR, STRING or SYMBOL",
             "select k, 1.5 v from %s | value column 'v' must be VARCHAR, STRING or SYMBOL",
             "select ts, v from %s | key column 'ts' must be VARCHAR, STRING, SYMBOL or an integer type",
             // runs once, then the load fails rather than running it again on every refresh
@@ -191,13 +215,13 @@ class LookupEnrichmentContainerTest {
             LookupEnrichment enrichment = new LookupEnrichment(
                     "ws::addr=127.0.0.1:" + proxy.port() + ";failover=off;", "select k, v from " + table, 5_000L);
             try {
-                assertEquals(Map.of("1", "a"), enrichment.load().map);
+                assertEquals(Map.of("1", List.of("a")), rows(enrichment.load()));
 
                 proxy.severAll();
                 QueryException lost = assertThrows(QueryException.class, enrichment::load);
                 assertTrue(LookupEnrichment.isTransient(lost), lost.getStatus() + ": " + lost.getMessage());
 
-                assertEquals(Map.of("1", "a"), enrichment.load().map);
+                assertEquals(Map.of("1", List.of("a")), rows(enrichment.load()));
             } finally {
                 enrichment.close();
             }
@@ -221,7 +245,8 @@ class LookupEnrichmentContainerTest {
         try (Sender sender = Sender.builder(confString()).build()) {
             RecordToRowHandler handler = new RecordToRowHandler(new QuestDBSinkConnectorConfig(props), sender, true,
                     RecordToRowHandler.SenderErrorPolicy.PROBE, true, RecordToRowHandler.NameLimits.QWP);
-            handler.setEnrichment("ticker", Map.of("42", "ACME"));
+            // 'ticker' is the second value column: the failure must name it, not the first
+            handler.setEnrichment(new String[]{"mkt_type", "ticker"}, Map.of("42", new String[]{"EQ", "ACME"}));
 
             // the record's own 'ticker' is a VARCHAR in the same row
             InvalidDataException sameRow = assertThrows(InvalidDataException.class,
@@ -239,6 +264,37 @@ class LookupEnrichmentContainerTest {
                 "select sec_id, ticker from " + table, httpPort());
     }
 
+    /**
+     * Every value column lands in the table through the task: QWP takes several symbols after
+     * the row's other columns. A value the lookup row lacks leaves its column null.
+     */
+    @Test
+    void theTaskWritesEveryValueColumn() {
+        String lookup = createTable("sec_id LONG, symbol SYMBOL, mkt_type SYMBOL");
+        insert(lookup, "7, 'ACME', 'EQ'");
+        insert(lookup, "8, 'BETA', null");
+        String table = ConnectTestUtils.newTableName();
+        QwpSinkTask task = new QwpSinkTask();
+        task.initialize((SinkTaskContext) Proxy.newProxyInstance(SinkTaskContext.class.getClassLoader(),
+                new Class<?>[]{SinkTaskContext.class}, (self, method, args) -> null)); // no DLQ, no-op callbacks
+        Map<String, String> props = new HashMap<>();
+        props.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, confString() + "auto_flush_rows=1;");
+        props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, table);
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put(QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG, "select sec_id, symbol as ticker, mkt_type from " + lookup);
+        props.put(QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG, "sec_id");
+        task.start(props);
+        try {
+            task.open(Collections.singleton(new TopicPartition("topic", 0)));
+            task.put(List.of(new SinkRecord("topic", 0, null, null, null, Map.of("sec_id", 7L), 0L),
+                    new SinkRecord("topic", 0, null, null, null, Map.of("sec_id", 8L), 1L)));
+        } finally {
+            task.stop();
+        }
+        QuestDBUtils.assertSqlEventually("\"sec_id\",\"ticker\",\"mkt_type\"\r\n7,\"ACME\",\"EQ\"\r\n8,\"BETA\",\r\n",
+                "select sec_id, ticker, mkt_type from " + table + " order by sec_id", httpPort());
+    }
+
     private static SinkRecord record(String table, long secId, String ticker) {
         Map<String, Object> value = new LinkedHashMap<>();
         value.put("sec_id", secId);
@@ -254,6 +310,13 @@ class LookupEnrichmentContainerTest {
 
     private static String confString() {
         return "ws::addr=" + QUESTDB.getHost() + ':' + QUESTDB.getMappedPort(QuestDBUtils.QUESTDB_HTTP_PORT) + ';';
+    }
+
+    /** The map with each row as a list, which compares by value. */
+    private static Map<String, List<String>> rows(LookupEnrichment.Lookup lookup) {
+        Map<String, List<String>> rows = new HashMap<>();
+        lookup.map.forEach((key, values) -> rows.put(key, Arrays.asList(values)));
+        return rows;
     }
 
     private static LookupEnrichment.Lookup load(String sql) {

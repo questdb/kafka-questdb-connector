@@ -1015,7 +1015,7 @@ class QwpSinkTaskTest {
         }
         FakeSender sender = new FakeSender();
         TestTask task = startTask(sender, 10, props, true);
-        task.enrichmentResults.add(new LookupEnrichment.Lookup(column, Collections.singletonMap("7", "A")));
+        task.enrichmentResults.add(lookup(new String[]{column}, "7", "A"));
 
         ConnectException failure = assertThrows(ConnectException.class,
                 () -> task.put(Collections.singletonList(keyed(0, 7))));
@@ -1031,7 +1031,7 @@ class QwpSinkTaskTest {
         FakeSender sender = new FakeSender();
         TestTask task = startTask(sender, 10, ENRICHMENT, true);
         task.enrichmentResults.add(lookup("7", "A"));
-        task.enrichmentResults.add(new LookupEnrichment.Lookup("id", Collections.singletonMap("7", "B")));
+        task.enrichmentResults.add(lookup(new String[]{"id"}, "7", "B"));
 
         task.put(Collections.singletonList(keyed(0, 7)));
         task.reloadEnrichment();
@@ -1044,6 +1044,24 @@ class QwpSinkTaskTest {
         assertEquals(List.of("A", "A"), sender.symbols);
     }
 
+    /** One clashing value column rejects the whole lookup: its other columns are not applied either. */
+    @Test
+    void enrichmentRefreshWithOneClashingValueColumnKeepsThePreviousLookupWhole() {
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(sender, 10, ENRICHMENT, true);
+        task.enrichmentResults.add(lookup(new String[]{"ticker", "mkt"}, "7", "A", "X"));
+        task.enrichmentResults.add(lookup(new String[]{"ticker", "id"}, "7", "B", "Y"));
+
+        task.put(Collections.singletonList(keyed(0, 7)));
+        task.reloadEnrichment();
+        try (LogCapture logs = new LogCapture(QwpSinkTask.class)) {
+            task.put(Collections.singletonList(keyed(1, 7)));
+            assertEquals(List.of("WARN Enrichment lookup refresh failed; keeping the previous mapping"), logs.lines);
+        }
+
+        assertEquals(List.of("A", "X", "A", "X"), sender.symbols);
+    }
+
     /** A key set that stays partial is reported once; a new key, or a newly mapped one, again. */
     @Test
     void enrichmentLogsUnmappedKeysOnlyWhenTheyChange() {
@@ -1052,10 +1070,10 @@ class QwpSinkTaskTest {
         for (int i = 0; i < 5; i++) {
             task.enrichmentResults.add(lookup("7", "A"));
         }
-        Map<String, String> both = new HashMap<>();
-        both.put("7", "A");
-        both.put("9", "C");
-        task.enrichmentResults.add(new LookupEnrichment.Lookup("ticker", both));
+        Map<String, String[]> both = new HashMap<>();
+        both.put("7", new String[]{"A"});
+        both.put("9", new String[]{"C"});
+        task.enrichmentResults.add(new LookupEnrichment.Lookup(new String[]{"ticker"}, both));
 
         try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
             task.put(List.of(keyed(0, 9), keyed(1, 9)));
@@ -1179,7 +1197,11 @@ class QwpSinkTaskTest {
     }
 
     private static LookupEnrichment.Lookup lookup(String key, String value) {
-        return new LookupEnrichment.Lookup("ticker", Collections.singletonMap(key, value));
+        return lookup(new String[]{"ticker"}, key, value);
+    }
+
+    private static LookupEnrichment.Lookup lookup(String[] columns, String key, String... values) {
+        return new LookupEnrichment.Lookup(columns, Collections.singletonMap(key, values));
     }
 
     @Test

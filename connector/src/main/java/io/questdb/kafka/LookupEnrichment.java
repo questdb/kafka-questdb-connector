@@ -154,16 +154,17 @@ final class LookupEnrichment {
         if (loader.error != null) {
             throw new ConnectException(loader.error);
         }
-        return new Lookup(loader.column, loader.map);
+        return new Lookup(loader.columns, loader.map);
     }
 
     static final class Lookup {
-        /** Name of the value column; null when the query returned no batch at all. */
-        final String column;
-        final Map<String, String> map;
+        /** Names of the value columns; null when the query returned no batch at all. */
+        final String[] columns;
+        /** One slot per value column; a null slot is no value for that column. */
+        final Map<String, String[]> map;
 
-        Lookup(String column, Map<String, String> map) {
-            this.column = column;
+        Lookup(String[] columns, Map<String, String[]> map) {
+            this.columns = columns;
             this.map = map;
         }
     }
@@ -172,18 +173,19 @@ final class LookupEnrichment {
      * Runs on a client worker thread. The loading thread reads it only after await() returned
      * true, which the client signals under a lock, so the fields need no synchronisation.
      */
-    private static final class Loader implements QwpColumnBatchHandler {
-        private String column;
-        private String error;
-        private final Map<String, String> map = new HashMap<>();
+    static final class Loader implements QwpColumnBatchHandler {
+        String[] columns;
+        String error;
+        final Map<String, String[]> map = new HashMap<>();
 
         @Override
         public void onBatch(QwpColumnBatch batch) {
             if (error != null) {
                 return;
             }
-            if (batch.getColumnCount() != 2) {
-                error = "enrichment.sql must return exactly two columns (lookup key, value), got " + batch.getColumnCount();
+            int valueCount = batch.getColumnCount() - 1;
+            if (valueCount < 1) {
+                error = "enrichment.sql must return the lookup key and at least one value column";
                 return;
             }
             // The typed accessors read native memory unchecked: never call one the wire type
@@ -195,16 +197,29 @@ final class LookupEnrichment {
                         + batch.getColumnName(0) + "::varchar";
                 return;
             }
-            if (!isText(batch.getColumnWireType(1))) {
-                error = "enrichment.sql value column '" + batch.getColumnName(1)
-                        + "' must be VARCHAR, STRING or SYMBOL; cast it in the SQL, for example "
-                        + batch.getColumnName(1) + "::varchar";
-                return;
+            String[] names = new String[valueCount];
+            for (int col = 1; col <= valueCount; col++) {
+                if (!isText(batch.getColumnWireType(col))) {
+                    error = "enrichment.sql value column '" + batch.getColumnName(col)
+                            + "' must be VARCHAR, STRING or SYMBOL; cast it in the SQL, for example "
+                            + batch.getColumnName(col) + "::varchar";
+                    return;
+                }
+                names[col - 1] = batch.getColumnName(col);
             }
-            column = batch.getColumnName(1);
+            columns = names;
             for (int row = 0, n = batch.getRowCount(); row < n; row++) {
-                if (batch.isNull(0, row) || batch.isNull(1, row)) {
+                if (batch.isNull(0, row)) {
                     continue;
+                }
+                String[] values = null;
+                for (int col = 1; col <= valueCount; col++) {
+                    if (!batch.isNull(col, row)) {
+                        if (values == null) {
+                            values = new String[valueCount];
+                        }
+                        values[col - 1] = batch.getString(col, row);
+                    }
                 }
                 String key;
                 switch (keyType) {
@@ -224,7 +239,12 @@ final class LookupEnrichment {
                         key = batch.getString(0, row);
                         break;
                 }
-                map.put(key, batch.getString(1, row));
+                // the last row for a key wins, also when it has no value at all
+                if (values == null) {
+                    map.remove(key);
+                } else {
+                    map.put(key, values);
+                }
             }
         }
 
@@ -235,7 +255,7 @@ final class LookupEnrichment {
         @Override
         public void onExecDone(short opType, long rowsAffected) {
             // The statement has run once; failing the load keeps it from running on every refresh.
-            error = "enrichment.sql must be a query returning (lookup key, value), not a statement";
+            error = "enrichment.sql must be a query returning the lookup key and value columns, not a statement";
         }
 
         @Override

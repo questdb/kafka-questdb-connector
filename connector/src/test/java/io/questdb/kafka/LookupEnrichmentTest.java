@@ -1,6 +1,8 @@
 package io.questdb.kafka;
 
 import io.questdb.client.QueryException;
+import io.questdb.client.cutlass.qwp.client.QwpColumnBatch;
+import io.questdb.client.cutlass.qwp.protocol.QwpConstants;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
@@ -16,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
@@ -127,6 +130,55 @@ class LookupEnrichmentTest {
                 LookupEnrichment.withQueryTimeouts("ws::addr=h:9000;", Long.MAX_VALUE));
         // malformed: passed through for the client to report
         assertEquals("ws::addr", LookupEnrichment.withQueryTimeouts("ws::addr", 1_000L));
+    }
+
+    /** The query is replayed from the start on another endpoint, which may return other columns. */
+    @Test
+    void aFailoverResetDiscardsThePartialResult() {
+        LookupEnrichment.Loader loader = new LookupEnrichment.Loader();
+
+        loader.onBatch(textBatch(new String[]{"k", "ticker", "mkt_type"}, new String[]{"1", "A", "EQ"}));
+        loader.onFailoverReset(null);
+        loader.onBatch(textBatch(new String[]{"k", "ticker"}, new String[]{"2", "B"}));
+
+        assertArrayEquals(new String[]{"ticker"}, loader.columns);
+        assertEquals(Collections.singleton("2"), loader.map.keySet());
+        assertArrayEquals(new String[]{"B"}, loader.map.get("2"));
+    }
+
+    /** A batch of VARCHAR columns, one array per row; a null element is a null value. */
+    private static QwpColumnBatch textBatch(String[] names, String[]... rows) {
+        return new QwpColumnBatch() {
+            @Override
+            public int getColumnCount() {
+                return names.length;
+            }
+
+            @Override
+            public String getColumnName(int col) {
+                return names[col];
+            }
+
+            @Override
+            public byte getColumnWireType(int col) {
+                return QwpConstants.TYPE_VARCHAR;
+            }
+
+            @Override
+            public int getRowCount() {
+                return rows.length;
+            }
+
+            @Override
+            public boolean isNull(int col, int row) {
+                return rows[row][col] == null;
+            }
+
+            @Override
+            public String getString(int col, int row) {
+                return rows[row][col];
+            }
+        };
     }
 
     private static void assertLoadFailsWithin(String confString) {

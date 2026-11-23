@@ -111,9 +111,9 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     private static final String QWP_DLQ_TERMINAL_CATEGORIES_DOC = "QWP terminal categories eligible for quarantine and DLQ handling. SCHEMA_MISMATCH is the safe default.";
 
     public static final String ENRICHMENT_SQL_CONFIG = "enrichment.sql";
-    private static final String ENRICHMENT_SQL_DOC = "QWP only. SQL query returning exactly two columns, lookup key then value. "
-            + "The value is written to each row as a symbol column named after the second result column; an existing VARCHAR or STRING column of that name keeps its type. "
-            + "Alias it in the SQL if records carry a field of that name or the target table has such a column of another type; otherwise those rows are rejected. "
+    private static final String ENRICHMENT_SQL_DOC = "QWP only. SQL query returning the lookup key, then one or more value columns. "
+            + "Every value column is written to the row as a symbol column of the same name; an existing VARCHAR or STRING column of that name keeps its type. "
+            + "Alias a value column in the SQL if records carry a field of that name or the target table has such a column of another type; otherwise those rows are rejected. "
             + "The query must succeed when a task starts, so the table must exist, though it may be empty. A statement such as INSERT is run once by each task before it is rejected.";
 
     public static final String ENRICHMENT_KEY_FIELD_CONFIG = "enrichment.key.field";

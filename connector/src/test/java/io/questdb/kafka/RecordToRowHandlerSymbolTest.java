@@ -5,6 +5,7 @@ import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.data.Timestamp;
+import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -128,12 +129,12 @@ class RecordToRowHandlerSymbolTest {
             props.put("value.format", "json");
         }
         RecordToRowHandler handler = new RecordToRowHandler(new QuestDBSinkConnectorConfig(props), recorder.proxy(), true, false, true);
-        Map<String, String> lookup = new HashMap<>();
-        lookup.put("42", "AAPL");
-        lookup.put("abc", "MSFT");
-        lookup.put("42.5", "IBM");
-        lookup.put("true", "ORCL");
-        handler.setEnrichment("ticker", lookup);
+        Map<String, String[]> lookup = new HashMap<>();
+        lookup.put("42", new String[]{"AAPL"});
+        lookup.put("abc", new String[]{"MSFT"});
+        lookup.put("42.5", new String[]{"IBM"});
+        lookup.put("true", new String[]{"ORCL"});
+        handler.setEnrichment(new String[]{"ticker"}, lookup);
 
         handler.handle(shape.record(42L)); // numeric key: rendered as plain decimal on both sides
         assertEquals(List.of("table(tab)", "longColumn(sec_id,42)", "doubleColumn(px,1.5)", "symbol(ticker,AAPL)", "atNow()"),
@@ -195,13 +196,13 @@ class RecordToRowHandlerSymbolTest {
      */
     @Test
     void enrichmentKeyFieldMatchesThePrimitiveKeyOrValueByItsColumnName() {
-        Map<String, String> lookup = new HashMap<>();
-        lookup.put("42", "AAPL");
-        lookup.put("abc", "MSFT");
+        Map<String, String[]> lookup = new HashMap<>();
+        lookup.put("42", new String[]{"AAPL"});
+        lookup.put("abc", new String[]{"MSFT"});
 
         Recorder recorder = new Recorder();
         RecordToRowHandler byValue = enrichedHandler(recorder, "value", Map.of()); // value.prefix defaults to ""
-        byValue.setEnrichment("ticker", lookup);
+        byValue.setEnrichment(new String[]{"ticker"}, lookup);
         byValue.handle(new SinkRecord("tab", 0, null, null, Schema.INT64_SCHEMA, 42L, 0L));
         assertEquals(List.of("table(tab)", "longColumn(value,42)", "symbol(ticker,AAPL)", "atNow()"), recorder.calls);
 
@@ -247,7 +248,7 @@ class RecordToRowHandlerSymbolTest {
                 props.put("value.format", "json");
             }
             RecordToRowHandler byKey = enrichedHandler(recorder, "key", props);
-            byKey.setEnrichment("ticker", lookup);
+            byKey.setEnrichment(new String[]{"ticker"}, lookup);
             Object value = rawJson ? "{\"px\":1.5}".getBytes(StandardCharsets.UTF_8) : Map.of("px", 1.5d);
             byKey.handle(new SinkRecord("tab", 0, Schema.STRING_SCHEMA, "abc", null, value, 0L));
             assertEquals(List.of("table(tab)", "stringColumn(key,abc)", "doubleColumn(px,1.5)", "symbol(ticker,MSFT)", "atNow()"),
@@ -261,7 +262,7 @@ class RecordToRowHandlerSymbolTest {
     void aFailedRecordDoesNotLendItsKeyToTheNext(Shape shape) {
         Recorder recorder = new Recorder();
         RecordToRowHandler handler = enrichedHandler(recorder, "sec_id", shape.props());
-        handler.setEnrichment("ticker", Map.of("42", "AAPL"));
+        handler.setEnrichment(new String[]{"ticker"}, Map.of("42", new String[]{"AAPL"}));
 
         // sec_id is captured, then a later field is rejected
         assertThrows(InvalidDataException.class, () -> handler.handle(shape.failingAfterKey(42L)));
@@ -279,7 +280,7 @@ class RecordToRowHandlerSymbolTest {
         Map<String, String> props = new HashMap<>(shape.props());
         props.put("symbols", "sec_id");
         RecordToRowHandler handler = enrichedHandler(recorder, "sec_id", props);
-        handler.setEnrichment("ticker", Map.of("42", "AAPL", "abc", "MSFT"));
+        handler.setEnrichment(new String[]{"ticker"}, Map.of("42", new String[]{"AAPL"}, "abc", new String[]{"MSFT"}));
 
         handler.handle(shape.record("abc"));
         handler.handle(shape.record(42L));
@@ -287,6 +288,52 @@ class RecordToRowHandlerSymbolTest {
         assertEquals(List.of(
                 "table(tab)", "symbol(sec_id,abc)", "doubleColumn(px,1.5)", "symbol(ticker,MSFT)", "atNow()",
                 "table(tab)", "symbol(sec_id,42)", "doubleColumn(px,1.5)", "symbol(ticker,AAPL)", "atNow()"),
+                recorder.calls);
+    }
+
+    /**
+     * Each value column the key's lookup row has a value for is stamped; a row with only some
+     * values is still a hit. Each lookup brings its own columns, as SELECT * does after ALTER TABLE.
+     */
+    @Test
+    void enrichmentStampsEveryValueColumnTheLookupRowHasAValueFor() {
+        Recorder recorder = new Recorder();
+        RecordToRowHandler handler = enrichedHandler(recorder, "sec_id", Map.of());
+        handler.setEnrichment(new String[]{"ticker"}, Map.of("42", new String[]{"AAPL"}));
+        handler.handle(Shape.MAP.record(42L));
+
+        Map<String, String[]> lookup = new HashMap<>();
+        lookup.put("42", new String[]{"AAPL", "EQ"});
+        lookup.put("7", new String[]{null, "FX"});
+        handler.setEnrichment(new String[]{"ticker", "mkt_type"}, lookup);
+        handler.handle(Shape.MAP.record(42L));
+        handler.handle(Shape.MAP.record(7L));
+
+        assertEquals(List.of(
+                "table(tab)", "longColumn(sec_id,42)", "doubleColumn(px,1.5)", "symbol(ticker,AAPL)", "atNow()",
+                "table(tab)", "longColumn(sec_id,42)", "doubleColumn(px,1.5)", "symbol(ticker,AAPL)", "symbol(mkt_type,EQ)", "atNow()",
+                "table(tab)", "longColumn(sec_id,7)", "doubleColumn(px,1.5)", "symbol(mkt_type,FX)", "atNow()"),
+                recorder.calls);
+        try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
+            handler.reportEnrichmentMisses();
+            assertEquals(List.of(), logs.lines);
+        }
+    }
+
+    /** QuestDB column names ignore case, and a '.' is written as '_'. */
+    @Test
+    void enrichmentRejectsTwoValueColumnsNamingTheSameColumn() {
+        Recorder recorder = new Recorder();
+        RecordToRowHandler handler = enrichedHandler(recorder, "sec_id", Map.of());
+        handler.setEnrichment(new String[]{"ticker"}, Map.of("42", new String[]{"AAPL"}));
+
+        ConnectException failure = assertThrows(ConnectException.class, () -> handler.setEnrichment(
+                new String[]{"mkt.type", "ticker", "MKT_TYPE"}, Map.of("42", new String[]{"EQ", "IBM", "FX"})));
+
+        assertEquals("enrichment.sql value column 'MKT_TYPE' names the same column as value column 'mkt_type';"
+                + " rename it in the SQL with an alias (... AS another_name)", failure.getMessage());
+        handler.handle(Shape.MAP.record(42L)); // the previous lookup stays
+        assertEquals(List.of("table(tab)", "longColumn(sec_id,42)", "doubleColumn(px,1.5)", "symbol(ticker,AAPL)", "atNow()"),
                 recorder.calls);
     }
 
