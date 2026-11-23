@@ -1095,6 +1095,73 @@ class QwpSinkTaskTest {
         assertEquals(List.of("A", "C"), sender.symbols);
     }
 
+    /** A misnamed key field is reported at the next put, also when no reload ever succeeds. */
+    @Test
+    void enrichmentReportsAMissingKeyFieldWithoutWaitingForAReload() {
+        TestTask task = startTask(new FakeSender(), 10, ENRICHMENT, true);
+        task.enrichmentResults.add(lookup("7", "A"));
+        task.enrichmentResults.add(new QueryException((byte) 6, "peer disconnect"));
+
+        try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
+            task.put(List.of(recordValue(0, Collections.singletonMap("other", 1L))));
+            task.reloadEnrichment(); // fails
+            task.put(Collections.emptyList());
+
+            assertEquals(1, logs.lines.size(), logs.lines.toString());
+            assertTrue(logs.lines.get(0).startsWith("WARN 1 record(s) had no value in enrichment.key.field 'id'"),
+                    logs.lines.get(0));
+        }
+    }
+
+    /** Keys that miss between two reloads are reported together, not put by put. */
+    @Test
+    void enrichmentReportsUnmappedKeysOncePerReload() {
+        TestTask task = startTask(new FakeSender(), 10, ENRICHMENT, true);
+        task.enrichmentResults.add(lookup("7", "A"));
+        task.enrichmentResults.add(lookup("7", "A"));
+
+        try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
+            task.put(List.of(keyed(0, 9)));
+            task.put(List.of(keyed(1, 8)));
+            task.put(Collections.emptyList());
+            assertEquals(List.of(), logs.lines);
+
+            putAfterRefresh(task, keyed(2, 7));
+            assertEquals("INFO Enrichment lookup: 2 key(s) have no mapping (2 new, 0 mapped since the previous report)",
+                    logs.lines.get(0));
+        }
+    }
+
+    /** A value column the client refuses is this record's failure: it goes to the DLQ, the sender stays. */
+    @Test
+    void enrichmentSymbolFailureOnAHealthySenderIsRecordLocal() {
+        FakeSender sender = new FakeSender();
+        sender.symbolFailure = new LineSenderException("column type mismatch");
+        TestTask task = startTask(sender, 1, ENRICHMENT, true);
+        task.enrichmentResults.add(lookup("7", "A"));
+
+        task.put(List.of(keyed(0, 7)));
+
+        assertEquals(List.of(0L), task.fakeContext.reportedOffsets);
+        assertEquals(0, sender.closeCalls);
+    }
+
+    /** A sender failure met while stamping is the sender's: the record is resent, not sent to the DLQ. */
+    @Test
+    void enrichmentSymbolFailureWithLatchedRejectionUsesRecovery() {
+        FakeSender sender = new FakeSender();
+        sender.symbolFailure = new LineSenderException("symbol");
+        sender.symbolLatchedFailure = schemaMismatch(0); // latched only then: put()'s own probe passes
+        TestTask task = startTask(sender, 1, ENRICHMENT, true);
+        task.enrichmentResults.add(lookup("7", "A"));
+
+        task.put(List.of(keyed(0, 7)));
+
+        assertEquals(List.of(), task.fakeContext.reportedValues);
+        assertEquals(0L, task.fakeContext.rewinds.get(0).get(SOURCE));
+        assertEquals(1, sender.closeCalls);
+    }
+
     @Test
     void enrichmentWarnsOnceWhenTooManyKeysHaveNoMapping() {
         TestTask task = startTask(new FakeSender(), 1_000, ENRICHMENT, true);
@@ -1422,6 +1489,8 @@ class QwpSinkTaskTest {
         private RuntimeException rowFailure;
         private int rows;
         private RuntimeException setterFailure;
+        private RuntimeException symbolFailure;
+        private RuntimeException symbolLatchedFailure; // what the sender reports once symbol() failed
         private final List<String> symbols = new ArrayList<>();
         private boolean zeroDrainSucceeds = true;
         private final List<Long> writtenValues = new ArrayList<>();
@@ -1459,6 +1528,12 @@ class QwpSinkTaskTest {
                                 currentValue = ((Number) args[1]).longValue();
                                 return proxy;
                             case "symbol":
+                                if (symbolFailure != null) {
+                                    if (symbolLatchedFailure != null) {
+                                        awaitFailure = symbolLatchedFailure;
+                                    }
+                                    throw symbolFailure;
+                                }
                                 symbols.add(String.valueOf(args[1]));
                                 return proxy;
                             case "flushAndGetSequence":

@@ -170,8 +170,8 @@ class RecordToRowHandlerSymbolTest {
         handler.handle(shape.record(null)); // absent again: the unusable key before it does not carry over
 
         try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
-            handler.reportEnrichmentMisses();
-            handler.reportEnrichmentMisses(); // nothing changed since the first report
+            handler.reportEnrichmentMisses(true);
+            handler.reportEnrichmentMisses(true); // nothing changed since the first report
             assertEquals(List.of(
                     "INFO Enrichment lookup: 1 key(s) have no mapping (1 new, 0 mapped since the previous report)",
                     "DEBUG Enrichment keys newly without a mapping (at most 20 shown): [7]",
@@ -184,7 +184,7 @@ class RecordToRowHandlerSymbolTest {
         }
         handler.handle(shape.record(null));
         try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
-            handler.reportEnrichmentMisses();
+            handler.reportEnrichmentMisses(true);
             assertEquals(List.of("DEBUG 1 more record(s) had no value in enrichment.key.field 'sec_id'"), logs.lines);
         }
     }
@@ -214,7 +214,7 @@ class RecordToRowHandlerSymbolTest {
         byValue.handle(new SinkRecord("tab", 0, null, null, Schema.INT64_SCHEMA, 7L, 0L));
         assertEquals(List.of("table(tab)", "longColumn(value,7)", "atNow()"), recorder.calls);
         try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
-            byValue.reportEnrichmentMisses();
+            byValue.reportEnrichmentMisses(true);
             assertEquals(List.of(
                     "INFO Enrichment lookup: 1 key(s) have no mapping (1 new, 0 mapped since the previous report)",
                     "DEBUG Enrichment keys newly without a mapping (at most 20 shown): [7]"), logs.lines);
@@ -232,7 +232,7 @@ class RecordToRowHandlerSymbolTest {
                 "table(tab)", "doubleColumn(px,1.5)", "atNow()",
                 "table(tab)", "stringColumn(value,abc)", "symbol(ticker,MSFT)", "atNow()"), recorder.calls);
         try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
-            byValue.reportEnrichmentMisses();
+            byValue.reportEnrichmentMisses(true);
             assertEquals(List.of("WARN 2 record(s) had no value in enrichment.key.field 'value'; those records are"
                     + " not enriched. If every record has that field, check the name: nested names are joined with '_'"
                     + " and start with the value or key prefix. Later ones are logged at DEBUG"), logs.lines);
@@ -315,7 +315,7 @@ class RecordToRowHandlerSymbolTest {
                 "table(tab)", "longColumn(sec_id,7)", "doubleColumn(px,1.5)", "symbol(mkt_type,FX)", "atNow()"),
                 recorder.calls);
         try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
-            handler.reportEnrichmentMisses();
+            handler.reportEnrichmentMisses(true);
             assertEquals(List.of(), logs.lines);
         }
     }

@@ -503,9 +503,9 @@ final class RecordToRowHandler {
         return false;
     }
 
-    /** Logs the keys without a mapping, if they changed since the previous call. */
-    void reportEnrichmentMisses() {
-        enrichmentMisses.report();
+    /** Logs the keys without a mapping, if they changed; see {@link EnrichmentMisses#report}. */
+    void reportEnrichmentMisses(boolean reloaded) {
+        enrichmentMisses.report(reloaded);
     }
 
     private void stampEnrichment() {

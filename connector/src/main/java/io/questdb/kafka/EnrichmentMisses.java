@@ -85,15 +85,19 @@ final class EnrichmentMisses {
     /**
      * Logs what changed since the previous call, if anything. Counts go to INFO; key values only
      * to DEBUG, since Connect does not log record contents by default either.
+     *
+     * @param reloaded a reload has been applied since the previous call. The key lines wait for
+     *                 one, so that keys trickling in are reported once per reload, not once per
+     *                 put; the one-off warnings do not, since reloads may never succeed.
      */
-    void report() {
+    void report(boolean reloaded) {
         if (overflowed && !overflowReported) {
             overflowReported = true;
             log.warn("More than {} distinct enrichment keys have no mapping; further ones are not tracked."
                             + " Check {}: a field unique per record, such as an event id, causes this",
                     MAX_TRACKED_KEYS, QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG);
         }
-        if (added > 0 || resolved > 0) {
+        if (reloaded && (added > 0 || resolved > 0)) {
             log.info("Enrichment lookup: {} key(s) have no mapping ({} new, {} mapped since the previous report)",
                     unmapped.size(), added, resolved);
             if (!newKeys.isEmpty()) {

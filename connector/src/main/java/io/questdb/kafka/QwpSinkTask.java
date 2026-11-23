@@ -820,6 +820,7 @@ class QwpSinkTask extends SinkTask {
         if (enrichment == null) {
             return;
         }
+        boolean reloaded;
         if (!enrichmentLoaded) {
             if (batch.isEmpty()) {
                 return;
@@ -831,20 +832,21 @@ class QwpSinkTask extends SinkTask {
                 throw initialEnrichmentFailure(e);
             }
             enrichmentLoaded = true;
+            reloaded = true;
             startEnrichmentRefresher();
         } else {
             LookupEnrichment.Lookup lookup = pendingEnrichment.getAndSet(null);
-            if (lookup == null) {
-                return;
-            }
-            try {
-                recordHandler.setEnrichment(lookup.columns, lookup.map);
-            } catch (RuntimeException e) {
-                log.warn("Enrichment lookup refresh failed; keeping the previous mapping", e);
+            reloaded = lookup != null;
+            if (reloaded) {
+                try {
+                    recordHandler.setEnrichment(lookup.columns, lookup.map);
+                } catch (RuntimeException e) {
+                    log.warn("Enrichment lookup refresh failed; keeping the previous mapping", e);
+                }
             }
         }
         // After the new mapping, so that a key it covers is not reported as missing.
-        recordHandler.reportEnrichmentMisses();
+        recordHandler.reportEnrichmentMisses(reloaded);
     }
 
     /** The first load is mandatory: without it a restarted task would write a batch of nulls. */
