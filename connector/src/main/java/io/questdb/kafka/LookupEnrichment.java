@@ -201,8 +201,8 @@ final class LookupEnrichment {
             for (int col = 1; col <= valueCount; col++) {
                 if (!isText(batch.getColumnWireType(col))) {
                     error = "enrichment.sql value column '" + batch.getColumnName(col)
-                            + "' must be VARCHAR, STRING or SYMBOL; cast it in the SQL, for example "
-                            + batch.getColumnName(col) + "::varchar";
+                            + "' must be VARCHAR, STRING or SYMBOL; cast it in the SQL and give the cast an alias"
+                            + " (...::varchar AS another_name)";
                     return;
                 }
                 names[col - 1] = batch.getColumnName(col);

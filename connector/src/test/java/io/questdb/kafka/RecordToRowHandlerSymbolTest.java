@@ -320,6 +320,18 @@ class RecordToRowHandlerSymbolTest {
         }
     }
 
+    /** The server names an expression without an alias after its text, which is no column name. */
+    @Test
+    void enrichmentRejectsAValueColumnWithoutAUsableNameAskingForAnAlias() {
+        RecordToRowHandler handler = enrichedHandler(new Recorder(), "sec_id", Map.of());
+
+        ConnectException failure = assertThrows(ConnectException.class, () -> handler.setEnrichment(
+                new String[]{"price::varchar"}, Map.of("42", new String[]{"1.5"})));
+
+        assertEquals("enrichment.sql value column 'price::varchar' cannot be used as a column name;"
+                + " give it an alias in the SQL (... AS another_name)", failure.getMessage());
+    }
+
     /** QuestDB column names ignore case, and a '.' is written as '_'. */
     @Test
     void enrichmentRejectsTwoValueColumnsNamingTheSameColumn() {

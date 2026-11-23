@@ -934,7 +934,9 @@ class QwpSinkTaskTest {
 
         try (LogCapture logs = new LogCapture(QwpSinkTask.class)) {
             task.reloadEnrichment();
-            assertEquals(List.of("WARN Enrichment lookup refresh failed; keeping the previous mapping"), logs.lines);
+            assertEquals(1, logs.lines.size(), logs.lines.toString());
+            assertTrue(logs.lines.get(0).startsWith("WARN Enrichment lookup refresh failed; keeping the previous mapping: io.questdb.client.QueryException"),
+                    logs.lines.get(0));
         }
         task.put(Collections.singletonList(keyed(2, 7)));
         assertEquals(List.of("A", "A", "A"), sender.symbols);
@@ -1037,7 +1039,9 @@ class QwpSinkTaskTest {
         task.reloadEnrichment();
         try (LogCapture logs = new LogCapture(QwpSinkTask.class)) {
             task.put(Collections.singletonList(keyed(1, 7)));
-            assertEquals(List.of("WARN Enrichment lookup refresh failed; keeping the previous mapping"), logs.lines);
+            assertEquals(1, logs.lines.size(), logs.lines.toString());
+            assertTrue(logs.lines.get(0).startsWith("WARN Enrichment lookup refresh failed; keeping the previous mapping: org.apache.kafka.connect.errors.ConnectException: enrichment.sql value column 'id'"),
+                    logs.lines.get(0));
         }
 
         assertEquals(2, task.loadCalls.get());
@@ -1056,7 +1060,9 @@ class QwpSinkTaskTest {
         task.reloadEnrichment();
         try (LogCapture logs = new LogCapture(QwpSinkTask.class)) {
             task.put(Collections.singletonList(keyed(1, 7)));
-            assertEquals(List.of("WARN Enrichment lookup refresh failed; keeping the previous mapping"), logs.lines);
+            assertEquals(1, logs.lines.size(), logs.lines.toString());
+            assertTrue(logs.lines.get(0).startsWith("WARN Enrichment lookup refresh failed; keeping the previous mapping: org.apache.kafka.connect.errors.ConnectException: enrichment.sql value column 'id'"),
+                    logs.lines.get(0));
         }
 
         assertEquals(List.of("A", "X", "A", "X"), sender.symbols);
@@ -1113,6 +1119,34 @@ class QwpSinkTaskTest {
         }
     }
 
+    /** A key field holding a value no key can match is reported at the next put, reload or not. */
+    @Test
+    void enrichmentReportsAnUnusableKeyFieldWithoutWaitingForAReload() {
+        TestTask task = startTask(new FakeSender(), 10, ENRICHMENT, true);
+        task.enrichmentResults.add(lookup("7", "A"));
+
+        try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
+            task.put(List.of(recordValue(0, Collections.singletonMap("id", Collections.singletonMap("a", 1L)))));
+            task.put(Collections.emptyList());
+
+            assertEquals(1, logs.lines.size(), logs.lines.toString());
+            assertTrue(logs.lines.get(0).startsWith(
+                    "WARN 1 record(s) had a value in enrichment.key.field 'id' that cannot be a lookup key"), logs.lines.get(0));
+        }
+    }
+
+    /** A lookup rejected at the first load never starts the refresher, so stop() has to close it. */
+    @Test
+    void stopClosesALookupRejectedAtTheFirstLoad() {
+        TestTask task = startTask(new FakeSender(), 10, ENRICHMENT, true);
+        task.enrichmentResults.add(lookup(new String[]{"id"}, "7", "A"));
+
+        assertThrows(ConnectException.class, () -> task.put(List.of(keyed(0, 7))));
+        task.stop();
+
+        assertEquals(List.of(Thread.currentThread()), new ArrayList<>(task.enrichmentClosers));
+    }
+
     /** Keys that miss between two reloads are reported together, not put by put. */
     @Test
     void enrichmentReportsUnmappedKeysOncePerReload() {
@@ -1129,6 +1163,10 @@ class QwpSinkTaskTest {
             putAfterRefresh(task, keyed(2, 7));
             assertEquals("INFO Enrichment lookup: 2 key(s) have no mapping (2 new, 0 mapped since the previous report)",
                     logs.lines.get(0));
+
+            task.put(List.of(keyed(3, 6))); // the reload is applied once, so this is not one
+            task.put(Collections.emptyList());
+            assertEquals(2, logs.lines.size(), logs.lines.toString()); // the INFO line and its DEBUG one
         }
     }
 
@@ -1175,6 +1213,8 @@ class QwpSinkTaskTest {
 
         try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
             task.put(batch);
+            task.put(Collections.emptyList()); // the warning does not wait for a reload
+            assertEquals(1, logs.lines.size(), logs.lines.toString());
             putAfterRefresh(task, keyed(batch.size(), 5)); // over the cap: not tracked
             putAfterRefresh(task, keyed(batch.size() + 1, 6));
 

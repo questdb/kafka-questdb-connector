@@ -446,7 +446,14 @@ final class RecordToRowHandler {
         }
         String[] sanitized = new String[columns.length];
         for (int i = 0; i < columns.length; i++) {
-            String column = sanitizeName(columns[i]);
+            String column;
+            try {
+                column = sanitizeName(columns[i]);
+            } catch (InvalidDataException e) {
+                // an expression without an alias: the server names it after its text, such as price::varchar
+                throw new ConnectException("enrichment.sql value column '" + columns[i] + "' cannot be used as a"
+                        + " column name; give it an alias in the SQL (... AS another_name)");
+            }
             String clash = enrichmentColumnClash(column);
             if (clash == null) {
                 for (int j = 0; j < i; j++) {

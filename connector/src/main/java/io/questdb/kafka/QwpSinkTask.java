@@ -1,6 +1,7 @@
 package io.questdb.kafka;
 
 import io.questdb.client.LineSenderServerException;
+import io.questdb.client.QueryException;
 import io.questdb.client.Sender;
 import io.questdb.client.SenderError;
 import io.questdb.client.cutlass.http.client.HttpClientException;
@@ -342,7 +343,13 @@ class QwpSinkTask extends SinkTask {
         try {
             pendingEnrichment.set(loadEnrichment());
         } catch (Throwable e) {
-            if (!enrichmentStopped) { // stop() interrupts a load; that is not a failure
+            if (enrichmentStopped) { // stop() interrupts a load; that is not a failure
+                return;
+            }
+            // This repeats every refresh while the cause lasts, and for these two the message says it all.
+            if (e instanceof QueryException || e instanceof ConnectException) {
+                log.warn("Enrichment lookup refresh failed; keeping the previous mapping: {}", e.toString());
+            } else {
                 log.warn("Enrichment lookup refresh failed; keeping the previous mapping", e);
             }
         }
@@ -841,7 +848,7 @@ class QwpSinkTask extends SinkTask {
                 try {
                     recordHandler.setEnrichment(lookup.columns, lookup.map);
                 } catch (RuntimeException e) {
-                    log.warn("Enrichment lookup refresh failed; keeping the previous mapping", e);
+                    log.warn("Enrichment lookup refresh failed; keeping the previous mapping: {}", e.toString());
                 }
             }
         }
