@@ -115,7 +115,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
             + "Every value column is written to the row as a column of the same name and type; cast it in the SQL to write another type. "
             + "BOOLEAN, BYTE, SHORT, INT, LONG, FLOAT, DOUBLE, CHAR, TIMESTAMP, TIMESTAMP_NS, VARCHAR, STRING and SYMBOL can be written (STRING as VARCHAR); a BOOLEAN, BYTE, SHORT or CHAR has no null, so a NULL there is written as false, 0 or an empty character. "
             + "Alias a value column in the SQL if records carry a field of that name: such a record keeps its own value only when the connector writes the field with exactly the type of the value column "
-            + "(it writes record integers as LONG and decimals as DOUBLE); otherwise it is rejected, and so can later records of that table. "
+            + "(it writes record integers as LONG and floating-point numbers as DOUBLE); otherwise it is rejected, and so can later records of that table. "
             + "If the target table has a column of that name, its type must accept the value, otherwise those rows are rejected. "
             + "The query must succeed when a task starts, so the table must exist, though it may be empty. A statement such as INSERT is run once by each task before it is rejected.";
 

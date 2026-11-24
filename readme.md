@@ -38,8 +38,8 @@ value columns. Each value column is written with the type the query returns; cas
 it in the SQL to write another type. The query must succeed when a task starts. Do
 not let a value column share a name with a record field; alias it in the SQL. Such a
 record keeps its own value only when the connector writes the field with exactly the
-type of the value column (it writes record integers as LONG and decimals as DOUBLE);
-otherwise it is rejected, and so can later records of that table.
+type of the value column (it writes record integers as LONG and floating-point
+numbers as DOUBLE); otherwise it is rejected, and so can later records of that table.
 
 The QuestDB.com documentation covers the rest: the `qwp.*` settings, how
 `auto_flush_rows` and `auto_flush_interval` set checkpoint boundaries, and how
