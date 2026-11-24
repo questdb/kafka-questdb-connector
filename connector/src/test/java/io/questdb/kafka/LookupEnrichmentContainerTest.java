@@ -196,6 +196,7 @@ class LookupEnrichmentContainerTest {
 
             task.put(Collections.singletonList(new SinkRecord("topic", 0, null, null, null, Map.of("sec_id", 7L), 0L)));
             assertEquals(2, proxy.openConnections());
+            task.preCommit(Collections.emptyMap()); // stop() does not wait for the row to be acknowledged
             task.stop();
 
             Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> proxy.openConnections() == 0);
@@ -288,6 +289,7 @@ class LookupEnrichmentContainerTest {
             task.open(Collections.singleton(new TopicPartition("topic", 0)));
             task.put(List.of(new SinkRecord("topic", 0, null, null, null, Map.of("sec_id", 7L), 0L),
                     new SinkRecord("topic", 0, null, null, null, Map.of("sec_id", 8L), 1L)));
+            task.preCommit(Collections.emptyMap()); // stop() does not wait for the rows to be acknowledged
         } finally {
             task.stop();
         }
