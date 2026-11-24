@@ -266,6 +266,29 @@ class LookupEnrichmentContainerTest {
                 "select sec_id, ticker from " + table, httpPort());
     }
 
+    /** With the type of the value column too, the record's field wins: the client keeps a row's first value. */
+    @Test
+    void aRecordFieldWithTheNameAndTypeOfAValueColumnKeepsItsOwnValue() {
+        String table = ConnectTestUtils.newTableName();
+        Map<String, String> props = new HashMap<>();
+        props.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, confString());
+        props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, table);
+        props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
+        props.put(QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG, "select k, v from unused");
+        props.put(QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG, "sec_id");
+        try (Sender sender = Sender.builder(confString()).build()) {
+            RecordToRowHandler handler = new RecordToRowHandler(new QuestDBSinkConnectorConfig(props), sender, true,
+                    RecordToRowHandler.SenderErrorPolicy.PROBE, true, RecordToRowHandler.NameLimits.QWP);
+            handler.setEnrichment(new String[]{"ticker"}, new byte[]{QwpConstants.TYPE_VARCHAR}, Map.of("42", new Object[]{"ACME"}));
+
+            handler.handle(record(table, 42, "own"));
+            handler.handle(record(table, 42, null)); // no field of its own: enriched
+            sender.flush();
+        }
+        QuestDBUtils.assertSqlEventually("\"sec_id\",\"ticker\"\r\n42,\"ACME\"\r\n42,\"own\"\r\n",
+                "select sec_id, ticker from " + table + " order by ticker", httpPort());
+    }
+
     /**
      * Every value column lands in the table through the task: QWP takes several of them after
      * the row's other columns. A value the lookup row lacks leaves its column null.

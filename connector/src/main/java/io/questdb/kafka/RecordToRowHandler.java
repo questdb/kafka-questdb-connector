@@ -490,7 +490,8 @@ final class RecordToRowHandler {
 
     /**
      * Why an enriched column cannot have this name, or null. Checks only what the configuration
-     * reveals; a record field that is not named anywhere in it is caught when the row is built.
+     * reveals. A record field that is not named anywhere in it is caught when the row is built
+     * if its type differs; with the same type the client keeps the first value, the record's own.
      * QuestDB column names are case-insensitive, and so is the client that buffers the row.
      */
     private String enrichmentColumnClash(String column) {
