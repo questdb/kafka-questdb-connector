@@ -1076,10 +1076,10 @@ class QwpSinkTaskTest {
         for (int i = 0; i < 5; i++) {
             task.enrichmentResults.add(lookup("7", "A"));
         }
-        Map<String, String[]> both = new HashMap<>();
+        Map<String, Object[]> both = new HashMap<>();
         both.put("7", new String[]{"A"});
         both.put("9", new String[]{"C"});
-        task.enrichmentResults.add(new LookupEnrichment.Lookup(new String[]{"ticker"}, both));
+        task.enrichmentResults.add(new LookupEnrichment.Lookup(new String[]{"ticker"}, ConnectTestUtils.symbols(1), both));
 
         try (LogCapture logs = new LogCapture(EnrichmentMisses.class)) {
             task.put(List.of(keyed(0, 9), keyed(1, 9)));
@@ -1308,7 +1308,7 @@ class QwpSinkTaskTest {
     }
 
     private static LookupEnrichment.Lookup lookup(String[] columns, String key, String... values) {
-        return new LookupEnrichment.Lookup(columns, Collections.singletonMap(key, values));
+        return new LookupEnrichment.Lookup(columns, ConnectTestUtils.symbols(columns.length), Collections.singletonMap(key, values));
     }
 
     @Test

@@ -154,17 +154,20 @@ final class LookupEnrichment {
         if (loader.error != null) {
             throw new ConnectException(loader.error);
         }
-        return new Lookup(loader.columns, loader.map);
+        return new Lookup(loader.columns, loader.types, loader.map);
     }
 
     static final class Lookup {
         /** Names of the value columns; null when the query returned no batch at all. */
         final String[] columns;
         /** One slot per value column; a null slot is no value for that column. */
-        final Map<String, String[]> map;
+        final Map<String, Object[]> map;
+        /** The QWP wire type of each value column: it is written with the type the query returned. */
+        final byte[] types;
 
-        Lookup(String[] columns, Map<String, String[]> map) {
+        Lookup(String[] columns, byte[] types, Map<String, Object[]> map) {
             this.columns = columns;
+            this.types = types;
             this.map = map;
         }
     }
@@ -176,7 +179,8 @@ final class LookupEnrichment {
     static final class Loader implements QwpColumnBatchHandler {
         String[] columns;
         String error;
-        final Map<String, String[]> map = new HashMap<>();
+        byte[] types;
+        final Map<String, Object[]> map = new HashMap<>();
 
         @Override
         public void onBatch(QwpColumnBatch batch) {
@@ -198,27 +202,31 @@ final class LookupEnrichment {
                 return;
             }
             String[] names = new String[valueCount];
+            byte[] wireTypes = new byte[valueCount];
             for (int col = 1; col <= valueCount; col++) {
-                if (!isText(batch.getColumnWireType(col))) {
+                byte type = batch.getColumnWireType(col);
+                if (!isWritable(type)) {
                     error = "enrichment.sql value column '" + batch.getColumnName(col)
-                            + "' must be VARCHAR, STRING or SYMBOL; cast it in the SQL and give the cast an alias"
+                            + "' has a type the connector cannot write; cast it in the SQL and give the cast an alias"
                             + " (...::varchar AS another_name)";
                     return;
                 }
                 names[col - 1] = batch.getColumnName(col);
+                wireTypes[col - 1] = type;
             }
             columns = names;
+            types = wireTypes;
             for (int row = 0, n = batch.getRowCount(); row < n; row++) {
                 if (batch.isNull(0, row)) {
                     continue;
                 }
-                String[] values = null;
+                Object[] values = null;
                 for (int col = 1; col <= valueCount; col++) {
                     if (!batch.isNull(col, row)) {
                         if (values == null) {
-                            values = new String[valueCount];
+                            values = new Object[valueCount];
                         }
-                        values[col - 1] = batch.getString(col, row);
+                        values[col - 1] = value(batch, wireTypes[col - 1], col, row);
                     }
                 }
                 String key;
@@ -267,6 +275,53 @@ final class LookupEnrichment {
         public void onFailoverReset(QwpServerInfo newNode) {
             // the query is replayed from the start on another endpoint
             map.clear();
+        }
+
+        /** The types {@link RecordToRowHandler} has a sender call for. */
+        private static boolean isWritable(byte wireType) {
+            switch (wireType) {
+                case QwpConstants.TYPE_BOOLEAN:
+                case QwpConstants.TYPE_BYTE:
+                case QwpConstants.TYPE_SHORT:
+                case QwpConstants.TYPE_INT:
+                case QwpConstants.TYPE_LONG:
+                case QwpConstants.TYPE_FLOAT:
+                case QwpConstants.TYPE_DOUBLE:
+                case QwpConstants.TYPE_CHAR:
+                case QwpConstants.TYPE_TIMESTAMP:
+                case QwpConstants.TYPE_TIMESTAMP_NANOS:
+                case QwpConstants.TYPE_VARCHAR:
+                case QwpConstants.TYPE_SYMBOL:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        /** Boxed once per reload, in the type {@link RecordToRowHandler} unboxes for the same wire type. */
+        private static Object value(QwpColumnBatch batch, byte wireType, int col, int row) {
+            switch (wireType) {
+                case QwpConstants.TYPE_BOOLEAN:
+                    return batch.getBoolValue(col, row);
+                case QwpConstants.TYPE_BYTE:
+                    return batch.getByteValue(col, row);
+                case QwpConstants.TYPE_SHORT:
+                    return batch.getShortValue(col, row);
+                case QwpConstants.TYPE_INT:
+                    return batch.getIntValue(col, row);
+                case QwpConstants.TYPE_LONG:
+                case QwpConstants.TYPE_TIMESTAMP:
+                case QwpConstants.TYPE_TIMESTAMP_NANOS:
+                    return batch.getLongValue(col, row);
+                case QwpConstants.TYPE_FLOAT:
+                    return batch.getFloatValue(col, row);
+                case QwpConstants.TYPE_DOUBLE:
+                    return batch.getDoubleValue(col, row);
+                case QwpConstants.TYPE_CHAR:
+                    return batch.getCharValue(col, row);
+                default:
+                    return batch.getString(col, row);
+            }
         }
 
         private static boolean isInteger(byte wireType) {

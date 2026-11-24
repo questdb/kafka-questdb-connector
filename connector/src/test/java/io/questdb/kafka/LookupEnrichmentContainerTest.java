@@ -25,6 +25,7 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -58,7 +59,7 @@ class LookupEnrichmentContainerTest {
             "VARCHAR, SYMBOL", "STRING, SYMBOL", "SYMBOL, SYMBOL",
             "LONG, VARCHAR", "LONG, STRING"
     })
-    void loadsEveryAcceptedKeyAndValueType(String keyType, String valueType) {
+    void loadsEveryAcceptedKeyTypeAndTextValueType(String keyType, String valueType) {
         String table = createTable("k " + keyType + ", v " + valueType);
         boolean textKey = keyType.equals("VARCHAR") || keyType.equals("STRING") || keyType.equals("SYMBOL");
         insert(table, "cast(" + (textKey ? "'-5'" : "-5") + " as " + keyType + "), cast('neg' as " + valueType + ')');
@@ -118,8 +119,8 @@ class LookupEnrichmentContainerTest {
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {
             "select k from %s | must return the lookup key and at least one value column",
-            "select k, v, ts from %s | value column 'ts' must be VARCHAR, STRING or SYMBOL",
-            "select k, 1.5 v from %s | value column 'v' must be VARCHAR, STRING or SYMBOL",
+            "select k, v, ts::date d from %s | value column 'd' has a type the connector cannot write",
+            "select k, rnd_uuid4() u from %s | value column 'u' has a type the connector cannot write",
             "select ts, v from %s | key column 'ts' must be VARCHAR, STRING, SYMBOL or an integer type",
             // runs once, then the load fails rather than running it again on every refresh
             "create table if not exists %s_created (a int) | must be a query"
@@ -247,7 +248,7 @@ class LookupEnrichmentContainerTest {
             RecordToRowHandler handler = new RecordToRowHandler(new QuestDBSinkConnectorConfig(props), sender, true,
                     RecordToRowHandler.SenderErrorPolicy.PROBE, true, RecordToRowHandler.NameLimits.QWP);
             // 'ticker' is the second value column: the failure must name it, not the first
-            handler.setEnrichment(new String[]{"mkt_type", "ticker"}, Map.of("42", new String[]{"EQ", "ACME"}));
+            handler.setEnrichment(new String[]{"mkt_type", "ticker"}, ConnectTestUtils.symbols(2), Map.of("42", new String[]{"EQ", "ACME"}));
 
             // the record's own 'ticker' is a VARCHAR in the same row
             InvalidDataException sameRow = assertThrows(InvalidDataException.class,
@@ -266,7 +267,7 @@ class LookupEnrichmentContainerTest {
     }
 
     /**
-     * Every value column lands in the table through the task: QWP takes several symbols after
+     * Every value column lands in the table through the task: QWP takes several of them after
      * the row's other columns. A value the lookup row lacks leaves its column null.
      */
     @Test
@@ -275,6 +276,44 @@ class LookupEnrichmentContainerTest {
         insert(lookup, "7, 'ACME', 'EQ'");
         insert(lookup, "8, 'BETA', null");
         String table = ConnectTestUtils.newTableName();
+        writeEnriched(table, "select sec_id, symbol as ticker, mkt_type from " + lookup, 7L, 8L);
+        QuestDBUtils.assertSqlEventually("\"sec_id\",\"ticker\",\"mkt_type\"\r\n7,\"ACME\",\"EQ\"\r\n8,\"BETA\",\r\n",
+                "select sec_id, ticker, mkt_type from " + table + " order by sec_id", httpPort());
+    }
+
+    /**
+     * A value column is written with the type the lookup query returns it in. Without a target
+     * column the server creates one of that type; an existing INT column takes an INT value.
+     */
+    @Test
+    void theTaskWritesEachValueColumnWithItsLookupType() {
+        String lookup = createTable("sec_id LONG, sym SYMBOL, str VARCHAR, bo BOOLEAN, by BYTE, sh SHORT, i INT,"
+                + " l LONG, f FLOAT, d DOUBLE, c CHAR, ts TIMESTAMP, tsn TIMESTAMP_NS");
+        insert(lookup, "7, 'ACME', 'text', true, 1, 2, 3, 4, 1.5, 2.5, 'x', '2026-01-02T03:04:05.000006Z',"
+                + " '2026-01-02T03:04:05.000000007Z'");
+        String created = ConnectTestUtils.newTableName();
+        String existing = ConnectTestUtils.newTableName(); // QWP writes to WAL tables only
+        QuestDBUtils.assertSql("{\"ddl\":\"OK\"}", "create table " + existing
+                + " (sec_id LONG, i INT, timestamp TIMESTAMP) timestamp(timestamp) partition by day wal", httpPort(), QuestDBUtils.Endpoint.EXEC);
+
+        writeEnriched(created, "select * from " + lookup, 7L);
+        writeEnriched(existing, "select sec_id, i from " + lookup, 7L);
+
+        QuestDBUtils.assertSqlEventually("\"column\",\"type\"\r\n\"sym\",\"SYMBOL\"\r\n\"str\",\"VARCHAR\"\r\n"
+                        + "\"bo\",\"BOOLEAN\"\r\n\"by\",\"BYTE\"\r\n\"sh\",\"SHORT\"\r\n\"i\",\"INT\"\r\n\"l\",\"LONG\"\r\n"
+                        + "\"f\",\"FLOAT\"\r\n\"d\",\"DOUBLE\"\r\n\"c\",\"CHAR\"\r\n\"ts\",\"TIMESTAMP\"\r\n"
+                        + "\"tsn\",\"TIMESTAMP_NS\"\r\n",
+                "select \"column\", type from table_columns('" + created + "')"
+                        + " where \"column\" not in ('sec_id', 'timestamp')", httpPort());
+        QuestDBUtils.assertSqlEventually("\"sym\",\"str\",\"bo\",\"by\",\"sh\",\"i\",\"l\",\"f\",\"d\",\"c\",\"ts\",\"tsn\"\r\n"
+                        + "\"ACME\",\"text\",true,1,2,3,4,1.5,2.5,x,\"2026-01-02T03:04:05.000006Z\","
+                        + "\"2026-01-02T03:04:05.000000007Z\"\r\n",
+                "select sym, str, bo, by, sh, i, l, f, d, c, ts, tsn from " + created, httpPort());
+        QuestDBUtils.assertSqlEventually("\"sec_id\",\"i\"\r\n7,3\r\n", "select sec_id, i from " + existing, httpPort());
+    }
+
+    /** Puts one record per sec_id through a task enriched by the given query. */
+    private static void writeEnriched(String table, String enrichmentSql, long... secIds) {
         QwpSinkTask task = new QwpSinkTask();
         task.initialize((SinkTaskContext) Proxy.newProxyInstance(SinkTaskContext.class.getClassLoader(),
                 new Class<?>[]{SinkTaskContext.class}, (self, method, args) -> null)); // no DLQ, no-op callbacks
@@ -282,19 +321,20 @@ class LookupEnrichmentContainerTest {
         props.put(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG, confString() + "auto_flush_rows=1;");
         props.put(QuestDBSinkConnectorConfig.TABLE_CONFIG, table);
         props.put(QuestDBSinkConnectorConfig.INCLUDE_KEY_CONFIG, "false");
-        props.put(QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG, "select sec_id, symbol as ticker, mkt_type from " + lookup);
+        props.put(QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG, enrichmentSql);
         props.put(QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG, "sec_id");
         task.start(props);
         try {
             task.open(Collections.singleton(new TopicPartition("topic", 0)));
-            task.put(List.of(new SinkRecord("topic", 0, null, null, null, Map.of("sec_id", 7L), 0L),
-                    new SinkRecord("topic", 0, null, null, null, Map.of("sec_id", 8L), 1L)));
+            List<SinkRecord> records = new ArrayList<>();
+            for (long secId : secIds) {
+                records.add(new SinkRecord("topic", 0, null, null, null, Map.of("sec_id", secId), records.size()));
+            }
+            task.put(records);
             task.preCommit(Collections.emptyMap()); // stop() does not wait for the rows to be acknowledged
         } finally {
             task.stop();
         }
-        QuestDBUtils.assertSqlEventually("\"sec_id\",\"ticker\",\"mkt_type\"\r\n7,\"ACME\",\"EQ\"\r\n8,\"BETA\",\r\n",
-                "select sec_id, ticker, mkt_type from " + table + " order by sec_id", httpPort());
     }
 
     private static SinkRecord record(String table, long secId, String ticker) {
@@ -315,8 +355,8 @@ class LookupEnrichmentContainerTest {
     }
 
     /** The map with each row as a list, which compares by value. */
-    private static Map<String, List<String>> rows(LookupEnrichment.Lookup lookup) {
-        Map<String, List<String>> rows = new HashMap<>();
+    private static Map<String, List<Object>> rows(LookupEnrichment.Lookup lookup) {
+        Map<String, List<Object>> rows = new HashMap<>();
         lookup.map.forEach((key, values) -> rows.put(key, Arrays.asList(values)));
         return rows;
     }

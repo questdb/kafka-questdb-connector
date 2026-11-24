@@ -54,7 +54,10 @@ final class RecordToRowHandler {
     private String[] enrichmentColumns;
     private String enrichmentKey;
     private boolean enrichmentKeyUnusable; // the key field held a value no lookup key can match
-    private Map<String, String[]> enrichmentMap = Collections.emptyMap();
+    private Map<String, Object[]> enrichmentMap = Collections.emptyMap();
+    private byte[] enrichmentTypes;
+    // by lower-case column name, for as long as the task lives: the client never forgets a column's type
+    private final Map<String, Byte> enrichmentTypesWritten = new HashMap<>();
     private final EnrichmentMisses enrichmentMisses;
     private static final com.fasterxml.jackson.core.JsonFactory JSON_FACTORY = new com.fasterxml.jackson.core.JsonFactory();
     // Jackson 2.13 (what Connect provides here) predates StreamReadConstraints, so nesting is
@@ -436,9 +439,10 @@ final class RecordToRowHandler {
     /**
      * Replaces the lookup used from the next record on. Null columns mean nothing to stamp.
      * Throws, leaving the previous lookup in place, when a value column has a name the row is
-     * known to use for something else, or names the same column as another value column.
+     * known to use for something else, names the same column as another value column, or has
+     * another type than an earlier lookup gave that column.
      */
-    void setEnrichment(String[] columns, Map<String, String[]> map) {
+    void setEnrichment(String[] columns, byte[] types, Map<String, Object[]> map) {
         if (columns == null) {
             enrichmentColumns = null;
             enrichmentMap = Collections.emptyMap();
@@ -467,9 +471,19 @@ final class RecordToRowHandler {
                 throw new ConnectException("enrichment.sql value column '" + column + "' " + clash
                         + "; rename it in the SQL with an alias (... AS another_name)");
             }
+            // The client fixes a column's type once a row has written it, so every later row would fail.
+            Byte written = enrichmentTypesWritten.get(column.toLowerCase(Locale.ROOT));
+            if (written != null && written != types[i]) {
+                throw new ConnectException("enrichment.sql value column '" + column + "' changed its type;"
+                        + " restart the connector to write it with the new type");
+            }
             sanitized[i] = column;
         }
+        for (int i = 0; i < sanitized.length; i++) {
+            enrichmentTypesWritten.put(sanitized[i].toLowerCase(Locale.ROOT), types[i]);
+        }
         enrichmentColumns = sanitized;
+        enrichmentTypes = types;
         enrichmentMap = map;
         enrichmentMisses.resolve(map);
     }
@@ -526,18 +540,18 @@ final class RecordToRowHandler {
             return;
         }
         enrichmentKey = null;
-        String[] values = enrichmentMap.get(key);
+        Object[] values = enrichmentMap.get(key);
         if (values == null) {
             enrichmentMisses.miss(key);
             return;
         }
         String column = null;
         try {
-            // QWP accepts symbols after other columns of the row
+            // QWP accepts a symbol after other columns of the row
             for (int i = 0; i < enrichmentColumns.length; i++) {
                 if (values[i] != null) {
                     column = enrichmentColumns[i];
-                    sender.symbol(column, values[i]);
+                    writeEnrichment(column, enrichmentTypes[i], values[i]);
                 }
             }
         } catch (LineSenderException e) {
@@ -550,6 +564,48 @@ final class RecordToRowHandler {
             throw new InvalidDataException("Cannot write enrichment column '" + column + "': " + e.getMessage()
                     + ". If this record or an earlier row of the table has a field of that name, rename the value"
                     + " column in " + QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG + " with an alias", e);
+        }
+    }
+
+    /** Writes a value with the type the lookup query returned it in; see LookupEnrichment.Loader. */
+    private void writeEnrichment(String column, byte wireType, Object value) {
+        switch (wireType) {
+            case QwpConstants.TYPE_BOOLEAN:
+                sender.boolColumn(column, (Boolean) value);
+                break;
+            case QwpConstants.TYPE_BYTE:
+                sender.byteColumn(column, (Byte) value);
+                break;
+            case QwpConstants.TYPE_SHORT:
+                sender.shortColumn(column, (Short) value);
+                break;
+            case QwpConstants.TYPE_INT:
+                sender.intColumn(column, (Integer) value);
+                break;
+            case QwpConstants.TYPE_LONG:
+                sender.longColumn(column, (Long) value);
+                break;
+            case QwpConstants.TYPE_TIMESTAMP:
+                sender.timestampColumn(column, (Long) value, ChronoUnit.MICROS);
+                break;
+            case QwpConstants.TYPE_TIMESTAMP_NANOS:
+                sender.timestampColumn(column, (Long) value, ChronoUnit.NANOS);
+                break;
+            case QwpConstants.TYPE_FLOAT:
+                sender.floatColumn(column, (Float) value);
+                break;
+            case QwpConstants.TYPE_DOUBLE:
+                sender.doubleColumn(column, (Double) value);
+                break;
+            case QwpConstants.TYPE_CHAR:
+                sender.charColumn(column, (Character) value);
+                break;
+            case QwpConstants.TYPE_VARCHAR:
+                sender.stringColumn(column, (String) value);
+                break;
+            default:
+                sender.symbol(column, (String) value);
+                break;
         }
     }
 

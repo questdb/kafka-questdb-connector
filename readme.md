@@ -32,10 +32,11 @@ Keep `sf_append_deadline_millis` below the worker consumer's
 the connector to check that relationship for you.
 
 QWP only: `enrichment.sql` and `enrichment.key.field` (with `enrichment.refresh.ms`
-and `enrichment.query.timeout.ms`) add symbol columns to each row, looked up in
+and `enrichment.query.timeout.ms`) add columns to each row, looked up in
 an in-memory map the task reloads from a query returning the key, then one or more
-value columns. The query must succeed when a task starts, and no value column may
-share a name with a record field; alias it in the SQL otherwise.
+value columns. Each value column is written with the type the query returns; cast
+it in the SQL to write another type. The query must succeed when a task starts, and
+no value column may share a name with a record field; alias it in the SQL otherwise.
 
 The QuestDB.com documentation covers the rest: the `qwp.*` settings, how
 `auto_flush_rows` and `auto_flush_interval` set checkpoint boundaries, and how

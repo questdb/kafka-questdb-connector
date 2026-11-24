@@ -834,7 +834,7 @@ class QwpSinkTask extends SinkTask {
             }
             try {
                 LookupEnrichment.Lookup lookup = loadEnrichment();
-                recordHandler.setEnrichment(lookup.columns, lookup.map);
+                recordHandler.setEnrichment(lookup.columns, lookup.types, lookup.map);
             } catch (RuntimeException e) {
                 throw initialEnrichmentFailure(e);
             }
@@ -846,7 +846,7 @@ class QwpSinkTask extends SinkTask {
             reloaded = lookup != null;
             if (reloaded) {
                 try {
-                    recordHandler.setEnrichment(lookup.columns, lookup.map);
+                    recordHandler.setEnrichment(lookup.columns, lookup.types, lookup.map);
                 } catch (RuntimeException e) {
                     log.warn("Enrichment lookup refresh failed; keeping the previous mapping: {}", e.toString());
                 }

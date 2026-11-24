@@ -112,8 +112,9 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
 
     public static final String ENRICHMENT_SQL_CONFIG = "enrichment.sql";
     private static final String ENRICHMENT_SQL_DOC = "QWP only. SQL query returning the lookup key, then one or more value columns. "
-            + "Every value column is written to the row as a symbol column of the same name; an existing VARCHAR or STRING column of that name keeps its type. "
-            + "Alias a value column in the SQL if records carry a field of that name or the target table has such a column of another type; otherwise those rows are rejected. "
+            + "Every value column is written to the row as a column of the same name and type; cast it in the SQL to write another type. "
+            + "BOOLEAN, BYTE, SHORT, INT, LONG, FLOAT, DOUBLE, CHAR, TIMESTAMP, TIMESTAMP_NS, VARCHAR, STRING and SYMBOL can be written (STRING as VARCHAR); a BOOLEAN, BYTE, SHORT or CHAR has no null, so a NULL there is written as false, 0 or an empty character. "
+            + "Alias a value column in the SQL if records carry a field of that name; if the target table has such a column, its type must accept the value, otherwise those rows are rejected. "
             + "The query must succeed when a task starts, so the table must exist, though it may be empty. A statement such as INSERT is run once by each task before it is rejected.";
 
     public static final String ENRICHMENT_KEY_FIELD_CONFIG = "enrichment.key.field";

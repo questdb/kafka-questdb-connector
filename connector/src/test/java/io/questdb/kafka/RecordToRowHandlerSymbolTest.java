@@ -1,6 +1,7 @@
 package io.questdb.kafka;
 
 import io.questdb.client.Sender;
+import io.questdb.client.cutlass.qwp.protocol.QwpConstants;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
@@ -129,12 +130,12 @@ class RecordToRowHandlerSymbolTest {
             props.put("value.format", "json");
         }
         RecordToRowHandler handler = new RecordToRowHandler(new QuestDBSinkConnectorConfig(props), recorder.proxy(), true, false, true);
-        Map<String, String[]> lookup = new HashMap<>();
+        Map<String, Object[]> lookup = new HashMap<>();
         lookup.put("42", new String[]{"AAPL"});
         lookup.put("abc", new String[]{"MSFT"});
         lookup.put("42.5", new String[]{"IBM"});
         lookup.put("true", new String[]{"ORCL"});
-        handler.setEnrichment(new String[]{"ticker"}, lookup);
+        handler.setEnrichment(new String[]{"ticker"}, ConnectTestUtils.symbols(1), lookup);
 
         handler.handle(shape.record(42L)); // numeric key: rendered as plain decimal on both sides
         assertEquals(List.of("table(tab)", "longColumn(sec_id,42)", "doubleColumn(px,1.5)", "symbol(ticker,AAPL)", "atNow()"),
@@ -196,13 +197,13 @@ class RecordToRowHandlerSymbolTest {
      */
     @Test
     void enrichmentKeyFieldMatchesThePrimitiveKeyOrValueByItsColumnName() {
-        Map<String, String[]> lookup = new HashMap<>();
+        Map<String, Object[]> lookup = new HashMap<>();
         lookup.put("42", new String[]{"AAPL"});
         lookup.put("abc", new String[]{"MSFT"});
 
         Recorder recorder = new Recorder();
         RecordToRowHandler byValue = enrichedHandler(recorder, "value", Map.of()); // value.prefix defaults to ""
-        byValue.setEnrichment(new String[]{"ticker"}, lookup);
+        byValue.setEnrichment(new String[]{"ticker"}, ConnectTestUtils.symbols(1), lookup);
         byValue.handle(new SinkRecord("tab", 0, null, null, Schema.INT64_SCHEMA, 42L, 0L));
         assertEquals(List.of("table(tab)", "longColumn(value,42)", "symbol(ticker,AAPL)", "atNow()"), recorder.calls);
 
@@ -248,7 +249,7 @@ class RecordToRowHandlerSymbolTest {
                 props.put("value.format", "json");
             }
             RecordToRowHandler byKey = enrichedHandler(recorder, "key", props);
-            byKey.setEnrichment(new String[]{"ticker"}, lookup);
+            byKey.setEnrichment(new String[]{"ticker"}, ConnectTestUtils.symbols(1), lookup);
             Object value = rawJson ? "{\"px\":1.5}".getBytes(StandardCharsets.UTF_8) : Map.of("px", 1.5d);
             byKey.handle(new SinkRecord("tab", 0, Schema.STRING_SCHEMA, "abc", null, value, 0L));
             assertEquals(List.of("table(tab)", "stringColumn(key,abc)", "doubleColumn(px,1.5)", "symbol(ticker,MSFT)", "atNow()"),
@@ -262,7 +263,7 @@ class RecordToRowHandlerSymbolTest {
     void aFailedRecordDoesNotLendItsKeyToTheNext(Shape shape) {
         Recorder recorder = new Recorder();
         RecordToRowHandler handler = enrichedHandler(recorder, "sec_id", shape.props());
-        handler.setEnrichment(new String[]{"ticker"}, Map.of("42", new String[]{"AAPL"}));
+        handler.setEnrichment(new String[]{"ticker"}, ConnectTestUtils.symbols(1), Map.of("42", new String[]{"AAPL"}));
 
         // sec_id is captured, then a later field is rejected
         assertThrows(InvalidDataException.class, () -> handler.handle(shape.failingAfterKey(42L)));
@@ -280,7 +281,7 @@ class RecordToRowHandlerSymbolTest {
         Map<String, String> props = new HashMap<>(shape.props());
         props.put("symbols", "sec_id");
         RecordToRowHandler handler = enrichedHandler(recorder, "sec_id", props);
-        handler.setEnrichment(new String[]{"ticker"}, Map.of("42", new String[]{"AAPL"}, "abc", new String[]{"MSFT"}));
+        handler.setEnrichment(new String[]{"ticker"}, ConnectTestUtils.symbols(1), Map.of("42", new String[]{"AAPL"}, "abc", new String[]{"MSFT"}));
 
         handler.handle(shape.record("abc"));
         handler.handle(shape.record(42L));
@@ -299,13 +300,13 @@ class RecordToRowHandlerSymbolTest {
     void enrichmentStampsEveryValueColumnTheLookupRowHasAValueFor() {
         Recorder recorder = new Recorder();
         RecordToRowHandler handler = enrichedHandler(recorder, "sec_id", Map.of());
-        handler.setEnrichment(new String[]{"ticker"}, Map.of("42", new String[]{"AAPL"}));
+        handler.setEnrichment(new String[]{"ticker"}, ConnectTestUtils.symbols(1), Map.of("42", new String[]{"AAPL"}));
         handler.handle(Shape.MAP.record(42L));
 
-        Map<String, String[]> lookup = new HashMap<>();
+        Map<String, Object[]> lookup = new HashMap<>();
         lookup.put("42", new String[]{"AAPL", "EQ"});
         lookup.put("7", new String[]{null, "FX"});
-        handler.setEnrichment(new String[]{"ticker", "mkt_type"}, lookup);
+        handler.setEnrichment(new String[]{"ticker", "mkt_type"}, ConnectTestUtils.symbols(2), lookup);
         handler.handle(Shape.MAP.record(42L));
         handler.handle(Shape.MAP.record(7L));
 
@@ -326,10 +327,52 @@ class RecordToRowHandlerSymbolTest {
         RecordToRowHandler handler = enrichedHandler(new Recorder(), "sec_id", Map.of());
 
         ConnectException failure = assertThrows(ConnectException.class, () -> handler.setEnrichment(
-                new String[]{"price::varchar"}, Map.of("42", new String[]{"1.5"})));
+                new String[]{"price::varchar"}, ConnectTestUtils.symbols(1), Map.of("42", new String[]{"1.5"})));
 
         assertEquals("enrichment.sql value column 'price::varchar' cannot be used as a column name;"
                 + " give it an alias in the SQL (... AS another_name)", failure.getMessage());
+    }
+
+    /** A value keeps the type the lookup query returned it in, VARCHAR and SYMBOL apart. */
+    @Test
+    void enrichmentWritesEachValueWithTheTypeOfItsLookupColumn() {
+        Recorder recorder = new Recorder();
+        RecordToRowHandler handler = enrichedHandler(recorder, "sec_id", Map.of());
+        byte[] types = {QwpConstants.TYPE_SYMBOL, QwpConstants.TYPE_VARCHAR, QwpConstants.TYPE_BOOLEAN,
+                QwpConstants.TYPE_BYTE, QwpConstants.TYPE_SHORT, QwpConstants.TYPE_INT, QwpConstants.TYPE_LONG,
+                QwpConstants.TYPE_FLOAT, QwpConstants.TYPE_DOUBLE, QwpConstants.TYPE_CHAR,
+                QwpConstants.TYPE_TIMESTAMP, QwpConstants.TYPE_TIMESTAMP_NANOS};
+        handler.setEnrichment(new String[]{"sym", "str", "bo", "by", "sh", "i", "l", "f", "d", "c", "ts", "tsn"}, types,
+                Map.of("42", new Object[]{"s", "v", true, (byte) 1, (short) 2, 3, 4L, 1.5f, 2.5, 'x', 5L, 6L}));
+
+        handler.handle(Shape.MAP.record(42L));
+
+        assertEquals(List.of("table(tab)", "longColumn(sec_id,42)", "doubleColumn(px,1.5)",
+                "symbol(sym,s)", "stringColumn(str,v)", "boolColumn(bo,true)", "byteColumn(by,1)", "shortColumn(sh,2)",
+                "intColumn(i,3)", "longColumn(l,4)", "floatColumn(f,1.5)", "doubleColumn(d,2.5)", "charColumn(c,x)",
+                "timestampColumn(ts,5,Micros)", "timestampColumn(tsn,6,Nanos)", "atNow()"), recorder.calls);
+    }
+
+    /** The client fixes a column's type once a row has written it, so the reload is refused. */
+    @Test
+    void enrichmentRejectsAValueColumnThatChangedItsType() {
+        Recorder recorder = new Recorder();
+        RecordToRowHandler handler = enrichedHandler(recorder, "sec_id", Map.of());
+        handler.setEnrichment(new String[]{"mkt_type"}, ConnectTestUtils.symbols(1), Map.of("42", new String[]{"EQ"}));
+
+        ConnectException failure = assertThrows(ConnectException.class, () -> handler.setEnrichment(
+                new String[]{"MKT_TYPE"}, new byte[]{QwpConstants.TYPE_INT}, Map.of("42", new Object[]{5})));
+
+        assertEquals("enrichment.sql value column 'MKT_TYPE' changed its type;"
+                + " restart the connector to write it with the new type", failure.getMessage());
+        handler.handle(Shape.MAP.record(42L)); // the previous lookup stays
+        assertEquals(List.of("table(tab)", "longColumn(sec_id,42)", "doubleColumn(px,1.5)", "symbol(mkt_type,EQ)", "atNow()"),
+                recorder.calls);
+
+        // also after a lookup without the column: the client still remembers its type
+        handler.setEnrichment(new String[]{"ticker"}, ConnectTestUtils.symbols(1), Map.of("42", new String[]{"AAPL"}));
+        assertThrows(ConnectException.class, () -> handler.setEnrichment(new String[]{"ticker", "mkt_type"},
+                new byte[]{QwpConstants.TYPE_SYMBOL, QwpConstants.TYPE_INT}, Map.of("42", new Object[]{"AAPL", 5})));
     }
 
     /** QuestDB column names ignore case, and a '.' is written as '_'. */
@@ -337,10 +380,10 @@ class RecordToRowHandlerSymbolTest {
     void enrichmentRejectsTwoValueColumnsNamingTheSameColumn() {
         Recorder recorder = new Recorder();
         RecordToRowHandler handler = enrichedHandler(recorder, "sec_id", Map.of());
-        handler.setEnrichment(new String[]{"ticker"}, Map.of("42", new String[]{"AAPL"}));
+        handler.setEnrichment(new String[]{"ticker"}, ConnectTestUtils.symbols(1), Map.of("42", new String[]{"AAPL"}));
 
         ConnectException failure = assertThrows(ConnectException.class, () -> handler.setEnrichment(
-                new String[]{"mkt.type", "ticker", "MKT_TYPE"}, Map.of("42", new String[]{"EQ", "IBM", "FX"})));
+                new String[]{"mkt.type", "ticker", "MKT_TYPE"}, ConnectTestUtils.symbols(3), Map.of("42", new String[]{"EQ", "IBM", "FX"})));
 
         assertEquals("enrichment.sql value column 'MKT_TYPE' names the same column as value column 'mkt_type';"
                 + " rename it in the SQL with an alias (... AS another_name)", failure.getMessage());
@@ -466,8 +509,16 @@ class RecordToRowHandlerSymbolTest {
                             case "stringColumn":
                             case "doubleColumn":
                             case "longColumn":
+                            case "intColumn":
+                            case "shortColumn":
+                            case "byteColumn":
+                            case "floatColumn":
+                            case "charColumn":
                             case "boolColumn":
                                 calls.add(method.getName() + "(" + args[0] + "," + args[1] + ")");
+                                return proxy;
+                            case "timestampColumn":
+                                calls.add("timestampColumn(" + args[0] + "," + args[1] + "," + args[2] + ")");
                                 return proxy;
                             case "atNow":
                                 calls.add("atNow()");
