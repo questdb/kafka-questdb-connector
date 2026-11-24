@@ -1,7 +1,7 @@
 {
   "name": "producer",
   "version": "1.0.0",
-  "description": "",
+  "description": "Generates random trades and sends them to a Kafka topic",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -10,7 +10,6 @@
   "author": "",
   "license": "Apache-2.0",
   "dependencies": {
-    "@faker-js/faker": "^9.5.1",
     "kafkajs": "^2.2.4"
   }
 }

@@ -8,19 +8,13 @@ option java_package = "io.questdb.kafka.samples";
 option java_outer_classname = "TradeProtos";
 option java_multiple_files = true;
 
-enum Side {
-  SIDE_UNSPECIFIED = 0;
-  BUY = 1;
-  SELL = 2;
-}
-
-// One executed trade. The connector maps every field to a column of the
-// QuestDB table, see the readme for the exact type mapping.
+// One executed trade, the same shape as the `trades` table on https://demo.questdb.io.
+// The connector maps every field to a column of the QuestDB table, see the readme for
+// the exact type mapping.
 message Trade {
   string symbol = 1;
-  Side side = 2;
+  string side = 2;   // "buy" or "sell"
   double price = 3;
-  int64 quantity = 4;
-  string exchange = 5;
-  google.protobuf.Timestamp timestamp = 6;
+  double amount = 4;
+  google.protobuf.Timestamp timestamp = 5;
 }
