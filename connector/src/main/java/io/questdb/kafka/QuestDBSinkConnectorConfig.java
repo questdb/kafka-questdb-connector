@@ -113,7 +113,7 @@ public final class QuestDBSinkConnectorConfig extends AbstractConfig {
     public static final String ENRICHMENT_SQL_CONFIG = "enrichment.sql";
     private static final String ENRICHMENT_SQL_DOC = "QWP only. SQL query returning the lookup key, then one or more value columns. "
             + "Every value column is written to the row as a column of the same name and type; cast it in the SQL to write another type. "
-            + "BOOLEAN, BYTE, SHORT, INT, LONG, FLOAT, DOUBLE, CHAR, TIMESTAMP, TIMESTAMP_NS, VARCHAR, STRING and SYMBOL can be written (STRING as VARCHAR); a BOOLEAN, BYTE, SHORT or CHAR has no null, so a NULL there is written as false, 0 or an empty character. "
+            + "BOOLEAN, BYTE, SHORT, INT, LONG, FLOAT, DOUBLE, CHAR, TIMESTAMP, TIMESTAMP_NS, VARCHAR, STRING and SYMBOL can be written (STRING as VARCHAR); a BOOLEAN, BYTE, SHORT or CHAR has no null, so a NULL there, and a record whose key has no mapping, gets false, 0 or an empty character; cast the column to INT or VARCHAR in the SQL to get a null instead. "
             + "Alias a value column in the SQL if records carry a field of that name: such a record keeps its own value only when the connector writes the field with exactly the type of the value column "
             + "(it writes record integers as LONG and floating-point numbers as DOUBLE); otherwise it is rejected, and so can later records of that table. "
             + "If the target table has a column of that name, its type must accept the value, otherwise those rows are rejected. "
