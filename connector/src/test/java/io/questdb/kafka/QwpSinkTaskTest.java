@@ -33,6 +33,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -971,6 +972,47 @@ class QwpSinkTaskTest {
     }
 
     @Test
+    void enrichmentLoadsAtStart() {
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(List.of(sender), 10, ENRICHMENT, true, lookup("7", "A"));
+        assertEquals(1, task.loadCalls.get());
+        assertEquals(1, task.refresherStarts);
+
+        task.put(Collections.singletonList(keyed(0, 7)));
+        assertEquals(1, task.loadCalls.get());
+        assertEquals(1, task.refresherStarts);
+
+        task.enrichmentResults.add(lookup("7", "B"));
+        putAfterRefresh(task, keyed(1, 7));
+        assertEquals(List.of("A", "B"), sender.symbols);
+    }
+
+    @Test
+    void enrichmentRejectionOrNameClashFailsTheStart() {
+        ConnectException rejected = assertThrows(ConnectException.class, () -> startTask(List.of(new FakeSender()), 10,
+                ENRICHMENT, true, new QueryException((byte) 0x05, "table does not exist [table=sec_list]")));
+        assertFalse(rejected instanceof RetriableException);
+        assertTrue(rejected.getMessage().contains("table does not exist"), rejected.getMessage());
+
+        ConnectException clash = assertThrows(ConnectException.class, () -> startTask(List.of(new FakeSender()), 10,
+                ENRICHMENT, true, lookup(new String[]{"ID"}, "7", "A")));
+        assertTrue(clash.getMessage().contains("enrichment.key.field"), clash.getMessage());
+    }
+
+    @Test
+    void enrichmentUnavailableAtStartIsLoadedByTheFirstRecord() {
+        FakeSender sender = new FakeSender();
+        TestTask task = startTask(List.of(sender), 10, ENRICHMENT, true,
+                new QueryException((byte) 0x06, "peer disconnect"), lookup("7", "A"));
+        assertEquals(1, task.loadCalls.get());
+
+        task.put(Collections.singletonList(keyed(0, 7)));
+
+        assertEquals(2, task.loadCalls.get());
+        assertEquals(Collections.singletonList("A"), sender.symbols);
+    }
+
+    @Test
     void enrichmentIsNotLoadedByAnEmptyPut() {
         TestTask task = startTask(new FakeSender(), 10, ENRICHMENT, true);
 
@@ -1428,8 +1470,9 @@ class QwpSinkTaskTest {
     }
 
     private static TestTask startTask(List<FakeSender> senders, int flushRows,
-                                      Map<String, String> extra, boolean hasReporter) {
+                                      Map<String, String> extra, boolean hasReporter, Object... loadsAtStart) {
         TestTask task = new TestTask(senders);
+        task.enrichmentResults.addAll(Arrays.asList(loadsAtStart));
         task.fakeContext = new FakeContext(hasReporter);
         task.fakeContext.assignment.add(SOURCE);
         task.initialize(task.fakeContext);
@@ -1458,6 +1501,7 @@ class QwpSinkTaskTest {
         private final AtomicInteger loadCalls = new AtomicInteger();
         private long nowNanos;
         private boolean realRefresher;
+        private int refresherStarts;
 
         private TestTask(List<FakeSender> senders) {
             this.senders = senders;
@@ -1476,10 +1520,17 @@ class QwpSinkTaskTest {
             return senders.get(index).proxy();
         }
 
+        /**
+         * An empty queue fails like an unreachable server, so start() leaves the load to put().
+         * loadCalls counts only the loads that took a queued result.
+         */
         @Override
         LookupEnrichment.Lookup loadEnrichment() {
+            Object next = enrichmentResults.poll();
+            if (next == null) {
+                throw new QueryException((byte) 0, "no lookup queued");
+            }
             loadCalls.incrementAndGet();
-            Object next = enrichmentResults.remove();
             if (next instanceof Supplier) {
                 next = ((Supplier<?>) next).get();
             }
@@ -1498,6 +1549,7 @@ class QwpSinkTaskTest {
         /** Tests drive reloadEnrichment() themselves unless they ask for the real thread. */
         @Override
         void startEnrichmentRefresher() {
+            refresherStarts++;
             if (realRefresher) {
                 super.startEnrichmentRefresher();
             }

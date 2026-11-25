@@ -133,6 +133,16 @@ class QwpSinkTask extends SinkTask {
         if (config.getEnrichmentSql() != null) {
             // Unpatched string: the query client ignores the sender-only keys.
             enrichment = new LookupEnrichment(confString, config.getEnrichmentSql(), config.getEnrichmentQueryTimeoutMs());
+            // A broken query fails the task now, not at the first record. A server that cannot
+            // answer yet is left to the first put(), which retries it.
+            try {
+                applyFirstEnrichment();
+            } catch (RuntimeException e) {
+                if (!LookupEnrichment.isTransient(e)) {
+                    throw new ConnectException("Enrichment lookup failed: " + e.getMessage(), e);
+                }
+                log.info("Enrichment lookup is not available yet; the first record retries it: {}", e.toString());
+            }
         }
         lastProgressNanos = nanoTime();
     }
@@ -818,10 +828,17 @@ class QwpSinkTask extends SinkTask {
         }
     }
 
+    private void applyFirstEnrichment() {
+        LookupEnrichment.Lookup lookup = loadEnrichment();
+        recordHandler.setEnrichment(lookup.columns, lookup.types, lookup.map);
+        enrichmentLoaded = true;
+        startEnrichmentRefresher();
+    }
+
     /**
-     * The first non-empty batch loads the lookup synchronously and starts the refresher; later
-     * calls apply what it published. Nothing the query client throws may leave this method as
-     * is: the catch blocks of put() would read it as a failure of the Sender and retire it.
+     * Unless start() loaded the lookup, the first non-empty batch does; later calls apply what
+     * the refresher published. Nothing the query client throws may leave this method as is: the
+     * catch blocks of put() would read it as a failure of the Sender and retire it.
      */
     private void refreshEnrichment(List<SinkRecord> batch) {
         if (enrichment == null) {
@@ -833,14 +850,11 @@ class QwpSinkTask extends SinkTask {
                 return;
             }
             try {
-                LookupEnrichment.Lookup lookup = loadEnrichment();
-                recordHandler.setEnrichment(lookup.columns, lookup.types, lookup.map);
+                applyFirstEnrichment();
             } catch (RuntimeException e) {
                 throw initialEnrichmentFailure(e);
             }
-            enrichmentLoaded = true;
             reloaded = true;
-            startEnrichmentRefresher();
         } else {
             LookupEnrichment.Lookup lookup = pendingEnrichment.getAndSet(null);
             reloaded = lookup != null;
