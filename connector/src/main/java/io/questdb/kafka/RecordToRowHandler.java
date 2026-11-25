@@ -11,6 +11,7 @@ import io.questdb.kafka.compat.datetime.DateFormat;
 import io.questdb.kafka.compat.datetime.DateLocaleFactory;
 import io.questdb.kafka.compat.datetime.microtime.Micros;
 import org.apache.kafka.connect.data.*;
+import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -47,6 +48,17 @@ final class RecordToRowHandler {
     private final String[] composedTimestampValues;
     private final MultiPartCharSequence composedBuffer;
     private long timestampColumnValue = Long.MIN_VALUE;
+    // Lookup enrichment (QWP only). The key text is captured while the record is traversed and
+    // resolved against the map once the row's own columns are written.
+    private final String enrichmentKeyField;
+    private String[] enrichmentColumns;
+    private String enrichmentKey;
+    private boolean enrichmentKeyUnusable; // the key field held a value no lookup key can match
+    private Map<String, Object[]> enrichmentMap = Collections.emptyMap();
+    private byte[] enrichmentTypes;
+    // by lower-case column name, for as long as the task lives: the client never forgets a column's type
+    private final Map<String, Byte> enrichmentTypesWritten = new HashMap<>();
+    private final EnrichmentMisses enrichmentMisses;
     private static final com.fasterxml.jackson.core.JsonFactory JSON_FACTORY = new com.fasterxml.jackson.core.JsonFactory();
     // Jackson 2.13 (what Connect provides here) predates StreamReadConstraints, so nesting is
     // unbounded. Without a cap a deeply nested payload is a StackOverflowError - an Error, which
@@ -83,6 +95,8 @@ final class RecordToRowHandler {
         this.nameLimits = nameLimits;
         this.rawJson = config.isRawJsonFormat();
         this.rawJsonEnvelope = config.isRawJsonEnvelope();
+        this.enrichmentKeyField = config.getEnrichmentKeyField();
+        this.enrichmentMisses = new EnrichmentMisses(enrichmentKeyField);
 
         String symbolColumnsConfig = routeSymbolsDirectly ? config.getSymbolColumns() : null;
         if (symbolColumnsConfig == null) {
@@ -146,6 +160,9 @@ final class RecordToRowHandler {
      */
     boolean handleRawJson(SinkRecord record, byte[] payload) {
         assert timestampColumnValue == Long.MIN_VALUE;
+        // A failed record can leave its key captured, so every record starts by clearing it.
+        enrichmentKey = null;
+        enrichmentKeyUnusable = false;
         if (payload == null) {
             return false; // tombstone
         }
@@ -179,6 +196,7 @@ final class RecordToRowHandler {
             } catch (java.io.IOException e) {
                 throw new InvalidDataException("Cannot parse JSON payload", e);
             }
+            stampEnrichment();
         } catch (InvalidDataException | LineSenderException ex) {
             // a half-written row must not leak its timestamp into the next record
             timestampColumnValue = Long.MIN_VALUE;
@@ -218,9 +236,11 @@ final class RecordToRowHandler {
                 case VALUE_NULL:
                     break;
                 case START_OBJECT:
+                    noteUnusableJsonKey(name);
                     writeJsonObject(parser, name, depth + 1);
                     break;
                 case START_ARRAY:
+                    noteUnusableJsonKey(name);
                     // Arrays are rare, and their validation (jagged rows, null elements,
                     // element types, skip.unsupported.types) is intricate. Materialise the
                     // array in the same shape the converter produces and reuse that code
@@ -341,6 +361,13 @@ final class RecordToRowHandler {
         }
     }
 
+    private void noteUnusableJsonKey(String name) {
+        if (name.equals(enrichmentKeyField)) {
+            enrichmentKey = null;
+            enrichmentKeyUnusable = true;
+        }
+    }
+
     private boolean isDesignatedRawField(String name) {
         return timestampColumnName != null && timestampColumnName.equals(name);
     }
@@ -349,6 +376,9 @@ final class RecordToRowHandler {
         if (isDesignatedRawField(name)) {
             timestampColumnValue = parseToMicros(value);
             return;
+        }
+        if (name.equals(enrichmentKeyField)) {
+            enrichmentKey = value;
         }
         String actualName = sanitizeName(name);
         if (symbolColumns.contains(actualName)) {
@@ -365,6 +395,9 @@ final class RecordToRowHandler {
             timestampColumnValue = TimestampHelper.getTimestampUnits(timestampUnits, value).toMicros(value);
             return;
         }
+        if (name.equals(enrichmentKeyField)) {
+            enrichmentKey = String.valueOf(value);
+        }
         String actualName = sanitizeName(name);
         if (symbolColumns.contains(actualName)) {
             sender.symbol(actualName, String.valueOf(value));
@@ -376,6 +409,9 @@ final class RecordToRowHandler {
     }
 
     private void writeJsonDouble(String name, double value) {
+        if (name.equals(enrichmentKeyField)) {
+            enrichmentKey = String.valueOf(value);
+        }
         String actualName = sanitizeName(name);
         if (symbolColumns.contains(actualName)) {
             sender.symbol(actualName, String.valueOf(value));
@@ -385,6 +421,9 @@ final class RecordToRowHandler {
     }
 
     private void writeJsonBool(String name, boolean value) {
+        if (name.equals(enrichmentKeyField)) {
+            enrichmentKey = String.valueOf(value);
+        }
         String actualName = sanitizeName(name);
         if (symbolColumns.contains(actualName)) {
             sender.symbol(actualName, String.valueOf(value));
@@ -395,6 +434,180 @@ final class RecordToRowHandler {
 
     void setSender(Sender sender) {
         this.sender = sender;
+    }
+
+    /**
+     * Replaces the lookup used from the next record on. Null columns mean nothing to stamp.
+     * Throws, leaving the previous lookup in place, when a value column has a name the row is
+     * known to use for something else, names the same column as another value column, or has
+     * another type than an earlier lookup gave that column.
+     */
+    void setEnrichment(String[] columns, byte[] types, Map<String, Object[]> map) {
+        if (columns == null) {
+            enrichmentColumns = null;
+            enrichmentMap = Collections.emptyMap();
+            return;
+        }
+        String[] sanitized = new String[columns.length];
+        for (int i = 0; i < columns.length; i++) {
+            String column;
+            try {
+                column = sanitizeName(columns[i]);
+            } catch (InvalidDataException e) {
+                // an expression without an alias: the server names it after its text, such as price::varchar
+                throw new ConnectException("enrichment.sql value column '" + columns[i] + "' cannot be used as a"
+                        + " column name; give it an alias in the SQL (... AS another_name)");
+            }
+            String clash = enrichmentColumnClash(column);
+            if (clash == null) {
+                for (int j = 0; j < i; j++) {
+                    if (column.equalsIgnoreCase(sanitized[j])) {
+                        clash = "names the same column as value column '" + sanitized[j] + "'";
+                        break;
+                    }
+                }
+            }
+            if (clash != null) {
+                throw new ConnectException("enrichment.sql value column '" + column + "' " + clash
+                        + "; rename it in the SQL with an alias (... AS another_name)");
+            }
+            // The client fixes a column's type once a row has written it, so every later row would fail.
+            Byte written = enrichmentTypesWritten.get(column.toLowerCase(Locale.ROOT));
+            if (written != null && written != types[i]) {
+                throw new ConnectException("enrichment.sql value column '" + column + "' changed its type;"
+                        + " restart the connector to write it with the new type");
+            }
+            sanitized[i] = column;
+        }
+        for (int i = 0; i < sanitized.length; i++) {
+            enrichmentTypesWritten.put(sanitized[i].toLowerCase(Locale.ROOT), types[i]);
+        }
+        enrichmentColumns = sanitized;
+        enrichmentTypes = types;
+        enrichmentMap = map;
+        enrichmentMisses.resolve(map);
+    }
+
+    /**
+     * Why an enriched column cannot have this name, or null. Checks only what the configuration
+     * reveals. A record field that is not named anywhere in it is caught when the row is built
+     * if its type differs; with the same type the client keeps the first value, the record's own.
+     * QuestDB column names are case-insensitive, and so is the client that buffers the row.
+     */
+    private String enrichmentColumnClash(String column) {
+        if (enrichmentKeyField != null && column.equalsIgnoreCase(enrichmentKeyField.replace('.', '_'))) {
+            return "has the name of " + QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG
+                    + ", which is written as a column too";
+        }
+        String listedIn = containsIgnoreCase(symbolColumns, column) ? QuestDBSinkConnectorConfig.SYMBOL_COLUMNS_CONFIG
+                : containsIgnoreCase(doubleColumns, column) ? QuestDBSinkConnectorConfig.DOUBLE_COLUMNS_CONFIG
+                : containsIgnoreCase(stringTimestampColumns, column) ? QuestDBSinkConnectorConfig.TIMESTAMP_STRING_FIELDS
+                : null;
+        if (listedIn != null) {
+            return "is listed in '" + listedIn + "' as a record field";
+        }
+        // A text value under the designated timestamp's name fails on the server (QuestDB 10.0
+        // and 10.1 cast it to a timestamp), and the task cannot get past the rejected batch.
+        // 'timestamp' is the name the server gives the designated column of a table it creates.
+        if (column.equalsIgnoreCase("timestamp") || column.equalsIgnoreCase(timestampColumnName)) {
+            return "has the name of a designated timestamp column ('timestamp' in a table the server"
+                    + " creates, or " + QuestDBSinkConnectorConfig.DESIGNATED_TIMESTAMP_COLUMN_NAME_CONFIG + ')';
+        }
+        return null;
+    }
+
+    private static boolean containsIgnoreCase(Set<? extends CharSequence> names, String name) {
+        for (CharSequence candidate : names) {
+            if (name.equalsIgnoreCase(candidate.toString())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Logs the keys without a mapping, if they changed; see {@link EnrichmentMisses#report}. */
+    void reportEnrichmentMisses(boolean reloaded) {
+        enrichmentMisses.report(reloaded);
+    }
+
+    private void stampEnrichment() {
+        String key = enrichmentKey;
+        if (key == null) {
+            if (enrichmentKeyUnusable) {
+                enrichmentMisses.unusable();
+            } else if (enrichmentKeyField != null) {
+                enrichmentMisses.absent();
+            }
+            return;
+        }
+        enrichmentKey = null;
+        Object[] values = enrichmentMap.get(key);
+        if (values == null) {
+            enrichmentMisses.miss(key);
+            return;
+        }
+        String column = null;
+        try {
+            // QWP accepts a symbol after other columns of the row
+            for (int i = 0; i < enrichmentColumns.length; i++) {
+                if (values[i] != null) {
+                    column = enrichmentColumns[i];
+                    writeEnrichment(column, enrichmentTypes[i], values[i]);
+                }
+            }
+        } catch (LineSenderException e) {
+            // For a name the configuration does not reveal, a record field in this row or an
+            // earlier one: the client fixes a column's type for the table once a row has written it.
+            RuntimeException classified = classifyRowConstructionFailure(e);
+            if (!(classified instanceof InvalidDataException)) {
+                throw classified; // a sender failure, not this record's
+            }
+            throw new InvalidDataException("Cannot write enrichment column '" + column + "': " + e.getMessage()
+                    + ". If this record or an earlier row of the table has a field of that name, rename the value"
+                    + " column in " + QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG + " with an alias", e);
+        }
+    }
+
+    /** Writes a value with the type the lookup query returned it in; see LookupEnrichment.Loader. */
+    private void writeEnrichment(String column, byte wireType, Object value) {
+        switch (wireType) {
+            case QwpConstants.TYPE_BOOLEAN:
+                sender.boolColumn(column, (Boolean) value);
+                break;
+            case QwpConstants.TYPE_BYTE:
+                sender.byteColumn(column, (Byte) value);
+                break;
+            case QwpConstants.TYPE_SHORT:
+                sender.shortColumn(column, (Short) value);
+                break;
+            case QwpConstants.TYPE_INT:
+                sender.intColumn(column, (Integer) value);
+                break;
+            case QwpConstants.TYPE_LONG:
+                sender.longColumn(column, (Long) value);
+                break;
+            case QwpConstants.TYPE_TIMESTAMP:
+                sender.timestampColumn(column, (Long) value, ChronoUnit.MICROS);
+                break;
+            case QwpConstants.TYPE_TIMESTAMP_NANOS:
+                sender.timestampColumn(column, (Long) value, ChronoUnit.NANOS);
+                break;
+            case QwpConstants.TYPE_FLOAT:
+                sender.floatColumn(column, (Float) value);
+                break;
+            case QwpConstants.TYPE_DOUBLE:
+                sender.doubleColumn(column, (Double) value);
+                break;
+            case QwpConstants.TYPE_CHAR:
+                sender.charColumn(column, (Character) value);
+                break;
+            case QwpConstants.TYPE_VARCHAR:
+                sender.stringColumn(column, (String) value);
+                break;
+            default:
+                sender.symbol(column, (String) value);
+                break;
+        }
     }
 
     boolean handle(SinkRecord record) {
@@ -410,6 +623,9 @@ final class RecordToRowHandler {
             return handleRawJson(record, (byte[]) value);
         }
         assert timestampColumnValue == Long.MIN_VALUE;
+        // A failed record can leave its key captured, so every record starts by clearing it.
+        enrichmentKey = null;
+        enrichmentKeyUnusable = false;
 
         // Clear composed timestamp values from any previous failed record
         if (composedTimestampValues != null) {
@@ -453,6 +669,7 @@ final class RecordToRowHandler {
                             + " with the configured format '" + config.getTimestampFormat() + "'", e);
                 }
             }
+            stampEnrichment();
         } catch (InvalidDataException | LineSenderException ex) {
             // the handler is reused for every record: a row that failed after its
             // designated timestamp was parsed must not hand it to the next record
@@ -578,6 +795,16 @@ final class RecordToRowHandler {
         if (value == null) {
             return;
         }
+        if (isEnrichmentKeyField(name, schema, value, fallbackName)) {
+            // capturing does not consume the field: it is still written as a column below
+            CharSequence keyText = symbolText(schema, value);
+            if (keyText == null) {
+                enrichmentKey = null;
+                enrichmentKeyUnusable = true;
+            } else {
+                enrichmentKey = keyText.toString();
+            }
+        }
         if (!symbolColumns.isEmpty()) {
             String symbolName = (name.isEmpty() ? fallbackName : name).replace('.', '_');
             if (symbolColumns.contains(symbolName)) {
@@ -598,6 +825,17 @@ final class RecordToRowHandler {
             return;
         }
         writePhysicalTypeWithoutSchema(name, value, fallbackName);
+    }
+
+    /** True when the value is written as the column enrichment.key.field names, or would be if its type were supported. */
+    private boolean isEnrichmentKeyField(String name, Schema schema, Object value, String fallbackName) {
+        if (!name.isEmpty()) {
+            return name.equals(enrichmentKeyField);
+        }
+        // A key or value under an empty prefix is written as the column 'key' or 'value', unless
+        // it is flattened: then its fields are the columns and the fallback names none of them.
+        return fallbackName.equals(enrichmentKeyField)
+                && !(schema == null ? value instanceof Map : schema.type() == Schema.Type.STRUCT);
     }
 
     private long resolveDesignatedTimestampColumnValue(Object value, Schema schema) {

@@ -1,5 +1,6 @@
 package io.questdb.kafka;
 
+import io.questdb.client.cutlass.qwp.protocol.QwpConstants;
 import org.apache.kafka.connect.json.JsonConverter;
 import org.apache.kafka.connect.runtime.AbstractStatus;
 import org.apache.kafka.connect.runtime.ConnectorConfig;
@@ -10,6 +11,7 @@ import org.apache.kafka.connect.util.clusters.EmbeddedConnectCluster;
 import org.awaitility.Awaitility;
 import org.testcontainers.containers.GenericContainer;
 
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,6 +25,13 @@ import static org.apache.kafka.connect.runtime.ConnectorConfig.VALUE_CONVERTER_C
 import static org.junit.jupiter.api.Assertions.fail;
 
 public final class ConnectTestUtils {
+    /** Wire types for n enrichment value columns that are all SYMBOL. */
+    static byte[] symbols(int n) {
+        byte[] types = new byte[n];
+        Arrays.fill(types, QwpConstants.TYPE_SYMBOL);
+        return types;
+    }
+
     public static final long CONNECTOR_START_TIMEOUT_MS = SECONDS.toMillis(60);
     public static final String CONNECTOR_NAME = "questdb-sink-connector";
     private static final AtomicInteger ID_GEN = new AtomicInteger(0);

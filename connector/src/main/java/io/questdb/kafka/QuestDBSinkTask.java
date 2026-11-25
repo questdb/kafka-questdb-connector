@@ -28,9 +28,9 @@ public final class QuestDBSinkTask extends SinkTask {
     public void start(Map<String, String> props) {
         QuestDBSinkConnectorConfig config = new QuestDBSinkConnectorConfig(props);
         String confStr = ClientConfUtils.resolveConfString(config);
-        delegate = confStr != null && ClientConfUtils.isQwp(confStr)
-                ? newQwpDelegate()
-                : new LegacyQuestDBSinkTask();
+        boolean qwp = confStr != null && ClientConfUtils.isQwp(confStr);
+        QuestDBSinkConnectorConfig.validateEnrichment(config.getEnrichmentSql(), config.getEnrichmentKeyField(), !qwp);
+        delegate = qwp ? newQwpDelegate() : new LegacyQuestDBSinkTask();
         delegate.initialize(context);
         delegate.start(props);
     }

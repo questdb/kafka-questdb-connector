@@ -74,6 +74,14 @@ public final class QuestDBSinkConnector extends SinkConnector {
         }
         // Environment-only configuration is resolved on the worker running the task.
         String confString = connectorConfigs.get(QuestDBSinkConnectorConfig.CONFIGURATION_STRING_CONFIG);
+        ConfigValue enrichmentSql = configValue(result, QuestDBSinkConnectorConfig.ENRICHMENT_SQL_CONFIG);
+        try {
+            QuestDBSinkConnectorConfig.validateEnrichment((String) enrichmentSql.value(),
+                    (String) configValue(result, QuestDBSinkConnectorConfig.ENRICHMENT_KEY_FIELD_CONFIG).value(),
+                    isKnownNonQwp(confString, connectorConfigs.get(QuestDBSinkConnectorConfig.HOST_CONFIG), env));
+        } catch (ConfigException e) {
+            enrichmentSql.addErrorMessage(e.getMessage());
+        }
         if (confString != null) {
             try {
                 ClientConfUtils.validateConfString(confString.trim(), connectorConfigs);
@@ -82,6 +90,24 @@ public final class QuestDBSinkConnector extends SinkConnector {
             }
         }
         return result;
+    }
+
+    /**
+     * Whether the task will use a legacy transport, as far as this worker can tell. Like the rest
+     * of validate(), it takes this worker's environment to be the task's: with neither
+     * client.conf.string nor QDB_CLIENT_CONF set, the task uses the deprecated host option. The
+     * content of QDB_CLIENT_CONF is left to the task, as its validation is.
+     */
+    private static boolean isKnownNonQwp(String confString, String host, Function<String, String> env) {
+        if (blankToNull(confString) == null) {
+            // no connection at all is reported as such by validateClientConfiguration
+            return blankToNull(host) != null && blankToNull(env.apply("QDB_CLIENT_CONF")) == null;
+        }
+        try {
+            return !ClientConfUtils.isQwp(ConfStringEnvInterpolator.expand(confString.trim(), env));
+        } catch (ConfigException e) {
+            return false; // not expandable on this worker; reported above or left to the task
+        }
     }
 
     private static String blankToNull(String value) {
